@@ -129,10 +129,10 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     ),
   },
   email: {
-    label: "Email",
+    label: "Notifications",
     remountOnPlace: false,
     render: placed(() =>
-      import("@/views/WorkspaceEmail").then((module) => ({ default: module.WorkspaceEmail })),
+      import("@/views/WorkspaceNotifications").then((module) => ({ default: module.WorkspaceNotifications })),
     ),
   },
 };

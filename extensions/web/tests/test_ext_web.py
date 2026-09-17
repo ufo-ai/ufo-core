@@ -15,6 +15,7 @@ from contextlib import (
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 from typing import cast, get_args
@@ -41,6 +42,7 @@ from ufo_ext_context_rollover.manifest import manifest as rollover_manifest
 from ufo_ext_context_rollover.rollover import ROLLOVER_PREFIX
 from ufo_ext_imessage.manifest import manifest as imessage_manifest
 from ufo_ext_index_default import DefaultIndex
+from ufo_ext_lifecycle_email.preference import PRODUCT_EMAIL_TOOL
 from ufo_ext_report_digest.manifest import manifest as report_digest_manifest
 from ufo_ext_report_digest.writer import report_digest_entry
 from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
@@ -285,6 +287,7 @@ from ufo.schema.records import (
     Usage,
 )
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
+from ufo.sdk.email import EmailSends
 from ufo.sdk.jobs import unseeded_agent_workspaces
 from ufo.sdk.manifest import (
     SCHEDULE_KIND,
@@ -14412,3 +14415,54 @@ async def test_a_shared_file_streams_before_the_turn_ends(
     assert [file["filename"] for file in files] == ["world-clock-wireframe.svg"]
     assert files[0]["preview_url"].startswith("https://web/artifacts/")
     assert "&preview=" in files[0]["preview_url"]
+
+
+@pytest.fixture
+async def product_email_control(monkeypatch: pytest.MonkeyPatch) -> None:
+    def gateway(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "topics": [
+                    {
+                        "topic": "product_news",
+                        "silenced": request.url.path.endswith("/off@acme.com"),
+                    }
+                ],
+            },
+        )
+
+    email = EmailSends(
+        base_url="https://control.test", token="test-token", transport=httpx.MockTransport(gateway)
+    )
+    monkeypatch.setitem(
+        globals(), "_mount_shared_surfaces", partial(_mount_shared_surfaces, email=email)
+    )
+    manifest = web_manifest()
+    monkeypatch.setitem(
+        globals(),
+        "web_manifest",
+        lambda: replace(manifest, tools=(*manifest.tools, PRODUCT_EMAIL_TOOL)),
+    )
+
+
+@pytest.mark.usefixtures("database_url", "product_email_control")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_notifications_read_own_email_preference_and_team_omits_its_action(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, _agent_id = web
+    for address, receiving in (("off@acme.com", False), ("on@acme.com", True)):
+        _member_id, token = await _seed_member(workspace_id, address)
+        cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+        profile = await client.get("/surface/web/workspace/email", headers=cookie)
+        assert profile.status_code == 200
+        assert profile.json()["topics"] == [{"topic": "product_news", "receiving": receiving}]
+        action = next(
+            view for view in profile.json()["actions"] if view["name"] == "set_product_email"
+        )
+        assert action["call"] == {"kind": "member", "action": "set_product_email", "input": {}}
+        team = await client.get("/surface/web/workspace/team", headers=cookie)
+        assert team.status_code == 200
+        assert "set_product_email" not in {view["name"] for view in team.json()["actions"]}
+    assert (await client.get("/surface/web/workspace/profile")).status_code == 401

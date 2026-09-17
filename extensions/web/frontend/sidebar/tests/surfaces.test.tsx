@@ -47,7 +47,7 @@ test("the settings row opens the first workspace tab the member is drawn", async
   expect(await screen.findByRole("tab", { name: "Apps" })).toBeTruthy();
 });
 
-test("the email tab is withheld where the deploy sends none", async () => {
+test("the notifications tab is withheld where the deploy sends none", async () => {
   location.hash = "#/workspace/apps";
   render(
     <App
@@ -59,7 +59,7 @@ test("the email tab is withheld where the deploy sends none", async () => {
   );
 
   expect(await screen.findByRole("tab", { name: "Apps" })).toBeTruthy();
-  expect(screen.queryByRole("tab", { name: "Email" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Notifications" })).toBeNull();
 });
 
 test("the radar row and its palette place are withheld with the flag off", async () => {

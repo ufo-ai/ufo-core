@@ -31,7 +31,7 @@ const SET_PRODUCT_EMAIL = {
 const LANE =
   "/surface/web/agents/" + AGENT_ID + "/actions/member/set_product_email";
 
-function emailTab(routes: Record<string, Route>) {
+function notificationsTab(routes: Record<string, Route>) {
   const wired = wire(routes);
   render(
     <WorkspaceId.Provider value={WORKSPACE}>
@@ -53,17 +53,17 @@ const RECEIVING = {
 };
 
 test("the page states the address the setting belongs to, and that notices are not a choice", async () => {
-  emailTab({ "/workspace/email": () => json(RECEIVING) });
+  notificationsTab({ "/workspace/email": () => json(RECEIVING) });
 
   expect(await screen.findByText(ADDRESS)).toBeTruthy();
   expect(screen.getByText("Product email")).toBeTruthy();
-  expect(screen.getByText("Workspace notices")).toBeTruthy();
+  expect(screen.getByText("Account and billing")).toBeTruthy();
   expect(screen.getByText("Always on")).toBeTruthy();
 });
 
 test("turning product email off posts the member action and reads the answer back", async () => {
   let held = RECEIVING;
-  const wired = emailTab({
+  const wired = notificationsTab({
     "/workspace/email": () => json(held),
     [LANE]: () => {
       held = {
@@ -77,7 +77,7 @@ test("turning product email off posts the member action and reads the answer bac
     },
   });
 
-  const off = await screen.findByRole("radio", { name: "Off" });
+  const off = await screen.findByRole("checkbox", { name: "Product email" });
   await userEvent.click(off);
 
   await waitFor(() => {
@@ -91,42 +91,45 @@ test("turning product email off posts the member action and reads the answer bac
   });
   await waitFor(() => {
     expect(
-      (screen.getByRole("radio", { name: "Off" }) as HTMLElement).dataset.state,
-    ).toBe("on");
+      (screen.getByRole("checkbox", { name: "Product email" }) as HTMLInputElement).checked,
+    ).toBe(false);
   });
 });
 
-test("every topic the read returns is drawn, and the founder one says where it is changed", async () => {
-  emailTab({
-    "/workspace/email": () =>
-      json({
-        ...RECEIVING,
-        topics: [
-          { topic: "product_news", receiving: true },
-          { topic: "founder_updates", receiving: false },
-        ],
-      }),
-  });
+test("the founder mailing list is absent from notification settings", async () => {
+  notificationsTab({ "/workspace/email": () => json(RECEIVING) });
 
-  expect(await screen.findByText("Founder updates")).toBeTruthy();
-  expect(
-    screen.getByText(
-      "Off. Use the unsubscribe link in the email to change this.",
-    ),
-  ).toBeTruthy();
-  expect(screen.getAllByRole("radio", { name: "On" }).length).toBe(1);
+  expect(await screen.findByRole("checkbox", { name: "Product email" })).toBeTruthy();
+  expect(screen.queryByText("Founder updates")).toBeNull();
+  expect(screen.queryByText(/unsubscribe/)).toBeNull();
+  expect(screen.getAllByRole("checkbox").length).toBe(1);
 });
+
 
 test("a deploy that sends no email offers nothing to set", async () => {
-  emailTab({
+  notificationsTab({
     "/workspace/email": () =>
       json({ address: ADDRESS, topics: [], actions: [] }),
   });
 
   expect(
     await screen.findByText(
-      "This deploy sends no email, so there is nothing to set.",
+      "Email is not available.",
     ),
   ).toBeTruthy();
-  expect(screen.queryByRole("radio", { name: "Off" })).toBeNull();
+  expect(screen.queryByRole("checkbox")).toBeNull();
+});
+
+
+test("the tab is Notifications and a failed save restores the stored checkbox", async () => {
+  notificationsTab({
+    "/workspace/email": () => json(RECEIVING),
+    [LANE]: () => json({ applied: false, message: "Could not save." }),
+  });
+  const checkbox = await screen.findByRole("checkbox", { name: "Product email" }) as HTMLInputElement;
+  expect(screen.getByRole("heading", { name: "Notifications" })).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Email" })).toBeNull();
+  await userEvent.click(checkbox);
+  await screen.findByText("Could not save.");
+  expect(checkbox.checked).toBe(true);
 });

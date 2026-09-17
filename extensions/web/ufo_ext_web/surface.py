@@ -4101,6 +4101,9 @@ async def workspace_email(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
+PRODUCT_EMAIL_ACTION = "set_product_email"
+
+
 async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
     """The workspace roster: who the members are, what each is called, which of them administer the
     workspace, and whose access is live — the same rows the `member` kind lists to a member asking
@@ -4126,7 +4129,13 @@ async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
                 for entry in await ctx.list_members()
             ],
             "can_manage": audience.admin,
-            "actions": _action_payloads(ctx.object_actions(MEMBER_KIND, "collection")),
+            "actions": _action_payloads(
+                tuple(
+                    action
+                    for action in ctx.object_actions(MEMBER_KIND, "collection")
+                    if action.name != PRODUCT_EMAIL_ACTION
+                )
+            ),
         }
     )
 

@@ -315,15 +315,15 @@ test("no app control is drawn while the flag withholds apps", async () => {
   expect(screen.queryByRole("button", { name: "New app" })).toBeNull();
 });
 
-test("a deploy with no send seam loses the email tab, and one that sends keeps it", async () => {
+test("a deploy with no send seam loses the notifications tab, and one that sends keeps it", async () => {
   location.hash = "#/workspace/usage";
   render(<App agents={[AGENT]} member={MEMBER} surfaces={WITHHELD} onAgents={() => {}} />);
 
   await waitFor(() => expect(screen.queryByRole("tab", { name: "Usage" })).toBeTruthy());
-  expect(screen.queryByRole("tab", { name: "Email" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Notifications" })).toBeNull();
 });
 
-test("a deploy that sends offers the email tab", async () => {
+test("a deploy that sends offers the notifications tab", async () => {
   location.hash = "#/workspace/usage";
   render(
     <App
@@ -334,5 +334,5 @@ test("a deploy that sends offers the email tab", async () => {
     />,
   );
 
-  await waitFor(() => expect(screen.queryByRole("tab", { name: "Email" })).toBeTruthy());
+  await waitFor(() => expect(screen.queryByRole("tab", { name: "Notifications" })).toBeTruthy());
 });
