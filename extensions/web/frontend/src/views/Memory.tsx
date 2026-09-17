@@ -1,18 +1,17 @@
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Filter } from "@/components/ui/filter";
 import { Sheet } from "@/components/ui/sheet";
-import { Td } from "@/components/ui/table";
+import { Td, TdFill } from "@/components/ui/table";
 import { ActionForm } from "@/kernel/action";
-import { Pager, type Placement } from "@/kernel/pager";
+import { type Placement } from "@/kernel/pager";
 import { PageToolbar, usePageSearch } from "@/kernel/pane";
 import { Panel, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
 import { DataTable, type Column } from "@/kernel/table";
 import { cn } from "@/lib/cn";
 import { Moment } from "@/lib/moments";
 import { postAction } from "@/lib/api";
-import { subjectLabel } from "@/lib/audience";
+import { ShareMark } from "@/lib/chatMark";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { ActionView } from "@/lib/types";
 
@@ -26,7 +25,6 @@ type Match = {
 
 type MemoryPayload = {
   available: boolean;
-  kinds: string[];
   matches: Match[];
   actions: ActionView[];
   newer?: string | null;
@@ -38,15 +36,12 @@ const RECORD_CORRECTION_ACTION = "record_correction";
 const MEMORY_REF_PREFIX = "memory/";
 
 const COLUMNS: Column[] = [
-  "Memory",
-  { label: "Class", fact: true },
-  { label: "Audience", fact: true },
+  { label: "Memory", fill: true },
   { label: "Added", fact: true },
 ];
 
-function kindLabel(kind: string) {
-  return kind.charAt(0).toUpperCase() + kind.slice(1);
-}
+/** The statement is what the member came to read; the stamp beside it places it and recedes. */
+const FACT = "text-ink";
 
 function correctable(match: Match) {
   return typeof match.ref === "string" && match.ref.startsWith("memory/");
@@ -65,10 +60,7 @@ export function Memory({
 
   const params = new URLSearchParams();
   if (submitted) params.set("q", submitted);
-  else {
-    if (place.kind) params.set("kind", place.kind);
-    if (place.after) params.set("after", place.after);
-  }
+  else if (place.after) params.set("after", place.after);
   const search = params.toString();
   const state = usePanelRead<MemoryPayload>(
     "/workspace/memory" + (search ? "?" + search : ""),
@@ -81,23 +73,11 @@ export function Memory({
 
   useEffect(() => setCorrecting(null), [submitted]);
 
-  const kinds = state.phase === "ready" ? state.payload.kinds : [];
   const box = usePageSearch();
-  const narrowing = !submitted && kinds.length > 0;
 
   return (
     <>
-      {box || narrowing ? (
-        <PageToolbar>
-          {narrowing ? (
-            <Filter
-              options={kinds.map((kind) => ({ label: kindLabel(kind), value: kind }))}
-              value={place.kind ?? ""}
-              onChange={(kind) => onPlace({ kind: kind || undefined, after: undefined })}
-            />
-          ) : null}
-        </PageToolbar>
-      ) : null}
+      {box ? <PageToolbar /> : null}
       <Section>
         <Panel
           state={state}
@@ -118,36 +98,32 @@ export function Memory({
           }
         >
           {(payload) => {
-            const note = submitted
-              ? "No matches."
-              : place.kind
-                ? payload.kinds.includes(place.kind)
-                  ? "No memories of this kind on this page."
-                  : "That memory class is not available."
-                : undefined;
-            const listed = Boolean(payload.matches.length || note);
+            const note = submitted ? "No matches." : undefined;
             return (
-              <>
-                <DataTable
-                  columns={COLUMNS}
-                  rows={payload.matches}
-                  rowKey={(match) => match.ref ?? match.text}
-                  empty="No memories yet."
-                  note={note}
-                  open={(match) => (correctable(match) ? () => setCorrecting(match) : null)}
-                  act={(match) => (correctable(match) ? "Edit" : null)}
-                >
-                  {(match) => (
-                    <>
-                      <Td>{match.text}</Td>
-                      <Td>{kindLabel(match.kind)}</Td>
-                      <Td>{subjectLabel(match.subject)}</Td>
-                      <Td>{match.created_at ? <Moment at={match.created_at} /> : "—"}</Td>
-                    </>
-                  )}
-                </DataTable>
-                {submitted || !listed ? null : <Pager payload={payload} onPlace={onPlace} />}
-              </>
+              <DataTable
+                columns={COLUMNS}
+                rows={payload.matches}
+                rowKey={(match) => match.ref ?? match.text}
+                lede
+                empty="No memories yet."
+                note={note}
+                open={(match) => (correctable(match) ? () => setCorrecting(match) : null)}
+                pager={submitted ? undefined : { payload, after: place.after, onPlace }}
+              >
+                {(match) => (
+                  <>
+                    <TdFill className={FACT}>
+                      <span className="flex min-w-0 items-center gap-sm">
+                        <span className="truncate">{match.text}</span>
+                        <span className="ml-auto flex shrink-0 items-center">
+                          <ShareMark subject={match.subject} />
+                        </span>
+                      </span>
+                    </TdFill>
+                    <Td>{match.created_at ? <Moment at={match.created_at} /> : "—"}</Td>
+                  </>
+                )}
+              </DataTable>
             );
           }}
         </Panel>

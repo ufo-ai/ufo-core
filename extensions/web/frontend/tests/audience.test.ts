@@ -5,7 +5,6 @@ import {
   audienceDetail,
   audienceLabel,
   ownerLabel,
-  subjectLabel,
   surfaceWord,
 } from "@/lib/audience";
 
@@ -32,10 +31,6 @@ test("an audience reads as who may see it, and the viewer's own is not named twi
 
 test("an audience the map does not know reads as Unknown, never as nothing", () => {
   expect(audienceLabel({ audience: "queue:q1", member_email: null }, VIEWER)).toBe("Unknown");
-  expect(subjectLabel("queue:q1")).toBe("Unknown");
-  expect(subjectLabel(null)).toBe("Unknown");
-  expect(subjectLabel("shared")).toBe("Workspace");
-  expect(subjectLabel("member:m1")).toBe("Only you");
 });
 
 test("the detail names the readers and states what an admin can still do", () => {

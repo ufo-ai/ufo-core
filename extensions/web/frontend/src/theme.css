@@ -1056,12 +1056,20 @@ body[data-shell="sidebar"] {
 }
 
 @media (width < theme(--breakpoint-narrow)) {
-  /* A row is its first cell alone: the floor is the sum of tracks the phone no longer draws. */
+  /* A row is the record's name and whatever acts on it. The name is cut to the width the dropped
+     columns leave, because a name that sets the table's width puts the act off the screen. */
   [data-slot="table"][data-lede] {
     min-width: 0;
 
-    & :where(th, td):not(:first-child) {
+    & :where(th, td):not(:first-child):not([data-acts]) {
       display: none;
+    }
+
+    & > :where(thead, tbody) > tr > :where(th, td):first-child {
+      width: 100%;
+      max-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
   }
 

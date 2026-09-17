@@ -65,7 +65,7 @@ export function FaceCircle({
 }: {
   name: string;
   photo: string | null;
-  tint: string;
+  tint: string | null;
   title?: string;
   stacked?: boolean;
   className?: string;
@@ -74,19 +74,29 @@ export function FaceCircle({
   return (
     <Avatar title={title} stacked={stacked} className={className} style={style}>
       {photo ? <AvatarImage src={photo} alt="" /> : null}
-      <AvatarFallback aria-hidden person className={memberTint(tint)}>
+      <AvatarFallback aria-hidden person className={tint === null ? undefined : memberTint(tint)}>
         {initialsOf(name)}
       </AvatarFallback>
     </Avatar>
   );
 }
 
-export function MemberAvatar({ face, className }: { face: MemberFace; className?: string }) {
+/** `plain` is the listing column's circle: the picture where the member has one, and one ink where
+ *  they do not, because a column of tinted circles reads as a status the member does not have. */
+export function MemberAvatar({
+  face,
+  className,
+  plain = false,
+}: {
+  face: MemberFace;
+  className?: string;
+  plain?: boolean;
+}) {
   return (
     <FaceCircle
       name={faceName(face)}
       photo={photoAddress(face.photo_url)}
-      tint={face.email}
+      tint={plain ? null : face.email}
       className={className}
     />
   );

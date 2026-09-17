@@ -747,52 +747,6 @@ test("a refused memory cursor leaves a way back to the first page", async () => 
   expect(await screen.findByText("No memories yet.")).toBeTruthy();
 });
 
-test("a hash naming a memory class that does not exist says so", async () => {
-  location.hash = workspaceHash("memory", { kind: "nonexistent" });
-  serve();
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  expect(await screen.findByText("That memory class is not available.")).toBeTruthy();
-});
-
-test("a memory search and kind filter ride the hash and survive reload", async () => {
-  location.hash = workspaceHash("memory");
-  const calls = serve();
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  await userEvent.click(await screen.findByRole("tab", { name: "Fact" }));
-  expect(location.hash).toBe("#/workspace/memory?kind=fact");
-  await waitFor(() => expect(calls.some((url) => url.includes("kind=fact"))).toBe(true));
-
-  await userEvent.type(screen.getByPlaceholderText("Search"), "roadmap{Enter}");
-  expect(location.hash).toBe("#/workspace/memory?kind=fact&q=roadmap");
-  await waitFor(() => expect(calls.some((url) => url.includes("q=roadmap"))).toBe(true));
-});
-
-test("a reloaded kind filter lands on that kind and reads it", async () => {
-  location.hash = workspaceHash("memory", { kind: "fact" });
-  const calls = serve();
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  const tab = await screen.findByRole("tab", { name: "Fact" });
-  expect(tab.getAttribute("aria-selected")).toBe("true");
-  expect(screen.getByRole("tab", { name: "All" }).getAttribute("aria-selected")).toBe("false");
-  expect(calls.some((url) => url.includes("/workspace/memory?kind=fact"))).toBe(true);
-});
-
-test("a search cleared from a kind returns to that kind rather than page one", async () => {
-  location.hash = workspaceHash("memory", { kind: "fact", q: "roadmap" });
-  serve();
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  const box = (await screen.findByPlaceholderText("Search")) as HTMLInputElement;
-  expect(box.value).toBe("roadmap");
-  await userEvent.clear(box);
-  await userEvent.type(box, "{Enter}");
-
-  await waitFor(() => expect(location.hash).toBe("#/workspace/memory?kind=fact"));
-  expect(screen.getByRole("tab", { name: "Fact" }).getAttribute("aria-selected")).toBe("true");
-});
-
 test("a reloaded memory search prefills the box and fetches the query", async () => {
   location.hash = workspaceHash("memory", { q: "roadmap" });
   const calls = serve();

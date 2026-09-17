@@ -1,8 +1,9 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
+import { newChatHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -55,6 +56,15 @@ const MINE_DETAIL = {
 const NO_COMMUNITY = { "/skills/community": () => json({ skills: [] }) };
 const MINE_OBJECT = { "/objects/skill/mine": () => json(MINE_DETAIL) };
 
+function pickFile(name: string, body: string) {
+  const input = screen.getByTestId("skill-upload") as HTMLInputElement;
+  Object.defineProperty(input, "files", {
+    configurable: true,
+    value: [new File([body], name, { type: "text/markdown" })],
+  });
+  fireEvent.change(input);
+}
+
 function renderSkills() {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 }
@@ -63,7 +73,7 @@ async function openInstalled() {
   await userEvent.click(await screen.findByRole("tab", { name: "Installed" }));
 }
 
-test("the workspace skills page renders items as a list, without a picker or a table's chrome", async () => {
+test("the workspace skills page renders its records as a table, without a picker", async () => {
   wire({
     ...NO_COMMUNITY,
     "/skills": () => json({ skills: [...SKILLS, { ...SKILLS[0], name: "second" }] }),
@@ -76,10 +86,17 @@ test("the workspace skills page renders items as a list, without a picker or a t
   const panel = within(screen.getByRole("main"));
   expect(panel.queryByRole("combobox", { name: "App" })).toBeNull();
   expect(panel.queryByRole("button", { name: "Refresh" })).toBeNull();
-  expect(panel.queryByRole("columnheader")).toBeNull();
-  expect(document.querySelector('[data-part="mark"]')).toBeNull();
-  const group = screen.getByText("mine").closest("ul") as HTMLElement;
-  expect(group.querySelectorAll("li[aria-hidden]").length).toBe(1);
+  expect(panel.getAllByRole("columnheader").map((head) => head.textContent)).toEqual([
+    "Skill",
+    "Instructions",
+    "",
+  ]);
+  expect(
+    panel
+      .getAllByRole("row")
+      .slice(1)
+      .map((row) => within(row).getAllByRole("cell")[0]?.textContent),
+  ).toEqual(["mine", "second"]);
 });
 
 test("the app's own panel offers no skills read", async () => {
@@ -150,12 +167,26 @@ test("the list holds the member's skills and leaves the built-in ones out", asyn
   await openInstalled();
 
   expect(await screen.findByText("mine")).toBeTruthy();
-  const names = [...document.querySelectorAll('[data-part="primary"]')].map(
-    (node) => node.textContent,
-  );
-  expect(names).toEqual(["mine"]);
-  expect(screen.getByText("mine").closest("li")?.textContent).toContain("member skill");
+  const rows = within(screen.getByRole("main")).getAllByRole("row").slice(1);
+  expect(rows.map((row) => within(row).getAllByRole("cell")[0]?.textContent)).toEqual(["mine"]);
+  expect(within(rows[0]).getAllByRole("cell")[1]?.textContent).toBe("Write tersely.");
+  expect(screen.queryByText("member skill")).toBeNull();
   expect(within(screen.getByRole("main")).getByRole("tab", { name: "Community" })).toBeTruthy();
+});
+
+test("the preview closes up the workflow's line breaks so the cell reads as one line", async () => {
+  const wordy = {
+    ...SKILLS[0],
+    instructions: "Read the merged pull requests.\n\nGroup them by area,\nand lead with the verb.",
+  };
+  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: [wordy] }) });
+  renderSkills();
+  await openInstalled();
+
+  const row = (await screen.findByText("mine")).closest("tr") as HTMLElement;
+  expect(within(row).getAllByRole("cell")[1]?.textContent).toBe(
+    "Read the merged pull requests. Group them by area, and lead with the verb.",
+  );
 });
 
 test("a workspace of built-in skills alone draws the blank", async () => {
@@ -167,35 +198,179 @@ test("a workspace of built-in skills alone draws the blank", async () => {
   expect(screen.queryByText("shipped")).toBeNull();
 });
 
-test("New skill posts the prepared skill intent for the main agent", async () => {
-  const posted: { url: string; body: unknown }[] = [];
+test("New skill stands beside the search and offers the two ways to make one", async () => {
+  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: [] }) });
+  renderSkills();
+
+  const trigger = await screen.findByRole("button", { name: /New skill/ });
+  const toolbar = trigger.closest("div")?.parentElement as HTMLElement;
+  expect(within(toolbar).getByPlaceholderText("Search")).toBeTruthy();
+
+  await userEvent.click(trigger);
+  expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+    "Create from chat",
+    "Upload .md skill",
+  ]);
+});
+
+test("Create from chat opens a new chat on the main agent and sends nothing", async () => {
+  const { calls } = wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: [] }) });
+  renderSkills();
+
+  await userEvent.click(await screen.findByRole("button", { name: /New skill/ }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Create from chat" }));
+
+  expect(location.hash).toBe(newChatHash(AGENT.id));
+  expect(calls.some((url) => url.includes("/chat"))).toBe(false);
+});
+
+test("an uploaded .md is saved under the name its frontmatter states, and says so", async () => {
+  const posted: unknown[] = [];
   wire({
     ...NO_COMMUNITY,
     "/skills": () => json({ skills: [] }),
-    "/intents": (url, init) => {
-      posted.push({ url, body: JSON.parse(String(init?.body)) });
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Saved." });
     },
   });
   renderSkills();
 
-  await userEvent.click(await screen.findByRole("button", { name: "New skill" }));
-  await userEvent.type(await screen.findByLabelText("Name"), "fresh");
-  await userEvent.type(screen.getByLabelText("Description"), "Load when asked.");
-  await userEvent.type(screen.getByLabelText("Instructions"), "body");
-  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await screen.findByRole("button", { name: /New skill/ });
+  const document = '---\nname: release-notes\ndescription: "Load when asked."\n---\n\nRead the tags.\n';
+  pickFile("Release Notes.md", document);
 
   await waitFor(() => expect(posted.length).toBe(1));
-  expect(posted[0].url).toContain(AGENT.id);
-  expect(posted[0].body).toEqual({
+  expect(posted[0]).toEqual({
     verb: "apply",
     kind: "skill",
-    name: "fresh",
-    spec: {
-      files: { "SKILL.md": '---\nname: fresh\ndescription: "Load when asked."\n---\n\nbody\n' },
-      pinned: false,
+    name: "release-notes",
+    spec: { files: { "SKILL.md": document }, pinned: false },
+    create_only: true,
+  });
+  expect(await screen.findByText("release-notes imported.")).toBeTruthy();
+});
+
+/** The directory's document would overwrite whatever the member has since made of the skill, so a
+ *  name the workspace already holds does not open the review at all. */
+test("a community skill the workspace already holds cannot be installed over", async () => {
+  wire({
+    "/skills": () => json({ skills: SKILLS }),
+    "/skills/community": () =>
+      json({ skills: [{ name: "mine", source: "acme/skills", installs: 12 }] }),
+  });
+  renderSkills();
+
+  const row = (await screen.findByText("mine")).closest("tr") as HTMLElement;
+  expect(row.textContent).toContain("Installed");
+  expect(row.getAttribute("role")).toBeNull();
+  expect(row.getAttribute("tabindex")).toBeNull();
+
+  await userEvent.click(row);
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+test("an .md naming no skill is refused here, because the save parses the name against the file", async () => {
+  const posted: unknown[] = [];
+  wire({
+    ...NO_COMMUNITY,
+    "/skills": () => json({ skills: [] }),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Saved." });
     },
   });
+  renderSkills();
+
+  await screen.findByRole("button", { name: /New skill/ });
+  pickFile("Weekly Digest.md", "Just a body, no frontmatter.\n");
+
+  expect(
+    await screen.findByText(
+      "A skill file opens with a frontmatter block naming it: --- then name: my-skill.",
+    ),
+  ).toBeTruthy();
+  expect(posted).toEqual([]);
+});
+
+test("an .md that would not fit one intent body is refused here, not 413'd at the far end", async () => {
+  const posted: unknown[] = [];
+  wire({
+    ...NO_COMMUNITY,
+    "/skills": () => json({ skills: [] }),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Saved." });
+    },
+  });
+  renderSkills();
+
+  await screen.findByRole("button", { name: /New skill/ });
+  pickFile("huge.md", "-".repeat(64 * 1024 + 1));
+
+  expect(await screen.findByText("A skill file is at most 64 KB.")).toBeTruthy();
+  expect(posted).toEqual([]);
+});
+
+/** 40 KB of quotes is under the size the picker is held to and over the size the body admits once
+ *  each one is escaped, which is why the bound is taken on what crosses rather than on the file. */
+test("an .md the size guard admits but JSON escaping grows past the body is still refused", async () => {
+  const posted: unknown[] = [];
+  wire({
+    ...NO_COMMUNITY,
+    "/skills": () => json({ skills: [] }),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Saved." });
+    },
+  });
+  renderSkills();
+
+  await screen.findByRole("button", { name: /New skill/ });
+  const quoted = '---\nname: quoted\n---\n\n' + '"'.repeat(40 * 1024);
+  expect(quoted.length).toBeLessThan(64 * 1024);
+  pickFile("quoted.md", quoted);
+
+  expect(await screen.findByText("A skill file is at most 64 KB.")).toBeTruthy();
+  expect(posted).toEqual([]);
+});
+
+/** An apply carries the whole file set and no generation, so landing one SKILL.md on a held name
+ *  would drop the files bundled beside it and clear its pin, with nothing to undo it. */
+test("an upload naming a skill the workspace already holds is refused before it can replace it", async () => {
+  const posted: unknown[] = [];
+  wire({
+    ...NO_COMMUNITY,
+    "/skills": () => json({ skills: SKILLS }),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Saved." });
+    },
+  });
+  renderSkills();
+  await openInstalled();
+
+  await screen.findByText("mine");
+  pickFile("mine.md", "---\nname: mine\n---\n\nSomething else entirely.\n");
+
+  expect(
+    await screen.findByText("mine is already saved. Open it to change what it says."),
+  ).toBeTruthy();
+  expect(posted).toEqual([]);
+});
+
+test("an upload the save refuses says so and stays on the page", async () => {
+  wire({
+    ...NO_COMMUNITY,
+    "/skills": () => json({ skills: [] }),
+    "/intents": () => json({ applied: false, message: "A deploy skill owns that name." }),
+  });
+  renderSkills();
+
+  await screen.findByRole("button", { name: /New skill/ });
+  pickFile("release-notes.md", "---\nname: release-notes\n---\n\nbody\n");
+
+  expect(await screen.findByText("A deploy skill owns that name.")).toBeTruthy();
 });
 
 test("an edit carries the generation, the digests, the frontmatter metadata, and the pin", async () => {
@@ -267,9 +442,11 @@ test("Delete ends the skill through the intent lane", async () => {
   renderSkills();
   await openInstalled();
 
-  await userEvent.click(await screen.findByText("mine"));
-  await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
-  await userEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+  const row = (await screen.findByText("mine")).closest("tr") as HTMLElement;
+  await userEvent.click(within(row).getByRole("button", { name: "Actions for mine" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+  const asking = await screen.findByRole("dialog");
+  await userEvent.click(within(asking).getByRole("button", { name: "Delete" }));
 
   await waitFor(() => expect(posted).toEqual([{ verb: "delete", kind: "skill", name: "mine" }]));
   expect(await screen.findByText("Deleted.")).toBeTruthy();
@@ -297,13 +474,13 @@ test("the page's search narrows the skills the workspace holds", async () => {
 });
 
 test("the writing form opens in the shared sheet, and the address carries no half-written skill", async () => {
-  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }) });
+  wire({ ...NO_COMMUNITY, ...MINE_OBJECT, "/skills": () => json({ skills: SKILLS }) });
   renderSkills();
+  await openInstalled();
 
-  await userEvent.click(await screen.findByRole("button", { name: "New skill" }));
+  await userEvent.click(await screen.findByText("mine"));
 
-  const form = await screen.findByRole("dialog", { name: "New skill" });
-  expect(within(form).getByLabelText("Name")).toBeTruthy();
-  expect(within(form).getAllByRole("heading", { name: "New skill" }).length).toBe(1);
+  const form = await screen.findByRole("dialog", { name: "mine" });
+  expect((within(form).getByLabelText("Name") as HTMLInputElement).readOnly).toBe(true);
   expect(location.hash).toBe("#/workspace/skills");
 });

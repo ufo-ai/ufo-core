@@ -11,6 +11,7 @@ import { getJson } from "@/lib/api";
 import { Notice, OutcomeNotice, Panel, QUIET, Section, usePanelRead } from "@/kernel/panel";
 import { CardGrid } from "@/kernel/cards";
 import { DataTable } from "@/kernel/table";
+import { TdActs } from "@/components/ui/table";
 import { Clip, Lede, Table, Td, TdWhole, Th } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
@@ -450,6 +451,34 @@ function Listing({ path }: { path: string }) {
     </Panel>
   );
 }
+
+/** The phone rule keeps a row's acts by this mark, so the column the table draws itself and the one
+ *  a caller draws both have to carry it or an act goes off the side of a phone. */
+test("the acts a row carries name themselves, whichever column draws them", () => {
+  render(
+    <DataTable
+      columns={["name", { label: "", fact: true }]}
+      rows={[{ name: "one" }]}
+      rowKey={(row) => row.name}
+      empty="unreachable"
+      act={() => "Open"}
+    >
+      {(row) => (
+        <>
+          <Td>{row.name}</Td>
+          <TdActs>
+            <button type="button">Menu</button>
+          </TdActs>
+        </>
+      )}
+    </DataTable>,
+  );
+
+  const marked = [...window.document.querySelectorAll("[data-acts]")];
+  expect(marked.map((cell) => cell.tagName)).toEqual(["TH", "TD", "TD"]);
+  const row = screen.getByText("one").closest("tr") as HTMLTableRowElement;
+  expect([...row.cells].filter((cell) => cell.hasAttribute("data-acts")).length).toBe(2);
+});
 
 test("the fence discards a read the member superseded while the view stayed mounted", async () => {
   const pending = new Map<string, (value: Response) => void>();

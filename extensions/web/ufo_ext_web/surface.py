@@ -3431,12 +3431,10 @@ async def community_skill(ctx: SurfaceContext, request: Request) -> Response:
 async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response:
     """The member's memory across every agent they reach. With no query, one keyset page of the
     live items under the viewer's own subject plus shared, newest first — a listing, not a recall,
-    narrowable to an item class and walked by the page's own boundary cursors, so an item landing
-    mid-read shifts no boundary. With a query, one search per reachable agent unioned and deduped
+    walked by the page's own boundary cursors, so an item landing mid-read shifts no boundary.
+    With a query, one search per reachable agent unioned and deduped
     by ref: the reader contract stays per-agent, so source-page fencing becomes "any agent the
     member reaches" — live reachability, the same authority chat's tools exercise agent by agent.
-    The filter is the listing's alone: recall ranks by similarity and mixes in source pages, which
-    carry no item class to narrow on.
 
     Either shape carries the acts the memory collection presents, whose own schemas bound what a
     correction may run to; a deploy without memory answers the same fields, empty."""
@@ -3445,14 +3443,10 @@ async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response:
         return resolved
     member_id, _email, audience = resolved
     if not ctx.memory_available:
-        return JSONResponse({"available": False, "kinds": [], "matches": [], "actions": []})
+        return JSONResponse({"available": False, "matches": [], "actions": []})
     subjects = audience_subjects(conversation_audience(member_id))
     query = request.query_params.get("q", "").strip()
     if not query:
-        offered = ctx.memory_kinds
-        selected = request.query_params.get("kind", "").strip()
-        if selected and selected not in offered:
-            return Response("no such memory kind", status_code=400)
         raw_cursor = request.query_params.get("after", "").strip()
         cursor: ListingCursor | None = None
         if raw_cursor:
@@ -3460,18 +3454,11 @@ async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response:
                 cursor = ListingCursor.decode(raw_cursor)
             except MalformedCursor:
                 return Response("malformed listing cursor", status_code=400)
-        page = await ctx.recent_memory(
-            subjects,
-            MEMORY_RECENT_LIMIT,
-            frozenset({selected}) if selected else None,
-            cursor,
-        )
+        page = await ctx.recent_memory(subjects, MEMORY_RECENT_LIMIT, None, cursor)
         return JSONResponse(
             {
                 "available": True,
                 "matches": _memory_rows(page.rows),
-                "kinds": list(offered),
-                "kind": selected or None,
                 "older": None if page.older is None else page.older.encode(),
                 "newer": None if page.newer is None else page.newer.encode(),
                 "actions": _action_payloads(ctx.object_actions(MEMORY_KIND, "collection")),

@@ -101,7 +101,7 @@ export function Store({
         <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")}>
           <Section>
             <DataTable
-              columns={["Application", "Purpose", { label: "", fact: true }]}
+              columns={["Application", "Purpose", { label: "", acts: true }]}
               rows={listings(agents, archived)}
               rowKey={(row) => row.key}
               empty="No apps."

@@ -4204,14 +4204,6 @@ class SurfaceContext:
             raise RuntimeError("no memory-search provider is installed — gate on memory_available")
         return await self._memory.list_recent(subjects, limit, kinds, cursor)
 
-    @property
-    def memory_kinds(self) -> tuple[str, ...]:
-        """The item classes the installed provider writes — the closed set the portal's filter
-        offers, so a class the provider adds cannot go missing from it."""
-        if self._memory is None:
-            raise RuntimeError("no memory-search provider is installed — gate on memory_available")
-        return self._memory.listable_kinds()
-
     async def member_spend(self, member_id: UUID, window_seconds: int | None) -> MemberSpendReport:
         """One member's usage for a selected range or all time, plus their caps."""
         async with workspace_tx() as connection:

@@ -886,9 +886,9 @@ async def test_a_memoryless_deploy_never_claims_availability(
     app = _mount_portal(tmp_path, with_memory=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         blank = await client.get("/surface/web/workspace/memory", headers=headers)
-        assert blank.json() == {"available": False, "kinds": [], "matches": [], "actions": []}
+        assert blank.json() == {"available": False, "matches": [], "actions": []}
         queried = await client.get("/surface/web/workspace/memory?q=anything", headers=headers)
-        assert queried.json() == {"available": False, "kinds": [], "matches": [], "actions": []}
+        assert queried.json() == {"available": False, "matches": [], "actions": []}
 
 
 async def _seed_notes(
@@ -1034,12 +1034,11 @@ async def test_a_cursor_this_surface_never_minted_is_refused(portal) -> None:
         assert refused.status_code == 400, token
 
 
-async def test_memory_filter_narrows_to_one_class_and_composes_with_paging(
+async def test_the_memory_listing_walks_its_own_boundary_cursors(
     portal, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The filter offers exactly the provider's own classes and narrows the listing to one of
-    them; a page walked under a filter stays inside it, a class nothing wrote lists empty, and a
-    class the provider does not write is refused."""
+    """The listing answers every live item the subjects may read, newest first, and a page walked on
+    the boundary cursor picks up exactly where the one before it stopped."""
     client, workspace_id, _agent_a, _agent_b = portal
     member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
     base = datetime(2026, 7, 1, tzinfo=UTC)
@@ -1058,28 +1057,15 @@ async def test_memory_filter_narrows_to_one_class_and_composes_with_paging(
     await _seed_notes(workspace_id, member_id, bodies, stamps)
     path = "/surface/web/workspace/memory"
 
-    unfiltered = (await client.get(path, headers=headers)).json()
-    assert set(unfiltered["kinds"]) == {"fact", "episodic", "semantic", "section", "overview"}
-    assert unfiltered["kind"] is None
-    assert "an episode" in _texts(unfiltered)
-
-    facts = (await client.get(f"{path}?kind=fact", headers=headers)).json()
-    assert facts["kind"] == "fact"
-    assert _texts(facts) == ["a third fact", "another fact", "a fact"]
-    assert {match["kind"] for match in facts["matches"]} == {"fact"}
+    whole = (await client.get(path, headers=headers)).json()
+    assert _texts(whole) == ["a third fact", "another fact", "an episode", "a fact"]
+    assert "kinds" not in whole
 
     monkeypatch.setattr(web_surface, "MEMORY_RECENT_LIMIT", 2)
-    page = (await client.get(f"{path}?kind=fact", headers=headers)).json()
+    page = (await client.get(path, headers=headers)).json()
     assert _texts(page) == ["a third fact", "another fact"]
-    rest = (
-        await client.get(f"{path}?kind=fact&after={quote(page['older'])}", headers=headers)
-    ).json()
-    assert _texts(rest) == ["a fact"]
-
-    empty = (await client.get(f"{path}?kind=semantic", headers=headers)).json()
-    assert empty["matches"] == []
-    unknown = await client.get(f"{path}?kind=invented", headers=headers)
-    assert unknown.status_code == 400
+    rest = (await client.get(f"{path}?after={quote(page['older'])}", headers=headers)).json()
+    assert _texts(rest) == ["an episode", "a fact"]
 
 
 async def _offered(app: FastAPI, workspace_id: UUID, email: str) -> dict[str, bool]:

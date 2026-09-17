@@ -574,6 +574,20 @@ test("a said bubble takes the field's phone size, so the transcript matches the 
   expect(packedStyles()).toContain(".max-narrow\\:text-subtitle{font-size:var(--text-subtitle)}");
 });
 
+/** A phone drops every column but the record's name and the acts on it, and cuts the name to the
+ *  width that leaves — a name that sets the table's width puts the act off the side of the screen. */
+test("a lede table keeps the record's name and its acts on a phone, and cuts the name", () => {
+  const css = packedStyles();
+
+  expect(css).toContain(
+    "[data-slot=table][data-lede]:where(th,td):not(:first-child):not([data-acts]){display:none}",
+  );
+  expect(css).toContain(
+    "[data-slot=table][data-lede]>:where(thead,tbody)>tr>:where(th,td):first-child{" +
+      "text-overflow:ellipsis;width:100%;max-width:0;overflow:hidden}",
+  );
+});
+
 test("muted text is the palette's second tone, never ink held back by opacity", () => {
   const src = join(import.meta.dirname, "..", "src");
   const dimmed = readdirSync(src, { recursive: true, encoding: "utf8" })
@@ -584,5 +598,6 @@ test("muted text is the palette's second tone, never ink held back by opacity", 
     "components/ui/button.tsx",
     "kernel/table.tsx",
     "views/Automations.tsx",
+    "views/Team.tsx",
   ]);
 });

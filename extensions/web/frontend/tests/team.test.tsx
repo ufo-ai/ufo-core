@@ -58,7 +58,7 @@ const DISABLED_LEAD = {
 };
 
 const FLOOR =
-  "calc(2 * var(--size-fact-column) + 0 * var(--size-stamp-column) + 2 * var(--size-prose-column) + 0 * var(--size-act))";
+  "calc(1 * var(--size-fact-column) + 0 * var(--size-stamp-column) + 2 * var(--size-prose-column) + 1 * var(--size-act))";
 
 beforeEach(() => {
   location.hash = "#/workspace/team";
@@ -71,10 +71,37 @@ test("the roster names each member, who administers, and whose access is live", 
 
   const lead = await screen.findByText("lead@example.com");
   expect(lead.closest("tr")?.textContent).toContain("Admin");
-  expect(lead.closest("tr")?.textContent).toContain("Active");
+  expect(within(lead.closest("tr") as HTMLElement).queryByRole("img", { name: "Disabled" })).toBeNull();
   const plain = within(screen.getByRole("main")).getByText("member@example.com");
   expect(plain.closest("tr")?.textContent).toContain("Member");
-  expect(plain.closest("tr")?.textContent).toContain("Disabled");
+  expect(within(plain.closest("tr") as HTMLElement).getByRole("img", { name: "Disabled" })).toBeTruthy();
+});
+
+test("a disabled member sinks under the seated ones and their row recedes", async () => {
+  wire({
+    "/workspace/team": () =>
+      json({
+        ...ROSTER,
+        members: [
+          { ...ROSTER.members[0], seated: false },
+          { ...ROSTER.members[1], seated: true },
+        ],
+      }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await screen.findByText("lead@example.com");
+  const rows = within(screen.getByRole("main")).getAllByRole("row").slice(1);
+  expect(rows.map((row) => within(row).getByText(/@example\.com$/).textContent)).toEqual([
+    "member@example.com",
+    "lead@example.com",
+  ]);
+  expect(rowOf("lead@example.com").querySelector("td")?.className).toContain(
+    "opacity-(--opacity-muted-strong)",
+  );
+  expect(rowOf("member@example.com").querySelector("td")?.className).not.toContain(
+    "opacity-(--opacity-muted-strong)",
+  );
 });
 
 test("an admin adds a member by email, optionally as an admin, through the projected action", async () => {
@@ -123,6 +150,17 @@ test("a search narrows the roster to the members whose address matches", async (
   expect(within(screen.getByRole("main")).queryByText("member@example.com")).toBeNull();
 });
 
+test("Add member stands on the band the search is on, not on the page's name", async () => {
+  wire({ "/workspace/team": () => json(ROSTER) });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  const add = await screen.findByRole("button", { name: "Add member" });
+  const band = add.closest("div")?.parentElement as HTMLElement;
+  expect(within(band).getByLabelText("Search members")).toBeTruthy();
+  const header = document.querySelector<HTMLElement>('[data-slot="header"]')!;
+  expect(header.contains(add)).toBe(false);
+});
+
 test("a search that matches nobody says so in a row, and the table holds", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
@@ -133,8 +171,8 @@ test("a search that matches nobody says so in a row, and the table holds", async
   expect(screen.getByRole("table")).toBeTruthy();
   expect(screen.getAllByRole("columnheader").map((head) => head.textContent)).toEqual([
     "Member",
+    "Email",
     "Role",
-    "Status",
     "",
   ]);
 });
@@ -216,12 +254,13 @@ test("a member who administers nothing reads the roster and every act is absent"
 
   expect(await screen.findByText("lead@example.com")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Actions for / })).toBeNull();
   expect(screen.queryByRole("button", { name: "Disable" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Make admin" })).toBeNull();
   expect(screen.getAllByRole("columnheader").map((head) => head.textContent)).toEqual([
     "Member",
+    "Email",
     "Role",
-    "Status",
   ]);
 });
 
@@ -314,10 +353,15 @@ test("a failed roster read states the fault through the shared fence", async () 
   expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
 });
 
+async function pickAct(row: HTMLElement, verb: string) {
+  await userEvent.click(within(row).getByRole("button", { name: /^Actions for / }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: verb }));
+}
+
 async function confirmed(row: HTMLElement, verb: string) {
-  const act = within(row).getByRole("button", { name: verb });
-  await userEvent.click(act);
-  await userEvent.click(within(row).getByRole("button", { name: "Confirm " + verb.toLowerCase() }));
+  await pickAct(row, verb);
+  const asking = await screen.findByRole("dialog");
+  await userEvent.click(within(asking).getByRole("button", { name: verb }));
 }
 
 function rowOf(email: string): HTMLElement {
@@ -353,7 +397,9 @@ test("an admin disables a member's access, and the whole spec rides the apply", 
     spec: { admin: true, seated: false },
   });
   expect(await screen.findByText("lead@example.com is disabled.")).toBeTruthy();
-  await waitFor(() => expect(rowOf("lead@example.com").textContent).toContain("Disabled"));
+  await waitFor(() =>
+    expect(within(rowOf("lead@example.com")).getByRole("img", { name: "Disabled" })).toBeTruthy(),
+  );
 });
 
 test("an admin enables a disabled member, and the role rides unchanged", async () => {
@@ -368,7 +414,7 @@ test("an admin enables a disabled member, and the role rides unchanged", async (
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await screen.findByText("member@example.com");
-  await userEvent.click(within(rowOf("member@example.com")).getByRole("button", { name: "Enable" }));
+  await pickAct(rowOf("member@example.com"), "Enable");
 
   await waitFor(() => expect(bodies.length).toBe(1));
   expect(JSON.parse(bodies[0])).toEqual({
@@ -391,9 +437,7 @@ test("an admin promotes a member, and the access state rides unchanged", async (
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await screen.findByText("member@example.com");
-  await userEvent.click(
-    within(rowOf("member@example.com")).getByRole("button", { name: "Make admin" }),
-  );
+  await pickAct(rowOf("member@example.com"), "Make admin");
 
   await waitFor(() => expect(bodies.length).toBe(1));
   expect(JSON.parse(bodies[0])).toEqual({
@@ -416,7 +460,9 @@ test("a refused apply states the refusal and leaves the row standing", async () 
   await confirmed(rowOf("lead@example.com"), "Disable");
 
   await refusedNotice("The last seated admin cannot be unseated.");
-  expect(rowOf("lead@example.com").textContent).toContain("Active");
+  expect(
+    within(rowOf("lead@example.com")).queryByRole("img", { name: "Disabled" }),
+  ).toBeNull();
 });
 
 test("the roster's widest table fits the desktop page it is read on", async () => {

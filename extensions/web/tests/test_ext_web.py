@@ -8288,6 +8288,49 @@ def _directory(calls: list[str]) -> Callable[[httpx.Request], Response]:
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_create_only_skill_intent_refuses_a_name_the_workspace_holds(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """An apply carries the whole file set, so the upload path asks for a create: a name already
+    taken refuses rather than dropping the files bundled beside the stored SKILL.md. The refusal is
+    the save's own, so a screen whose listing never landed cannot talk its way past it."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    bundled = {
+        "verb": "apply",
+        "kind": "skill",
+        "name": "release-notes",
+        "spec": {"files": {"SKILL.md": SKILL_MD, "checklist.md": "one\ntwo\n"}},
+    }
+    created = await client.post(
+        f"/surface/web/agents/{agent_id}/intents", json=bundled, headers=cookie
+    )
+    assert created.status_code == 200
+    assert created.json()["applied"] is True, created.json()
+
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "skill",
+            "name": "release-notes",
+            "spec": {"files": {"SKILL.md": SKILL_MD}},
+            "create_only": True,
+        },
+        headers=cookie,
+    )
+    assert refused.status_code == 200
+    assert refused.json()["applied"] is False, refused.json()
+    assert "already exists" in refused.json()["message"]
+
+    detail = await client.get(
+        f"/surface/web/objects/skill/release-notes?agent={agent_id}", headers=cookie
+    )
+    assert detail.status_code == 200
+    assert sorted(detail.json()["spec"]["files"]) == ["SKILL.md", "checklist.md"]
+
+
 async def test_a_skill_intent_creates_replaces_and_deletes(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

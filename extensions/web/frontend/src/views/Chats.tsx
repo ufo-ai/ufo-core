@@ -49,7 +49,7 @@ const COLUMNS = [
   { label: "Chat", fill: true },
   { label: "Owner", whole: true },
   { label: "Time", fact: true },
-  { label: "", fact: true },
+  { label: "", acts: true },
 ];
 
 const NO_CHATS = "No conversations yet.";
@@ -424,7 +424,7 @@ function ChatCells({ row, onFiled }: { row: Conversation; onFiled: Filed }) {
           <span className="ml-auto flex shrink-0 items-center gap-2xs">
             <ChannelMark row={row} />
             {row.automation_name ? <AutomationMark row={row} /> : null}
-            <ShareMark row={row} />
+            <ShareMark subject={row.audience} />
           </span>
         </span>
       </TdFill>

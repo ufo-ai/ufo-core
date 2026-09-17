@@ -51,12 +51,12 @@ export function tableFloor({
   prose,
   fact = 0,
   stamp = 0,
-  act = false,
+  acts = 0,
 }: {
   prose: number;
   fact?: number;
   stamp?: number;
-  act?: boolean;
+  acts?: number;
 }): string {
   return (
     "calc(" +
@@ -66,7 +66,7 @@ export function tableFloor({
     " * var(--size-stamp-column) + " +
     prose +
     " * var(--size-prose-column) + " +
-    (act ? 1 : 0) +
+    acts +
     " * var(--size-act))"
   );
 }
@@ -144,7 +144,7 @@ export function TdStamp({ className, ...props }: ComponentProps<"td">) {
 /** It drops `truncate` rather than overriding it, because `overflow-visible` beside `truncate` is
  *  settled by which rule the sheet emits last. */
 export function TdActs({ className, ...props }: ComponentProps<"td">) {
-  return <td data-slot="table-cell" className={cn(CELL, className)} {...props} />;
+  return <td data-slot="table-cell" data-acts="" className={cn(CELL, className)} {...props} />;
 }
 
 export const ACTS = "flex flex-nowrap items-center justify-end gap-xs";

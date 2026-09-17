@@ -162,10 +162,18 @@ class ApplyIntent(BaseModel):
                 "a member profile is named through its spec and pictured through its actions; "
                 "it is never created or deleted"
             )
-        if self.create_only and (self.verb != "apply" or self.kind != "agent"):
-            raise ValueError("create_only pairs with applying the agent kind exactly")
+        if self.create_only and (self.verb != "apply" or self.kind not in CREATE_ONLY_KINDS):
+            raise ValueError(
+                "create_only pairs with applying "
+                + " or ".join(sorted(CREATE_ONLY_KINDS))
+                + " exactly"
+            )
         return self
 
+
+CREATE_ONLY_KINDS = frozenset({"agent", "skill"})
+"""The kinds whose portal path creates a row rather than editing one, so a name already taken is a
+refusal rather than a silent replacement of everything the row holds."""
 
 ENVELOPE_FIELDS = frozenset({"kind", "action", "name", "agent", "generation", "input"})
 """The `object_action` envelope's own fields, which the action lane writes from its route and never

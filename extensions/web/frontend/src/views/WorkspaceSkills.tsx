@@ -1,42 +1,43 @@
-import { Fragment, useState, type FormEvent, type ReactNode } from "react";
+import { IconChevronDown, IconDotsVertical } from "@tabler/icons-react";
+import { useRef, useState, type FormEvent } from "react";
 
-import { Button, ConfirmButton, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Field, Input, Textarea } from "@/components/ui/field";
-import { Filter } from "@/components/ui/filter";
 import {
-  Item,
-  ItemActions,
-  ItemContent,
-  ItemDescription,
-  ItemGroup,
-  ItemSeparator,
-  ItemTitle,
-} from "@/components/ui/item";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Filter } from "@/components/ui/filter";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Sheet } from "@/components/ui/sheet";
+import { ACTS, Td, TdActs, TdFill, TdWhole } from "@/components/ui/table";
 import type { Placement } from "@/kernel/pager";
-import { PageToolbar, usePageAct, usePageSearch } from "@/kernel/pane";
-import { rowControl } from "@/kernel/row";
+import { PageToolbar } from "@/kernel/pane";
+import { DataTable } from "@/kernel/table";
 import {
   type NoticeState,
   OutcomeNotice,
   Panel,
-  PanelBlank,
   QUIET,
   Section,
   outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
 import { getJson, postIntent } from "@/lib/api";
-import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
+import { setPendingAsk } from "@/lib/pendingAsk";
+import { newChatHash } from "@/lib/route";
+import { navigate } from "@/lib/router";
 import { useSurfaces } from "@/lib/surfaces";
 
 type Skill = {
@@ -57,14 +58,6 @@ type SkillDetail = {
 };
 
 type CommunitySkill = { name: string; source: string; installs: number };
-
-type SkillRow = {
-  key: string;
-  name: string;
-  body: string;
-  open: () => void;
-  action: ReactNode;
-};
 
 type CommunityDocument = {
   name: string;
@@ -89,6 +82,29 @@ const NARROWINGS = [
 
 const NO_SKILLS = "No skill has been saved onto this workspace yet.";
 
+const CREATE_ASK = "Create a new skill: ";
+const UPLOAD_ACCEPT = ".md,text/markdown";
+/** `INTENT_MAX_BYTES` in `panels.py`: the whole intent crosses as one body, so the document plus its
+ *  envelope is what has to fit, and a file past it is refused here rather than 413'd at the far end. */
+const INTENT_MAX_BYTES = 65_536;
+const UPLOAD_MAX_KB = 64;
+const TOO_LONG = "A skill file is at most " + UPLOAD_MAX_KB + " KB.";
+const alreadySaved = (name: string) => name + " is already saved. Open it to change what it says.";
+const NO_FRONTMATTER =
+  "A skill file opens with a frontmatter block naming it: --- then name: my-skill.";
+/** The name the document states for itself. The save parses the content against the name the intent
+ *  carries, so a name taken from anywhere else — a filename, a lowercased spelling — is refused. */
+const FRONTMATTER_NAME = /^---\r?\n([\s\S]*?)\r?\n---/;
+const STATED_NAME = /^name:[ \t]*(?:"([^"]*)"|'([^']*)'|([^\r\n]*?))[ \t]*$/m;
+
+function statedName(document: string): string | null {
+  const block = FRONTMATTER_NAME.exec(document);
+  if (!block) return null;
+  const stated = STATED_NAME.exec(block[1]);
+  if (!stated) return null;
+  return (stated[1] ?? stated[2] ?? stated[3] ?? "").trim() || null;
+}
+
 function installsLabel(installs: number): string {
   if (installs >= 1_000_000) return (installs / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M installs";
   if (installs >= 1_000) return (installs / 1_000).toFixed(1).replace(/\.0$/, "") + "K installs";
@@ -98,9 +114,6 @@ function installsLabel(installs: number): string {
 function ordered(skills: Skill[]): Skill[] {
   return [...skills].sort((left, right) => left.name.localeCompare(right.name));
 }
-
-const NAME_PATTERN = "[a-z0-9](?:[a-z0-9-]*[a-z0-9])?";
-const NAME_MAX = 64;
 
 function skillDocument(
   name: string,
@@ -147,27 +160,26 @@ function skillFiles(
   };
 }
 
-function SkillItems({ rows }: { rows: SkillRow[] }) {
-  return (
-    <ItemGroup>
-      {rows.map((row, index) => {
-        const control = rowControl(row.open);
-        return (
-          <Fragment key={row.key}>
-            {index ? <ItemSeparator /> : null}
-            <Item {...control} className={cn(control.className, "hover:bg-fill")}>
-              <ItemContent>
-                <ItemTitle>{row.name}</ItemTitle>
-                <ItemDescription>{row.body}</ItemDescription>
-              </ItemContent>
-              <ItemActions>{row.action}</ItemActions>
-            </Item>
-          </Fragment>
-        );
-      })}
-    </ItemGroup>
-  );
+const OWN_COLUMNS = [
+  { label: "Skill", whole: true },
+  { label: "Instructions", fill: true },
+  { label: "", acts: true },
+];
+
+/** The workflow runs to many lines and a cell holds one, so the breaks close up rather than
+ *  rendering as the single space a truncated line would end on. */
+function opening(instructions: string): string {
+  return instructions.replace(/\s+/g, " ").trim();
 }
+
+const COMMUNITY_COLUMNS = [
+  { label: "Skill", whole: true },
+  { label: "Source", fill: true },
+  { label: "Installs", fact: true },
+];
+
+/** The name and what it does are what the member came to read; the directory's counts recede. */
+const FACT = "text-ink";
 
 export function WorkspaceSkills({
   place,
@@ -182,7 +194,7 @@ export function WorkspaceSkills({
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [saveNotice, setSaveNotice] = useState<NoticeState>(QUIET);
   const [draft, setDraft] = useState<{
-    skill: Skill | null;
+    skill: Skill;
     generation: string | null;
     stored: Record<string, { sha256: string }>;
     pinned: boolean;
@@ -198,6 +210,8 @@ export function WorkspaceSkills({
   const [narrowed, setNarrowed] = useState(offered[0]?.value ?? COMMUNITY);
   const [toast, setToast] = useState<ToastState>(SILENT);
   const [adding, setAdding] = useState<CommunityDocument | null>(null);
+  const [dropping, setDropping] = useState<Skill | null>(null);
+  const file = useRef<HTMLInputElement>(null);
   const [addNotice, setAddNotice] = useState<NoticeState>(QUIET);
   const state = usePanelRead<{ skills: Skill[] }>(
     mainAgent ? "/agents/" + mainAgent.id + "/skills" : null,
@@ -251,33 +265,82 @@ export function WorkspaceSkills({
     close();
   }
 
-  async function write(skill: Skill | null) {
+  /** Hands the composer the opening line and opens a new chat on the main agent, the way every
+   *  other screen starts one: the member writes what the skill should do, the agent saves it. */
+  function startFromChat() {
+    if (!mainAgent) return;
+    setPendingAsk(mainAgent.id, CREATE_ASK, false);
+    navigate(newChatHash(mainAgent.id));
+  }
+
+  async function upload(picked: File) {
     if (busy || !mainAgent) return;
-    let generation: string | null = null;
-    let stored: Record<string, { sha256: string }> = {};
-    let pinned = false;
-    if (skill) {
-      setBusy(true);
-      const detail = await getJson<SkillDetail>(
-        "/objects/skill/" + skill.name + "?agent=" + mainAgent.id,
-      );
-      setBusy(false);
-      if (!detail.ok || !detail.payload.spec || !detail.payload.generation) {
-        setToast({
-          title: skill.name + " did not open.",
-          description: detail.ok ? "The skill has no readable record." : detail.message,
-        });
-        return;
-      }
-      generation = detail.payload.generation;
-      stored = detail.payload.spec.files;
-      pinned = detail.payload.spec.pinned;
+    const overlong = { title: picked.name + " did not import.", description: TOO_LONG };
+    if (picked.size > UPLOAD_MAX_KB * 1024) {
+      setToast(overlong);
+      return;
+    }
+    // jsdom ships no `Blob.text()`, so the bytes are decoded rather than read as text.
+    const document = new TextDecoder().decode(await picked.arrayBuffer());
+    const named = statedName(document);
+    if (!named) {
+      setToast({ title: picked.name + " did not import.", description: NO_FRONTMATTER });
+      return;
+    }
+    if (holds(named)) {
+      setToast({ title: picked.name + " did not import.", description: alreadySaved(named) });
+      return;
+    }
+    // `create_only` is the save's own answer to a name already taken: an apply carries the whole
+    // file set, and the listing this screen read cannot rule out a row it never saw.
+    const intent = {
+      verb: "apply",
+      kind: "skill",
+      name: named,
+      spec: { files: { "SKILL.md": document }, pinned: false },
+      create_only: true,
+    };
+    // The bound is on what crosses, not on what was picked: escaping a document into JSON grows it.
+    if (new TextEncoder().encode(JSON.stringify(intent)).length > INTENT_MAX_BYTES) {
+      setToast(overlong);
+      return;
+    }
+    setBusy(true);
+    const outcome = await postIntent(mainAgent.id, intent);
+    setBusy(false);
+    if (!outcome.applied) {
+      setToast({ title: picked.name + " did not import.", description: outcome.message });
+      return;
+    }
+    setToast({ title: named + " imported." });
+    setNarrowed(INSTALLED);
+    setReloads((count) => count + 1);
+  }
+
+  async function write(skill: Skill) {
+    if (busy || !mainAgent) return;
+    setBusy(true);
+    const detail = await getJson<SkillDetail>(
+      "/objects/skill/" + skill.name + "?agent=" + mainAgent.id,
+    );
+    setBusy(false);
+    if (!detail.ok || !detail.payload.spec || !detail.payload.generation) {
+      setToast({
+        title: skill.name + " did not open.",
+        description: detail.ok ? "The skill has no readable record." : detail.message,
+      });
+      return;
     }
     setSaveNotice(QUIET);
-    setDraft({ skill, generation, stored, pinned });
-    setName(skill?.name ?? "");
-    setDescription(skill?.description ?? "");
-    setInstructions(skill?.instructions ?? "");
+    setDraft({
+      skill,
+      generation: detail.payload.generation,
+      stored: detail.payload.spec.files,
+      pinned: detail.payload.spec.pinned,
+    });
+    setName(skill.name);
+    setDescription(skill.description);
+    setInstructions(skill.instructions);
   }
 
   function close() {
@@ -306,55 +369,82 @@ export function WorkspaceSkills({
     setAdding(fetched.payload);
   }
 
-  function ownRows(skills: Skill[]): SkillRow[] {
-    return ordered(skills).map((skill) => ({
-      key: skill.name,
-      name: skill.name,
-      body: skill.description,
-      open: () => void write(skill),
-      action: (
-        <Button variant="outline" disabled={busy} onClick={() => void write(skill)}>
-          Edit
-        </Button>
-      ),
-    }));
+  function OwnTable({ skills, note }: { skills: Skill[]; note?: string }) {
+    return (
+      <DataTable
+        columns={OWN_COLUMNS}
+        rows={ordered(skills)}
+        rowKey={(skill) => skill.name}
+        lede
+        empty={NO_SKILLS}
+        note={note}
+        open={(skill) => () => void write(skill)}
+      >
+        {(skill) => (
+          <>
+            <TdWhole className={FACT}>{skill.name}</TdWhole>
+            <TdFill>{opening(skill.instructions)}</TdFill>
+            <TdActs>
+              <div className={ACTS}>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="quiet"
+                      size="icon"
+                      disabled={busy}
+                      aria-label={"Actions for " + skill.name}
+                    >
+                      <IconDotsVertical aria-hidden />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => setDropping(skill)}>Delete</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            </TdActs>
+          </>
+        )}
+      </DataTable>
+    );
   }
 
-  function communityRows(skills: CommunitySkill[]): SkillRow[] {
-    return skills.map((skill) => {
-      const installed = (known ?? []).some((one) => one.name === skill.name);
-      return {
-        key: skill.source + "/" + skill.name,
-        name: skill.name,
-        body: skill.source + " · " + installsLabel(skill.installs),
-        open: () => void review(skill),
-        action: (
+  /** An apply carries the whole file set, so landing one SKILL.md on a held name drops every file
+   *  bundled beside it and clears its pin. The editor is the way to change a saved skill. */
+  function holds(name: string): boolean {
+    return (known ?? []).some((one) => one.name === name);
+  }
+
+  function CommunityTable({ skills, note }: { skills: CommunitySkill[]; note?: string }) {
+    return (
+      <DataTable
+        columns={COMMUNITY_COLUMNS}
+        rows={skills}
+        rowKey={(skill) => skill.source + "/" + skill.name}
+        lede
+        empty="The skill directory listed nothing."
+        note={note}
+        open={(skill) => (holds(skill.name) ? null : () => void review(skill))}
+        act={(skill) => (holds(skill.name) ? "Installed" : "Install")}
+      >
+        {(skill) => (
           <>
-            <a
-              href={SOURCE_URL + skill.source}
-              target="_blank"
-              rel="noopener noreferrer"
-              className={cn(
-                buttonVariants({ variant: "outline" }),
-                "border-transparent no-underline transition-opacity",
-                "text-ink-soft hover:text-ink",
-              )}
-            >
-              Source ↗
-            </a>
-            {installed ? (
-              <Button variant="outline" disabled>
-                Installed
-              </Button>
-            ) : (
-              <Button variant="outline" disabled={busy} onClick={() => void review(skill)}>
-                Install
-              </Button>
-            )}
+            <TdWhole className={FACT}>{skill.name}</TdWhole>
+            <TdFill>
+              <a
+                href={SOURCE_URL + skill.source}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-ink-soft no-underline hover:text-ink"
+              >
+                {skill.source}
+              </a>
+            </TdFill>
+            <Td>{installsLabel(skill.installs)}</Td>
           </>
-        ),
-      };
-    });
+        )}
+      </DataTable>
+    );
   }
 
   async function install() {
@@ -376,10 +466,9 @@ export function WorkspaceSkills({
     setReloads((count) => count + 1);
   }
 
-  const editing = draft?.skill ?? null;
   const sheet =
     draft !== null ? (
-      <Sheet open title={editing ? editing.name : "New skill"} onClose={close}>
+      <Sheet open title={draft.skill.name} onClose={close}>
         <OutcomeNotice state={saveNotice} />
         <form onSubmit={save} className="flex flex-col gap-xl">
           <Field
@@ -390,11 +479,8 @@ export function WorkspaceSkills({
             <Input
               id="skill-name"
               required
-              readOnly={editing !== null}
-              pattern={NAME_PATTERN}
-              maxLength={NAME_MAX}
+              readOnly
               aria-describedby="skill-name-description"
-              placeholder="release-notes"
               value={name}
               onChange={(event) => setName(event.target.value)}
             />
@@ -425,21 +511,7 @@ export function WorkspaceSkills({
               onChange={(event) => setInstructions(event.target.value)}
             />
           </Field>
-          <div className="flex items-center justify-between gap-xl">
-            {editing ? (
-              <ConfirmButton
-                verb="Delete"
-                className="px-3xl py-md"
-                disabled={busy}
-                onClick={() => {
-                  const named = editing.name;
-                  close();
-                  void submitIntent({ verb: "delete", kind: "skill", name: named });
-                }}
-              />
-            ) : (
-              <span />
-            )}
+          <div className="flex items-center justify-end gap-xl">
             <Button type="submit" variant="send" size="bar" busy={busy}>
               Save
             </Button>
@@ -448,21 +520,43 @@ export function WorkspaceSkills({
       </Sheet>
     ) : null;
 
-  const act = usePageAct(
-    mainAgent ? (
-      <Button variant="send" size="bar" onClick={() => void write(null)}>
-        New skill
-      </Button>
-    ) : null,
-  );
-
-  const box = usePageSearch();
-
   return (
     <>
-      {act}
       <OutcomeNotice state={notice} />
-      {box ? <PageToolbar /> : null}
+      <PageToolbar>
+        {mainAgent ? (
+          <div className="ml-auto flex shrink-0 items-center">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="send" size="bar">
+                  New skill
+                  <IconChevronDown aria-hidden />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={() => startFromChat()}>
+                  Create from chat
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => file.current?.click()}>
+                  Upload .md skill
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        ) : null}
+      </PageToolbar>
+      <input
+        ref={file}
+        data-testid="skill-upload"
+        type="file"
+        accept={UPLOAD_ACCEPT}
+        hidden
+        onChange={(event) => {
+          const picked = event.target.files?.[0];
+          event.target.value = "";
+          if (picked) void upload(picked);
+        }}
+      />
       <Section
         bar={
           offered.length > 1 ? (
@@ -480,30 +574,26 @@ export function WorkspaceSkills({
       >
         {browsing ? (
           <Panel state={communityState} shape="table">
-            {(payload) => {
-              if (!payload.skills.length)
-                return (
-                  <PanelBlank
-                    body={
-                      query
-                        ? "No community skill matches this search."
-                        : "The skill directory listed nothing."
-                    }
-                  />
-                );
-              return <SkillItems rows={communityRows(payload.skills)} />;
-            }}
+            {(payload) => (
+              <CommunityTable
+                skills={payload.skills}
+                note={query ? "No community skill matches this search." : undefined}
+              />
+            )}
           </Panel>
         ) : (
           <Panel state={state} shape="table">
             {(payload) => {
               const own = payload.skills.filter((skill) => skill.origin !== BUILTIN);
-              if (!own.length) return <PanelBlank body={NO_SKILLS} />;
               const matched = own.filter((skill) =>
                 (skill.name + " " + skill.description).toLowerCase().includes(query.toLowerCase()),
               );
-              if (!matched.length) return <PanelBlank body="No skill matches this search." />;
-              return <SkillItems rows={ownRows(matched)} />;
+              return (
+                <OwnTable
+                  skills={matched}
+                  note={own.length ? "No skill matches this search." : undefined}
+                />
+              );
             }}
           </Panel>
         )}
@@ -546,6 +636,29 @@ export function WorkspaceSkills({
       ) : null}
 
       {sheet}
+
+      <Dialog open={dropping !== null} onOpenChange={(next) => (next ? undefined : setDropping(null))}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {dropping?.name}?</DialogTitle>
+            <DialogDescription>
+              Every agent that loads this skill stops loading it.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              busy={busy}
+              onClick={() => {
+                const named = dropping?.name;
+                setDropping(null);
+                if (named) void submitIntent({ verb: "delete", kind: "skill", name: named });
+              }}
+            >
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Toast state={toast} onDone={() => setToast(SILENT)} />
     </>

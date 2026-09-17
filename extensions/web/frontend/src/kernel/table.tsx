@@ -11,7 +11,15 @@ export const OPEN = "Open";
 
 export type Column =
   | string
-  | { label: string; sort?: string; fact?: boolean; stamp?: boolean; whole?: boolean; fill?: boolean };
+  | {
+      label: string;
+      sort?: string;
+      fact?: boolean;
+      stamp?: boolean;
+      whole?: boolean;
+      fill?: boolean;
+      acts?: boolean;
+    };
 
 export type Sort = { by: string; descending: boolean; onSort: (key: string) => void };
 
@@ -22,6 +30,7 @@ function label(column: Column): string {
 /** The tracks are fixed, so a width declared on a body cell arrives too late — the head is what sizes
  *  the column. A filled table runs auto, where the fill claim leaves the rest what it holds. */
 function width(column: Column, measured: boolean, filled: boolean): string | undefined {
+  if (isActs(column)) return "w-(--size-act)";
   if (isFill(column)) return "w-full";
   if (isStamp(column)) return "w-(--size-stamp-column)";
   if (isFact(column)) return filled ? undefined : "w-(--size-fact-column)";
@@ -43,6 +52,12 @@ function isWhole(column: Column): boolean {
 
 function isFill(column: Column): boolean {
   return typeof column !== "string" && Boolean(column.fill);
+}
+
+/** The column a row's own controls stand in: the act column's width wherever it is drawn, and the
+ *  mark the phone rule keeps a row's acts by. */
+function isActs(column: Column): boolean {
+  return typeof column !== "string" && Boolean(column.acts);
 }
 
 function Caret({ descending }: { descending: boolean }) {
@@ -72,8 +87,14 @@ function Head({
   filled: boolean;
 }) {
   const track = width(column, measured, filled);
+  const marks = isActs(column) ? { "data-acts": "" } : {};
   const key = typeof column === "string" ? undefined : column.sort;
-  if (!key || !sort) return <Th className={track}>{label(column)}</Th>;
+  if (!key || !sort)
+    return (
+      <Th {...marks} className={track}>
+        {label(column)}
+      </Th>
+    );
   const active = sort.by === key;
   return (
     <Th
@@ -162,6 +183,7 @@ export function DataTable<Row>({
   const span = columns.length + (act ? 1 : 0);
   const facts = columns.filter(isFact).length;
   const stamps = columns.filter(isStamp).length;
+  const drawn = columns.filter(isActs).length;
   const filled = columns.some(isFill);
   const measured = filled || columns.some(isWhole);
   return (
@@ -170,10 +192,10 @@ export function DataTable<Row>({
       measured={measured}
       lede={lede}
       floor={tableFloor({
-        prose: columns.length - facts - stamps,
+        prose: columns.length - facts - stamps - drawn,
         fact: facts,
         stamp: stamps,
-        act: Boolean(act),
+        acts: drawn + (act ? 1 : 0),
       })}
     >
       {bare ? null : (
@@ -188,7 +210,11 @@ export function DataTable<Row>({
                 filled={filled}
               />
             ))}
-            {act ? <Th className="w-(--size-act)">{""}</Th> : null}
+            {act ? (
+              <Th data-acts="" className="w-(--size-act)">
+                {""}
+              </Th>
+            ) : null}
           </tr>
         </thead>
       )}
@@ -211,7 +237,7 @@ export function DataTable<Row>({
               >
                 {children(row)}
                 {act ? (
-                  <Td className="w-(--size-act)">
+                  <Td data-acts="" className="w-(--size-act)">
                     <Act verb={act(row)} />
                   </Td>
                 ) : null}

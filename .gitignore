@@ -49,3 +49,4 @@ target/
 .pnpm-store/
 
 .secrets/
+extensions/web/frontend/.impeccable/

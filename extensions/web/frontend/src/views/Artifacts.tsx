@@ -542,7 +542,7 @@ const SKELETON_ROWS = 6;
 function ShelfSkeleton({ face }: { face: Face }) {
   if (face === "table")
     return (
-      <Table measured floor={tableFloor({ prose: 2, fact: 1, act: true })}>
+      <Table measured floor={tableFloor({ prose: 2, fact: 1, acts: 1 })}>
         <thead>
           <tr>
             {COLUMNS.map((column) => {

@@ -90,7 +90,7 @@ function AppsTable({
           <ArchivedTable apps={archived} onRestored={onRestored} />
         ) : (
           <DataTable
-            columns={["Application", "Purpose", { label: "", fact: true }]}
+            columns={["Application", "Purpose", { label: "", acts: true }]}
             rows={apps}
             rowKey={(app) => app.id}
             empty={picked === CREATED_BY_ME ? "You haven't created an app." : "No apps."}
@@ -190,7 +190,7 @@ function ArchivedTable({ apps, onRestored }: { apps: ArchivedApp[]; onRestored: 
   return (
     <>
       <DataTable
-        columns={["Application", { label: "Archived", fact: true }, { label: "", fact: true }]}
+        columns={["Application", { label: "Archived", fact: true }, { label: "", acts: true }]}
         rows={apps}
         rowKey={(app) => app.id}
         empty="No apps are archived."

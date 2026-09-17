@@ -76,7 +76,7 @@ test("leaving a view discards the read left behind rather than painting it", asy
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
 });
 
-test("a slow read for a filter the member left never paints over the filter they chose", async () => {
+test("a slow read for a search the member left never paints over the search they chose", async () => {
   const pending = new Map<string, (value: Response) => void>();
   vi.stubGlobal(
     "fetch",
@@ -98,7 +98,6 @@ test("a slow read for a filter the member left never paints over the filter they
     json({
       available: true,
       actions: [],
-      kinds: ["fact", "preference"],
       matches: [{ text, kind, ref: null, created_at: null }],
       older: null,
       newer: null,
@@ -106,15 +105,17 @@ test("a slow read for a filter the member left never paints over the filter they
 
   await waitFor(() => expect(pending.size).toBe(1));
   pending.get([...pending.keys()][0])!(
-    json({ available: true, actions: [], kinds: ["fact", "preference"], matches: [], older: null, newer: null }),
+    json({ available: true, actions: [], matches: [], older: null, newer: null }),
   );
   await screen.findByText("No memories yet.");
 
-  await userEvent.click(screen.getByRole("tab", { name: "Fact" }));
+  const box = screen.getByPlaceholderText("Search");
+  await userEvent.type(box, "stale{Enter}");
   await waitFor(() => expect(pending.size).toBe(2));
-  const slow = [...pending.keys()].find((url) => url.includes("kind=fact"))!;
+  const slow = [...pending.keys()].find((url) => url.includes("q=stale"))!;
 
-  await userEvent.type(screen.getByPlaceholderText("Search"), "dark{Enter}");
+  await userEvent.clear(box);
+  await userEvent.type(box, "dark{Enter}");
   await waitFor(() => expect(pending.size).toBe(3));
   const chosen = [...pending.keys()].find((url) => url.includes("q=dark"))!;
 

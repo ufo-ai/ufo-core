@@ -133,8 +133,8 @@ function LinkedTip({ at, says }: { at: string; says: string }) {
  *  private, which is the case that needs no stating. It stands beside the automation mark rather
  *  than in a column, because most rows hold neither and a column of blanks is width the titles
  *  want. */
-export function ShareMark({ row }: { row: Conversation }) {
-  if (row.audience !== SHARED_SUBJECT) return null;
+export function ShareMark({ subject }: { subject: string | null }) {
+  if (subject !== SHARED_SUBJECT) return null;
   return (
     <Tooltip>
       <TooltipTrigger asChild>

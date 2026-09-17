@@ -125,12 +125,6 @@ export function audienceLabel(entry: AudienceEntry, viewer: string | null): stri
   return "Unknown";
 }
 
-export function subjectLabel(subject: string | null): string {
-  if (subject === SHARED_SUBJECT) return "Workspace";
-  if (subject != null && isMemberAudience(subject)) return "Only you";
-  return "Unknown";
-}
-
 /** Whose a record is: `You`, another member's address verbatim, or the workspace where no member
  *  created it. */
 export function ownerLabel(email: string | null, viewer: string | null): string {
