@@ -425,14 +425,12 @@ export function FirstRunPane({
   member,
   mainAgent,
   step,
-  onClose,
   onDone,
 }: {
   agents: Agent[];
   member: Member;
   mainAgent: Agent | null;
   step: string | undefined;
-  onClose: () => void;
   onDone: (conversationId: string | null) => void;
 }) {
   if (!mainAgent) return <NoSuchApp />;
@@ -445,7 +443,6 @@ export function FirstRunPane({
           member={member}
           step={step}
           onStep={placeFirstRun}
-          onClose={onClose}
           onDone={onDone}
         />
       </Suspense>

@@ -418,27 +418,21 @@ test("the run opens on the welcome, and Get started leads to the website questio
   expect(screen.queryByRole("button", { name: "Get started" })).toBeNull();
 });
 
-test("closing the welcome opens the chat", async () => {
+test("the welcome offers no way to close the run", async () => {
   mount();
 
-  await userEvent.click(await screen.findByRole("button", { name: "Close" }));
-
-  await screen.findByPlaceholderText("Start new chat…");
-  expect(location.hash.startsWith("#/first-run")).toBe(false);
-  expect(stored()).toBeNull();
+  await screen.findByRole("button", { name: "Get started" });
+  expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
 });
 
-test("closing a step opens the chat with nothing more asked", async () => {
+test("a step offers no way to close the run", async () => {
   await open(lanes(recorder()));
 
   await answer();
   await screen.findByRole("heading", { name: "Connect your messaging app" });
-  await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
-  await screen.findByPlaceholderText("Start new chat…");
-  expect(location.hash.startsWith("#/first-run")).toBe(false);
-  expect(chat.sent).toEqual([OPENING]);
-  expect(stored()).toBeNull();
+  expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
+  expect(location.hash).toBe(firstRunHash("slack"));
 });
 
 test("the card's query lands on the first run's own address", async () => {
@@ -504,12 +498,6 @@ test("each step reached writes its own address, and Back from the first returns 
   await screen.findByRole("heading", { name: "Connect your messaging app" });
   expect(location.hash).toBe(firstRunHash("slack"));
   expect(destination()).toBe("Connect your messaging app");
-  await userEvent.click(screen.getByRole("button", { name: "I don't use Slack" }));
-  await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
-  expect(location.hash).toBe(firstRunHash("surfaces"));
-  await userEvent.click(screen.getByRole("button", { name: "Back" }));
-  await screen.findByRole("heading", { name: "Connect your messaging app" });
-  expect(location.hash).toBe(firstRunHash("slack"));
   expect(history.length).toBe(entries);
 });
 
@@ -560,10 +548,6 @@ test("the Slack step's address with the answers held lands on the Slack step, co
   await screen.findByRole("heading", { name: "Connect your messaging app" });
   expect(counted()).toEqual(["6", "6"]);
   expect(screen.queryByRole("button", { name: "Get started" })).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "I don't use Slack" }));
-  await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
-  await userEvent.click(screen.getByRole("button", { name: "Next" }));
-  await built();
 });
 
 test("an address naming no step of the run lands on the first step, and is written over", async () => {
@@ -597,13 +581,13 @@ test("the page draws no shell around the step", async () => {
   expect(screen.queryByRole("button", { name: "Menu" })).toBeNull();
 });
 
-test("the head counts six steps with Slack, advancing one per answer under a single headline and a Close", async () => {
+test("the head counts six steps with Slack, advancing one per answer under a single headline", async () => {
   await open(lanes(recorder()));
 
   const alone = () => {
     const heading = screen.getByRole("heading", { level: 1 });
     expect(heading.parentElement!.querySelectorAll("p").length).toBe(0);
-    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
   };
 
   await screen.findByLabelText("Website");
@@ -635,7 +619,7 @@ test("the head counts six steps with Slack, advancing one per answer under a sin
   await pickGoals();
   await screen.findByRole("heading", { name: "Connect your messaging app" });
   expect(counted()).toEqual(["6", "6"]);
-  expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
 });
 
 test("a deploy without Slack counts five steps, and the fifth's Next finishes the run", async () => {
@@ -918,7 +902,7 @@ test("the Slack step states what installing does and offers the admin the act", 
   expect(screen.getByText("This will install UFO in Slack for your team")).toBeTruthy();
   expect(screen.getAllByRole("listitem").map((point) => point.textContent)).toEqual(SLACK_POINTS);
   expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "I don't use Slack" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "I don't use Slack" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Next" })).toBeNull();
 });
 
@@ -972,16 +956,16 @@ test("a refused connect closes the window it opened and states the refusal", asy
   opened.mockRestore();
 });
 
-test("a member who is not an admin is told who installs, and finishes past it", async () => {
+test("a member who is not an admin is told who installs, and finishes the run past it", async () => {
   await open(lanes(recorder()), MEMBER);
 
   await answer();
 
   await screen.findByText("A workspace admin connects Slack.");
   expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "I don't use Slack" }));
-  await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
-  await userEvent.click(screen.getByRole("button", { name: "Next" }));
+  expect(screen.queryByRole("button", { name: "I don't use Slack" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+
   await built();
 });
 
@@ -1073,30 +1057,23 @@ test("the step's own watch lands the success screen while the tab stays open", a
   expect(chat.sent).toEqual(DEFAULT_SENT);
 });
 
-test("declining Slack adds the surfaces step, whose Next finishes the run with the answers written, as one sentence", async () => {
+test("the Slack step's Continue finishes the run with the answers written, as one sentence", async () => {
   const posted = recorder();
-  await open(lanes(posted));
+  await open(lanes(posted), ADMIN, HELD_SLACK);
 
   await passWebsite();
   await describeBusiness("A two-person design studio.");
   await pickRole();
   await skipTools();
   await pickGoals();
-  expect(counted()).toEqual(["6", "6"]);
-  await userEvent.click(await screen.findByRole("button", { name: "I don't use Slack" }));
 
-  await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
-  expect(screen.queryByText("Text UFO from your phone, or chat from your terminal.")).toBeNull();
-  expect(counted()).toEqual(["7", "7"]);
-  expect((await screen.findAllByText("iMessage")).length).toBeGreaterThan(0);
-  expect(screen.getAllByText("Terminal").length).toBeGreaterThan(0);
-  expect(screen.queryByText("Slack")).toBeNull();
-  expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
+  await screen.findByRole("heading", { name: "We were able to connect to Slack" });
+  expect(counted()).toEqual(["6", "6"]);
   expect(chat.sent).toEqual([
     "I just set up this workspace. My business: A two-person design studio. Set up my first task: " +
       "a daily competitive analysis.",
   ]);
-  await userEvent.click(screen.getByRole("button", { name: "Next" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
 
   await built(
     "I just set up this workspace. My business: A two-person design studio. Set up my first task: a daily competitive analysis.",
@@ -1112,20 +1089,6 @@ test("declining Slack adds the surfaces step, whose Next finishes the run with t
       },
     },
   ]);
-});
-
-test("Back from the surfaces step returns to the Slack step", async () => {
-  await open(lanes(recorder()));
-
-  await answer();
-  await userEvent.click(await screen.findByRole("button", { name: "I don't use Slack" }));
-  await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
-
-  await userEvent.click(screen.getByRole("button", { name: "Back" }));
-
-  await screen.findByRole("heading", { name: "Connect your messaging app" });
-  expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
-  expect(counted()).toEqual(["6", "7"]);
 });
 
 test("the last screen lands home on the founded thread with connectors beside it", async () => {

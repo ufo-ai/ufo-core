@@ -810,15 +810,11 @@ CLAIMS = (
         pattern=r"roles: ROLES\.filter\(\(option\) => picked\.includes\(option\)\)",
     ),
     Claim(
-        claim="first run offers connecting Slack after the goals step, then other surfaces only"
-        " where Slack was declined",
+        claim="first run offers connecting Slack after the goals step, and it is the last step",
         corpus="references/getting-started.md",
-        phrase="then offers connecting Slack — or, if they\ndecline it, connecting other surfaces",
+        phrase="then offers connecting Slack, the last step",
         source=FIRST_RUN_VIEW,
-        pattern=(
-            r"GOALS_STEP,\n\s+\.\.\.\(slack \? \[SLACK_STEP\] : \[\]\),\n"
-            r"\s+\.\.\.\(slack && declined \? \[SURFACES_STEP\] : \[\]\),"
-        ),
+        pattern=r"GOALS_STEP,\n\s+\.\.\.\(slack \? \[SLACK_STEP\] : \[\]\),\n\s+\];",
     ),
     Claim(
         claim="the first-run Slack step is admin-gated",
@@ -826,6 +822,24 @@ CLAIMS = (
         phrase="Only a\nworkspace admin can connect Slack",
         source=FIRST_RUN_VIEW,
         pattern=r"<Connect\n\s+agent=\{agent\}\n\s+admin=\{member\.admin\}\n\s+row=\{slack\}",
+    ),
+    Claim(
+        claim="the Slack step stands only where the deploy declares the act that connects it",
+        corpus="references/getting-started.md",
+        phrase="A deploy that carries no Slack extension offers the step to nobody",
+        source=WEB_SURFACE,
+        pattern=(
+            r"offered = \{SURFACE_SLACK: _connect_declared\("
+            r"ctx, SURFACE_SLACK, SLACK_CONNECT_ACTION\)\}"
+        ),
+    ),
+    Claim(
+        claim="a non-admin on the Slack step finishes the run from there, because connecting is"
+        " not theirs to do",
+        corpus="references/getting-started.md",
+        phrase="and finishes the run from there",
+        source=FIRST_RUN_VIEW,
+        pattern=r"\{!member\.admin \? \(\n(?:[^\n]*\n)*?\s+onClick=\{finish\}",
     ),
     Claim(
         claim="a non-admin on the Slack step is told an admin connects it, instead of an act that"

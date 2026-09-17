@@ -4451,7 +4451,9 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
     row is the whole workspace's rather than the reader's audience: it is stated as a bare boolean,
     and a step narrowed by audience would tell a member to install what the workspace already has.
     The step carries the catalog's own label, so a tile and the step it reveals never name one
-    connector two ways."""
+    connector two ways. A step stands only where its Connect act would dispatch — the deploy
+    declares that surface's connect action — so a pack without the extension leaves `connectors`
+    empty and the run ends on the step before it."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -4463,6 +4465,7 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
     )
     surfaces = {entry.surface for entry in installations}
     held = {SURFACE_SLACK: SURFACE_SLACK in surfaces}
+    offered = {SURFACE_SLACK: _connect_declared(ctx, SURFACE_SLACK, SLACK_CONNECT_ACTION)}
     return JSONResponse(
         {
             "providers": [tile.model_dump(mode="json") for tile in FIRST_RUN_PROVIDERS],
@@ -4474,7 +4477,7 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
                     mode="json"
                 )
                 for tile in FIRST_RUN_PROVIDERS
-                if tile.name in CONNECT_STEP_NAMES
+                if tile.name in CONNECT_STEP_NAMES and offered[tile.name]
             ],
             "actions": {
                 MEMBER_KIND: _action_payloads(ctx.object_actions(MEMBER_KIND, "collection")),

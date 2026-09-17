@@ -6,11 +6,14 @@ A new customer is invited by the UFO team, by email. The invitation opens the wo
 page. The customer signs in with their work email, and sign-in continues to that page without
 another action: a short setup confirms their website, then asks about their business, the roles
 they hold — they can pick more than one — the tools those roles work in, and what is top of mind,
-then offers connecting Slack — or, if they decline it, connecting other surfaces — before the
-workspace's main agent answers them. Only a
-workspace admin can connect Slack; another member sees that step but is told an admin connects it.
-The other surfaces are the member's own: any member copies the terminal install command, and any
-member connects their own phone to iMessage once an admin has made the first iMessage connection.
+then offers connecting Slack, the last step, before the workspace's main agent answers them. The run
+holds on that step until Slack is connected: it cannot be declined, and no other surface stands in
+for it. Only a workspace admin can connect Slack; another member sees that step but is told an
+admin connects it, and finishes the run from there. A deploy that carries no Slack extension
+offers the step to nobody, and the run ends on what is top of mind. The other surfaces are the
+member's own, connected from the portal after the run: any member copies the terminal install
+command, and any member connects their own phone to iMessage once an admin has made the first
+iMessage connection.
 An admin reaches every agent; every other member reaches the agents open to everyone in the
 workspace, the agents they created themselves, and any agent shared with them (see
 `capabilities.md`). The invitation also gives the terminal install command.

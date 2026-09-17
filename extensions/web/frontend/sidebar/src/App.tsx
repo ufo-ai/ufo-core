@@ -149,9 +149,6 @@ export function App({ agents, archived = [], member, surfaces, onAgents }: AppPr
           member={member}
           mainAgent={mainAgent}
           step={route.step}
-          onClose={() => {
-            if (mainAgent) openNewChat(mainAgent.id);
-          }}
           onDone={(conversationId) => {
             if (conversationId) openChat(conversationId);
             else if (mainAgent) openNewChat(mainAgent.id);

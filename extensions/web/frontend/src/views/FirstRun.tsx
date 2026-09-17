@@ -30,7 +30,7 @@ import {
 import { chatSurface } from "@/lib/mainAgent";
 import { openConversation } from "@/lib/turnStream";
 import type { Agent, Member } from "@/lib/types";
-import { CONNECT_INSTALLS, Connect, ConnectSurfaces } from "@/views/Surfaces";
+import { CONNECT_INSTALLS, Connect } from "@/views/Surfaces";
 
 type Profile = {
   name: string;
@@ -57,7 +57,6 @@ const POSITION_STEP = "position";
 const TOOLS_STEP = "tools";
 const GOALS_STEP = "goals";
 const SLACK_STEP = "slack";
-const SURFACES_STEP = "surfaces";
 
 const ROLES = [
   "Founder",
@@ -296,7 +295,6 @@ type Answers = {
   goals: string[];
   otherGoal: string;
   tools: string[];
-  declined: boolean;
 };
 
 const ANSWERS_PREFIX = "ufo.first-run.";
@@ -319,7 +317,6 @@ function freshAnswers(): Answers {
     goals: [DEFAULT_GOAL],
     otherGoal: "",
     tools: [],
-    declined: false,
   };
 }
 
@@ -344,7 +341,7 @@ function holdAnswers(member: Member, answers: Answers | null): void {
   }
 }
 
-function revealedSteps(payload: FirstRunPayload, declined: boolean, tools: boolean): string[] {
+function revealedSteps(payload: FirstRunPayload, tools: boolean): string[] {
   const slack = payload.connectors.some((row) => row.name === SLACK_STEP);
   return [
     WEBSITE_STEP,
@@ -353,7 +350,6 @@ function revealedSteps(payload: FirstRunPayload, declined: boolean, tools: boole
     ...(tools ? [TOOLS_STEP] : []),
     GOALS_STEP,
     ...(slack ? [SLACK_STEP] : []),
-    ...(slack && declined ? [SURFACES_STEP] : []),
   ];
 }
 
@@ -372,20 +368,6 @@ const SLACK_POINTS = [
   "It replies, remembers, and works with your team.",
   "One install for the whole workspace.",
 ];
-
-function Close({ onClick }: { onClick: () => void }) {
-  return (
-    <Button
-      variant="mark"
-      size="glyph"
-      aria-label="Close"
-      className="text-ink-quiet"
-      onClick={onClick}
-    >
-      <IconX stroke={1.25} aria-hidden />
-    </Button>
-  );
-}
 
 const STEP_COLUMN = "flex w-(--container-answer) max-w-full flex-col items-start gap-6xl";
 
@@ -481,10 +463,10 @@ const POINTS = [
   },
 ];
 
-function Welcome({ onStart, onClose }: { onStart: () => void; onClose: () => void }) {
+function Welcome({ onStart }: { onStart: () => void }) {
   return (
     <main className="grid h-dvh grid-rows-[auto_1fr] overflow-y-auto border-t border-edge">
-      <Head actions={<Close onClick={onClose} />} />
+      <Head />
       <div className="flex min-h-0 items-center justify-center gap-6xl py-5xl pr-5xl max-narrow:pr-0">
         <div className="flex min-w-0 flex-1 flex-col items-center gap-6xl text-center">
           <div className="flex flex-col items-center gap-2xl">
@@ -544,14 +526,12 @@ function Building({
   apps,
   assistant,
   threads,
-  onClose,
   onDone,
 }: {
   company: string | null;
   apps: Agent[];
   assistant: Agent;
   threads: string[];
-  onClose: () => void;
   onDone: () => void;
 }) {
   const built = apps.filter((app) => !app.hidden);
@@ -601,7 +581,7 @@ function Building({
     </p>
   );
   return (
-    <Frame actions={<Close onClick={onClose} />}>
+    <Frame>
       <div className="flex w-full max-w-(--container-connect) flex-col gap-6xl">
         <div className="flex flex-col gap-2xl">
           {company ? <p className="m-0 text-subtitle font-medium text-ink-quiet">{company}</p> : null}
@@ -649,7 +629,6 @@ export function FirstRun({
   member,
   step: asked,
   onStep,
-  onClose,
   onDone,
 }: {
   agent: Agent;
@@ -657,7 +636,6 @@ export function FirstRun({
   member: Member;
   step: string | undefined;
   onStep: (step: string | undefined) => void;
-  onClose: () => void;
   onDone: (conversationId: string | null) => void;
 }) {
   const state = usePanelRead<FirstRunPayload>(FIRST_RUN_READ, 0);
@@ -679,12 +657,7 @@ export function FirstRun({
   const refuse = useCallback((title: string) => setToast({ title }), []);
   useEffect(() => holdAnswers(member, answers), [member, answers]);
   const answer = (patch: Partial<Answers>) => setAnswers((held) => ({ ...held, ...patch }));
-  const close = () => {
-    holdAnswers(member, null);
-    onClose();
-  };
   const { business, website, profile, roles, otherRole, goals, otherGoal, tools } = answers;
-  const declined = asked === SURFACES_STEP || answers.declined;
   const acceptProfile = useCallback((own: Profile) => {
     setAnswers((held) => {
       const learned = describes(own);
@@ -707,7 +680,7 @@ export function FirstRun({
   ) : null;
 
   if (asked === undefined) {
-    return <Welcome onStart={() => onStep(WEBSITE_STEP)} onClose={close} />;
+    return <Welcome onStart={() => onStep(WEBSITE_STEP)} />;
   }
   if (building) {
     return (
@@ -717,7 +690,6 @@ export function FirstRun({
           apps={agents.filter((row) => row.app && !row.main)}
           assistant={agent}
           threads={threads}
-          onClose={() => onDone(thread)}
           onDone={() => onDone(thread)}
         />
         <Toast state={toast} onDone={() => setToast(SILENT)} />
@@ -730,12 +702,12 @@ export function FirstRun({
       <Panel
         state={state}
         loading={() => (
-          <Frame actions={<Close onClick={close} />}>
+          <Frame>
             <PanelSkeleton shape="form" />
           </Frame>
         )}
         failed={(message) => (
-          <Frame actions={<Close onClick={close} />}>
+          <Frame>
             <Failed message={message} onToast={refuse} />
           </Frame>
         )}
@@ -746,7 +718,7 @@ export function FirstRun({
             (view) => view.name === CONFIRM_WEBSITE_ACTION,
           );
           const offers = offered(roles, payload.providers);
-          const revealed = revealedSteps(payload, declined, offers.length > 0);
+          const revealed = revealedSteps(payload, offers.length > 0);
           const at = Math.max(0, revealed.indexOf(asked));
           const step = revealed[at];
           const held = slack ? slack.installed : false;
@@ -867,7 +839,6 @@ export function FirstRun({
               }
               at={at}
               steps={revealed.length}
-              actions={<Close onClick={close} />}
             >
               {revealed.includes(asked) ? null : <Land step={step} onStep={onStep} />}
               {step === BUSINESS_STEP ? (
@@ -1098,18 +1069,17 @@ export function FirstRun({
                       onRefused={refuse}
                     />
                     <div className="w-full px-2xl">
-                      <Button
-                        variant="quiet"
-                        size="bar"
-                        className="h-10 w-full bg-fill text-ink hover:bg-fill-strong"
-                        onClick={() => {
-                          answer({ declined: true });
-                          onStep(SURFACES_STEP);
-                        }}
-                      >
-                        I don't use Slack
-                      </Button>
-                      {LOCAL_DEV ? (
+                      {!member.admin ? (
+                        <Button
+                          variant="send"
+                          size="bar"
+                          className="h-10 w-full"
+                          busy={busy}
+                          onClick={finish}
+                        >
+                          Continue
+                        </Button>
+                      ) : LOCAL_DEV ? (
                         <Button
                           variant="quiet"
                           size="bar"
@@ -1122,19 +1092,6 @@ export function FirstRun({
                     </div>
                   </div>
                 </div>
-              ) : null}
-              {step === SURFACES_STEP ? (
-                <Step onBack={back} onNext={finish} nextDisabled={false} busy={busy}>
-                  <h1 className="m-0 text-subtitle font-medium text-ink">
-                    Get UFO everywhere you work
-                  </h1>
-                  <ConnectSurfaces
-                    agent={agent}
-                    member={member}
-                    hidden={[SLACK_STEP]}
-                    onRefused={refuse}
-                  />
-                </Step>
               ) : null}
             </Frame>
           );

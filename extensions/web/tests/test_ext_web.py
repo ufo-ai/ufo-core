@@ -2885,6 +2885,25 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_first_run_offers_no_slack_step_where_the_deploy_declares_no_connect(
+    web_apps: tuple[AsyncClient, UUID, UUID, "FleetBlobStore"],
+) -> None:
+    """A deploy whose pack omits the Slack extension declares no `slack_connect`, so the step it
+    would end on is not offered: `connectors` is empty and the run finishes on the step before it.
+    Slack stays a tile, because a team that uses it says so like any other tool."""
+    client, workspace_id, _app_agent, _fleet = web_apps
+    _member_id, token = await _seed_member(workspace_id, "m@example.com")
+    read = await client.get(
+        "/surface/web/workspace/first-run", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+    assert read.status_code == 200
+    payload = read.json()
+    assert payload["connectors"] == []
+    assert "slack" in {tile["name"] for tile in payload["providers"]}
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_artifact_fanout_does_not_discover_an_admin_only_agent(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
