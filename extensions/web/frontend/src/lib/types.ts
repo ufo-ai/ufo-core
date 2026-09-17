@@ -94,6 +94,7 @@ export type Conversation = {
   automation_name: string | null;
   automation_title: string | null;
   unread: boolean;
+  artifacts: boolean;
   speakers: string[];
   turn_count: number;
   created_at: string;

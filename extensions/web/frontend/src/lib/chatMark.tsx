@@ -5,6 +5,7 @@ import {
   IconHistoryToggle,
   IconLoader,
   IconMessageCircle,
+  IconPaperclip,
   IconPinFilled,
   IconTerminal2,
   IconUsersGroup,
@@ -29,6 +30,8 @@ import { automationsHash } from "@/lib/route";
 export const AUTOMATION = "Automation";
 
 export const SHARED = "Shared with Workspace";
+
+export const ARTIFACT = "Shared a file";
 
 export const PINNED = "Pinned";
 
@@ -106,6 +109,7 @@ export function ChatTrail({ row }: { row: Conversation }) {
       {row.automation_name === null ? null : (
         <IconHistoryToggle className={mark} role="img" aria-label={AUTOMATION} />
       )}
+      {row.artifacts ? <IconPaperclip className={mark} role="img" aria-label={ARTIFACT} /> : null}
       {row.audience === SHARED_SUBJECT ? (
         <IconUsersGroup className={mark} role="img" aria-label={SHARED} />
       ) : null}
@@ -141,6 +145,20 @@ export function ShareMark({ subject }: { subject: string | null }) {
         <IconUsersGroup className={cn(MARK, "text-ink-soft")} role="img" aria-label={SHARED} />
       </TooltipTrigger>
       <TooltipContent side="top">{SHARED}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** A file a turn shared out of the conversation, drawn only where one did: the mark says the chat
+ *  produced something a member keeps, which is what separates it from the rest of the list. */
+export function ArtifactMark({ row }: { row: Conversation }) {
+  if (!row.artifacts) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <IconPaperclip className={cn(MARK, "text-ink-soft")} role="img" aria-label={ARTIFACT} />
+      </TooltipTrigger>
+      <TooltipContent side="top">{ARTIFACT}</TooltipContent>
     </Tooltip>
   );
 }

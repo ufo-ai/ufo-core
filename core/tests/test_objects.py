@@ -4353,6 +4353,79 @@ async def test_conversation_kind_states_an_automation_fired_the_work(db: None) -
     assert fired.fields["automation_title"] == "nightly-digest"
 
 
+async def _shared_file(workspace_id: UUID, conversation_id: UUID, *, attached: bool) -> None:
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id)
+                .where(tables.turn.c.conversation_id == conversation_id)
+                .limit(1)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=turn_id,
+                blob_key=f"blob-{uuid4().hex}",
+                workspace_id=workspace_id,
+                filename="report.txt",
+                subject=None,
+                media_type="text/plain",
+                size_bytes=12,
+                attached_by_member=attached,
+                role="file",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
+async def test_conversation_kind_states_the_conversation_produced_a_file(db: None) -> None:
+    """A conversation a turn shared a file out of reports `artifacts`; one holding only a file the
+    member attached to their own message does not, because the conversation produced nothing."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        rows = {
+            title: await _rail_conversation(
+                workspace_id,
+                agent_id,
+                title=title,
+                audience=conversation_audience(alice),
+                member_id=alice,
+                speaker_member_id=alice,
+                admission="member",
+                moved_at=moved_at,
+                surface="web",
+                turn_status="done",
+            )
+            for title, moved_at in (
+                ("Ship the plan", datetime(2026, 8, 1, tzinfo=UTC)),
+                ("Quarter report", datetime(2026, 8, 2, tzinfo=UTC)),
+                ("Read this deck", datetime(2026, 8, 3, tzinfo=UTC)),
+            )
+        }
+        await _shared_file(workspace_id, rows["Quarter report"], attached=False)
+        await _shared_file(workspace_id, rows["Read this deck"], attached=True)
+        with agent(agent_id):
+            page = await CONVERSATION_OBJECT.store.member_page(
+                None,
+                member_id=alice,
+                admin=False,
+                query=ObjectListQuery(
+                    order_by="last_at",
+                    order="desc",
+                    supported_fields=CONVERSATION_OBJECT.list_fields,
+                ),
+            )
+
+    assert {row.name: row.fields["artifacts"] for row in page.rows} == {
+        str(rows["Ship the plan"]): False,
+        str(rows["Quarter report"]): True,
+        str(rows["Read this deck"]): False,
+    }
+
+
 async def test_conversation_kind_searches_past_its_own_bound(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

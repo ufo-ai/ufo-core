@@ -96,6 +96,7 @@ export function founded(
     automation_name: null,
     automation_title: null,
     unread: false,
+    artifacts: false,
     speakers: [member.email],
     turn_count: 1,
     created_at: at,

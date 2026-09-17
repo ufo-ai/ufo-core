@@ -779,6 +779,7 @@ def _member_row(entry: ListedConversation) -> ObjectRow:
             "automation_name": None if entry.automation is None else entry.automation.name,
             "automation_title": None if entry.automation is None else entry.automation.title,
             "unread": entry.unread,
+            "artifacts": entry.artifacts,
             "readable": entry.readable,
             "disclosable": entry.disclosable,
             "speakable": entry.speakable,
@@ -860,7 +861,8 @@ CONVERSATION_OBJECT = ObjectKind(
         "`parked`, and `idle` where it holds none — `automation_kind`, `automation_name` and "
         "`automation_title`, naming what last fired a turn in it where an automation did, and "
         "`unread`, whether it moved after the "
-        "member last read it and last spoke in it. Order by "
+        "member last read it and last spoke in it, and `artifacts`, whether a turn in it shared a "
+        "file with the members. Order by "
         "`last_at` desc for the newest activity first. "
         "It also carries the filing marks the actions on a row set and clear: `archived` and "
         "`deleted`, which the conversation carries for everyone who lists it, and `pinned`, which "
@@ -894,6 +896,7 @@ CONVERSATION_OBJECT = ObjectKind(
             "automation_name",
             "automation_title",
             "unread",
+            "artifacts",
             "readable",
             "disclosable",
             "speakable",

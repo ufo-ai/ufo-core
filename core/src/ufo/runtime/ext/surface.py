@@ -1449,6 +1449,10 @@ class ListedConversation(BaseModel):
     gone. Like `turn` it is the shape of the conversation's work rather than a word of its content,
     so an unreadable row states it too.
 
+    `artifacts` is whether a turn here shared a file with the members — the `artifact` objects
+    whose `created_in` link names this conversation, less the files a member attached to their own
+    message, which the conversation did not produce.
+
     `archived` and `deleted` are the marks the conversation carries: out of the default listing and
     off it, for everyone who lists it, the way its title and audience are. `pinned` is this
     viewer's own — a member holds a row above their list without moving anybody else's. All three
@@ -1480,6 +1484,7 @@ class ListedConversation(BaseModel):
     turn: ListedTurn
     automation: FiredBy | None
     unread: bool
+    artifacts: bool
     readable: bool
     disclosable: bool
     speakable: bool
@@ -1682,8 +1687,11 @@ class ConversationDirectory:
         readers = readable_audiences(member_id)
         content = [row.id for row in rows if row.audience in readers]
         every = [row.id for row in rows]
-        openings, speakers, automations = await asyncio.gather(
-            self.openings(content), self.speakers(content), self.automations(every)
+        openings, speakers, automations, artifacts = await asyncio.gather(
+            self.openings(content),
+            self.speakers(content),
+            self.automations(every),
+            self.artifacts(content),
         )
         mine = str(conversation_audience(member_id))
         listed = [
@@ -1703,6 +1711,7 @@ class ConversationDirectory:
                 turn=row.live_turn,
                 automation=automations.get(row.id),
                 unread=_unread(row.last_turn_at, row.read_at, row.spoke_at),
+                artifacts=row.id in artifacts,
                 readable=row.audience in readers,
                 disclosable=admin
                 and row.audience != mine
@@ -1861,6 +1870,31 @@ class ConversationDirectory:
                     set_={"read_at": read_at},
                 )
             )
+
+    async def artifacts(self, listed: Sequence[UUID]) -> set[UUID]:
+        """Which listed conversations a turn shared a file out of — the rows the `artifact` kind
+        lists, less the files a member attached to their own message. One read over the page's ids,
+        like the openings and the speakers, rather than a subquery per row."""
+        if not listed:
+            return set()
+        query = (
+            sa.select(tables.turn.c.conversation_id)
+            .distinct()
+            .select_from(
+                tables.shared_artifact.join(
+                    tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
+                )
+            )
+            .where(
+                tables.shared_artifact.c.workspace_id == self.workspace_id,
+                tables.shared_artifact.c.role == "file",
+                tables.shared_artifact.c.attached_by_member.is_(False),
+                tables.turn.c.conversation_id.in_(listed),
+            )
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return {row.conversation_id for row in rows}
 
     async def automations(self, listed: Sequence[UUID]) -> dict[UUID, FiredBy]:
         """What last fired a turn in each listed conversation. Every turn records what fired it and

@@ -636,6 +636,29 @@ test("a shared chat says so above its own mark, and a private one draws none", a
   expect(tip.textContent).toBe("Shared with Workspace");
 });
 
+test("a chat that shared a file carries the clip, and one that shared none draws no mark", async () => {
+  const shared: Conversation = {
+    ...CHAT_ROW,
+    conversation_id: THIRD_ID,
+    title: "Quarter report",
+    artifacts: true,
+  };
+  wire({
+    ...chatsOnWire([CHAT_ROW, shared]),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByRole("region", { name: "Home" });
+  expect(within(row(/Pick one thread/)).queryByRole("img", { name: "Shared a file" })).toBeNull();
+
+  await userEvent.hover(within(row(/Quarter report/)).getByRole("img", { name: "Shared a file" }));
+
+  const tip = await screen.findByRole("tooltip");
+  expect(tip.textContent).toBe("Shared a file");
+});
+
 test("a search reaches past the bound, so it never reports a chat it did not look for", async () => {
   const older: Conversation = {
     ...CHAT_ROW,

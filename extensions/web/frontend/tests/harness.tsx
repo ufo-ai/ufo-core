@@ -303,6 +303,7 @@ export const CHAT_ROW: Conversation = {
   automation_name: null,
   automation_title: null,
   unread: false,
+  artifacts: false,
   speakers: [],
   turn_count: 1,
   created_at: "2026-08-01T09:00:00.000Z",

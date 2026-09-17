@@ -383,6 +383,17 @@ test("a row from another surface draws its glyph and states the surface's own na
   expect((await hoverCard()).textContent).toContain("DM");
 });
 
+test("a rail row that shared a file draws the clip, and one that shared none draws no mark", async () => {
+  const shared = { ...CHAT_ROW, conversation_id: SECOND_ID, title: "Quarter report", artifacts: true };
+  wire({ ...chatsOnWire([CHAT_ROW, shared]) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const carrying = await screen.findByRole("button", { name: /Quarter report/ });
+  expect(within(trail(carrying)).getByRole("img", { name: "Shared a file" })).toBeTruthy();
+  const bare = await screen.findByRole("button", { name: /Pick one thread/ });
+  expect(within(trail(bare)).queryByRole("img", { name: "Shared a file" })).toBeNull();
+});
+
 test("a cli row draws the terminal glyph and reads as Terminal, never as the surface's own name", async () => {
   const cli = { ...CHAT_ROW, surface: "ufo", surface_label: null, title: "Deploy the branch" };
   holdRailShown(EVERY_SURFACE);

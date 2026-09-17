@@ -17,6 +17,7 @@ import type { PanelState } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
 import { SHARED_SUBJECT, ownerLabel, useViewer } from "@/lib/audience";
 import {
+  ArtifactMark,
   AutomationMark,
   ChannelMark,
   ChatStatus,
@@ -424,6 +425,7 @@ function ChatCells({ row, onFiled }: { row: Conversation; onFiled: Filed }) {
           <span className="ml-auto flex shrink-0 items-center gap-2xs">
             <ChannelMark row={row} />
             {row.automation_name ? <AutomationMark row={row} /> : null}
+            <ArtifactMark row={row} />
             <ShareMark subject={row.audience} />
           </span>
         </span>

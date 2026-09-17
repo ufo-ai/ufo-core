@@ -67,6 +67,7 @@ function conversation(name: string, row: Omit<Conversation, "conversation_id">):
     automation_name: row.automation_name,
     automation_title: row.automation_title,
     unread: row.unread,
+    artifacts: row.artifacts,
     speakers: row.speakers,
     turn_count: row.turn_count,
     created_at: row.created_at,
