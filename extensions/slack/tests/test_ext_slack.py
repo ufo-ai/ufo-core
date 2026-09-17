@@ -992,7 +992,7 @@ def test_a_bystander_cannot_write_a_second_speakers_line_into_the_digest() -> No
     )
 
 
-def test_ambient_digest_filters_and_bounds() -> None:
+def test_ambient_digest_filters_and_orders_its_lines() -> None:
     messages = [
         {"user": "U2", "ts": "1700000060.000200", "text": "x" * 500},
         {"user": "U1", "ts": "1700000000.000100", "text": "kicking off the incident thread"},
@@ -1017,26 +1017,39 @@ def test_ambient_digest_filters_and_bounds() -> None:
         f"{slack.AMBIENT_THREAD_NOTE}\n"
         "[2023-11-14 22:13] <@U1>: kicking off the incident thread\n"
         "[2023-11-14 22:14] <@U9>: broadcast reply\n"
-        f"[2023-11-14 22:14] <@U2>: {'x' * slack.AMBIENT_MESSAGE_CHAR_LIMIT}\n"
+        f"[2023-11-14 22:14] <@U2>: {'x' * 500}\n"
         f"</{AMBIENT_CONTEXT_ELEMENT}_{MARK}>\n"
     )
     assert slack.ambient_digest([], BOT_USER_ID, slack.AMBIENT_THREAD_NOTE, MARK, {}) == ""
     only_bot = [{"user": BOT_USER_ID, "ts": "1.0", "text": "hi"}]
     assert slack.ambient_digest(only_bot, BOT_USER_ID, slack.AMBIENT_THREAD_NOTE, MARK, {}) == ""
-    many = [
-        {"user": f"U{i}", "ts": f"{1700000000 + i}.0", "text": f"message {i:03d} " + "y" * 380}
-        for i in range(30)
+
+
+def test_a_message_is_bounded_at_slacks_own_maximum_and_says_so() -> None:
+    """A thread root is the thing a mid-thread mention asks about, so a root holding a long code
+    block arrives whole: the bound is Slack's own per-message maximum, which no message it delivers
+    exceeds. A longer one ends in the truncation marker rather than mid-sentence."""
+    block = "\n".join(f"line {i:03d} of the failing traceback" for i in range(120))
+    root = f"here is the note:\n```\n{block}\n```\nwhat is going wrong?"
+    messages = [
+        {"user": "U1", "ts": "1700000000.000100", "text": root},
+        {"user": "U2", "ts": "1700000060.000200", "text": "z" * 500},
     ]
-    capped = slack.ambient_digest(many, BOT_USER_ID, slack.AMBIENT_THREAD_NOTE, MARK, {})
-    element = f"{AMBIENT_CONTEXT_ELEMENT}_{MARK}"
-    wrapper = len(f"<{element}></{element}>")
-    assert (
-        len(capped) <= slack.AMBIENT_DIGEST_MAX_CHARS + len(slack.AMBIENT_THREAD_NOTE) + wrapper + 5
+    assert slack.ambient_digest(messages, BOT_USER_ID, slack.AMBIENT_THREAD_NOTE, MARK, {}) == (
+        f"<{AMBIENT_CONTEXT_ELEMENT}_{MARK}>\n"
+        f"{slack.AMBIENT_THREAD_NOTE}\n"
+        f"[2023-11-14 22:13] <@U1>: {' '.join(root.split())}\n"
+        f"[2023-11-14 22:14] <@U2>: {'z' * 500}\n"
+        f"</{AMBIENT_CONTEXT_ELEMENT}_{MARK}>\n"
     )
-    assert slack.AMBIENT_OMITTED_MARKER in capped
-    assert "message 000" in capped
-    assert "message 029" in capped
-    assert "message 001" not in capped
+    over = [{"user": "U1", "ts": "1700000000.000100", "text": "w" * (40_000 + 50)}]
+    assert slack.ambient_digest(over, BOT_USER_ID, slack.AMBIENT_THREAD_NOTE, MARK, {}) == (
+        f"<{AMBIENT_CONTEXT_ELEMENT}_{MARK}>\n"
+        f"{slack.AMBIENT_THREAD_NOTE}\n"
+        f"[2023-11-14 22:13] <@U1>: {'w' * slack.AMBIENT_MESSAGE_CHAR_LIMIT}"
+        f"{slack.AMBIENT_TRUNCATED_MARKER}\n"
+        f"</{AMBIENT_CONTEXT_ELEMENT}_{MARK}>\n"
+    )
 
 
 def test_turn_context_composes_the_sender_line_and_drops_an_unknown_timezone() -> None:
@@ -1914,6 +1927,35 @@ async def test_the_mentioning_members_own_words_are_not_labelled_background(
             slack.AMBIENT_THREAD_MEMBER_NOTE,
             "[2023-11-14 22:13] <@U1>: the audit export is stuck at 40 percent",
             "[2023-11-14 22:17] <@U1>: <@UBOT00000> are you seeing it?",
+        )
+        + _fenced(mark, MID_ASKED)
+    )
+
+
+async def test_a_long_thread_root_reaches_the_turn_whole(db: None, tmp_path, monkeypatch) -> None:
+    """The root of a thread is the thing a mid-thread mention asks about. A root holding a long code
+    block used to arrive cut at the old per-message bound, so the request the member wrote never
+    reached the turn; under Slack's own maximum it arrives with every line of it."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    block = "\n".join(f"line {i:03d} of the failing traceback" for i in range(120))
+    root = f"here is the note:\n```\n{block}\n```\nwhat is going wrong?"
+    reply_pages: list[list[dict[str, object]]] = [
+        [
+            {"user": "U2", "ts": MID_ROOT, "text": root},
+            {"user": "U2", "ts": "1700000120.000300", "text": "q" * 500},
+        ]
+    ]
+    admitted = await _admit_a_mid_thread_mention(
+        monkeypatch, workspace_id, tmp_path, recorder, reply_pages
+    )
+    mark = _marker(admitted)
+    assert admitted == (
+        _background(
+            mark,
+            slack.AMBIENT_THREAD_NOTE,
+            f"[2023-11-14 22:13] <@U2>: {' '.join(root.split())}",
+            f"[2023-11-14 22:15] <@U2>: {'q' * 500}",
         )
         + _fenced(mark, MID_ASKED)
     )
