@@ -77,8 +77,8 @@ export function Th({ className, ...props }: ComponentProps<"th">) {
       data-slot="table-head"
       scope="col"
       className={cn(
-        "truncate px-2xl text-left align-middle tabular-nums",
-        "text-label font-normal text-ink-soft",
+        "truncate border-b border-edge px-2xl text-left align-middle tabular-nums",
+        "text-label font-normal text-ink-quiet",
         className,
       )}
       {...props}

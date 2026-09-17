@@ -73,8 +73,15 @@ function cells(name: RegExp): string[] {
 }
 
 function titles(home: HTMLElement): (string | null)[] {
-  return [...(home.querySelectorAll("tbody tr") as NodeListOf<HTMLElement>)].map(
+  return [...(home.querySelectorAll("tbody tr:not([data-run])") as NodeListOf<HTMLElement>)].map(
     (held) => within(held).getAllByRole("cell")[0].textContent,
+  );
+}
+
+/** The bands the table stands its records under, in the order it draws them. */
+function bands(home: HTMLElement): (string | null)[] {
+  return [...(home.querySelectorAll("tbody tr[data-run]") as NodeListOf<HTMLElement>)].map(
+    (held) => held.textContent,
   );
 }
 
@@ -108,7 +115,7 @@ test("the Home row stands a table of the chats the member reaches, whoever owns 
     within(home)
       .getAllByRole("columnheader")
       .map((head) => head.textContent),
-  ).toEqual(["Chat", "Owner", "Time", ""]);
+  ).toEqual(["Chat", "Creator", "Members", "Channel", "Time", ""]);
   expect(cells(/Pick one thread/)[1]).toBe("M");
   expect(cells(/Deploy question/)[1]).toBe("D");
   expect(cells(/Migration run/)[1]).toBe("S");
@@ -164,7 +171,75 @@ test("recency orders a state's own run, under the state that leads it", async ()
   expect(titles(home)).toEqual(["Pick one thread", "Deploy question"]);
 });
 
-test("a channel is one glyph beside the title, drawn for every surface but the portal", async () => {
+const HELD: Conversation = {
+  ...CHAT_ROW,
+  conversation_id: ALERT_ID,
+  title: "Ship the plan",
+  last_at: "2026-07-20T08:00:00.000Z",
+  pinned: true,
+};
+
+test("the rows stand under a band per state, pinned leading, and no band over nothing", async () => {
+  wire({
+    ...chatsOnWire([WORKSPACE_CHAT, UNREAD, COLLEAGUE, CHAT_ROW, HELD]),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  expect(bands(home)).toEqual(["Pinned", "Running", "Waiting for you", "Unread", "Read"]);
+  expect(titles(home)).toEqual([
+    "Ship the plan",
+    "Deploy question",
+    "Migration run",
+    "Unanswered thread",
+    "Pick one thread",
+  ]);
+});
+
+test("a band the member shuts takes its rows with it, and the browser holds the fold", async () => {
+  wire({ ...chatsOnWire([CHAT_ROW, COLLEAGUE]), "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  expect(titles(home)).toEqual(["Deploy question", "Pick one thread"]);
+
+  await userEvent.click(within(home).getByRole("button", { name: "Read" }));
+
+  expect(titles(home)).toEqual(["Deploy question"]);
+  expect(bands(home)).toEqual(["Running", "Read"]);
+  expect(localStorage.getItem("sections-shut")).toBe("chats:Read");
+
+  await userEvent.click(within(home).getByRole("button", { name: "Read" }));
+
+  expect(titles(home)).toEqual(["Deploy question", "Pick one thread"]);
+  expect(localStorage.getItem("sections-shut")).toBe("");
+});
+
+test("the members column draws a face per speaker, and counts everyone past the third", async () => {
+  const crowded: Conversation = {
+    ...CHAT_ROW,
+    conversation_id: ALERT_ID,
+    title: "Release window",
+    speakers: ["Ada Lovelace", "Bo Diaz", "Cass Field", "Dev Rao"],
+  };
+  wire({ ...chatsOnWire([CHAT_ROW, crowded]), "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByRole("region", { name: "Home" });
+  expect(cells(/Release window/)[2]).toBe("ABC+1");
+  expect(cells(/Pick one thread/)[2]).toBe("");
+  expect(
+    within(row(/Release window/)).getByRole("img", {
+      name: "Ada Lovelace, Bo Diaz, Cass Field, Dev Rao",
+    }),
+  ).toBeTruthy();
+});
+
+test("a channel is a column of its own, naming the surface every row came in on", async () => {
   const slack: Conversation = {
     ...CHAT_ROW,
     conversation_id: SECOND_ID,
@@ -187,13 +262,13 @@ test("a channel is one glyph beside the title, drawn for every surface but the p
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const home = await screen.findByRole("region", { name: "Home" });
-  expect(within(row(/Pick one thread/)).queryByRole("img", { name: /Web|#/ })).toBeNull();
-  expect(within(row(/Index rebuild/)).getByRole("img", { name: "Terminal" })).toBeTruthy();
-  expect(within(home).queryByText("Web")).toBeNull();
-  expect(within(home).queryByText("Portal")).toBeNull();
-  expect(within(home).getAllByRole("columnheader").map((head) => head.textContent)).not.toContain(
+  expect(within(home).getAllByRole("columnheader").map((head) => head.textContent)).toContain(
     "Channel",
   );
+  expect(cells(/Pick one thread/)[3]).toBe("Web");
+  expect(cells(/Index rebuild/)[3]).toBe("Terminal");
+  expect(cells(/Standup notes/)[3]).toBe("Slack");
+  expect(within(home).queryByText("Portal")).toBeNull();
 
   await userEvent.hover(within(row(/Standup notes/)).getByRole("img", { name: "#eng" }));
   expect((await screen.findByRole("tooltip")).textContent).toBe("#eng");
@@ -345,7 +420,7 @@ test("an automation states itself beside its name, and the rail filter can drop 
   expect(within(home).getByRole("row", { name: /Digest the night's changes/ })).toBeTruthy();
 });
 
-test("the owner column is the monogram alone, and the address stands above it", async () => {
+test("the creator column is the monogram alone, and the address stands above it", async () => {
   wire({
     ...chatsOnWire([CHAT_ROW, COLLEAGUE, WORKSPACE_CHAT]),
     "/transcript": () => json({ messages: [] }),
@@ -354,11 +429,10 @@ test("the owner column is the monogram alone, and the address stands above it", 
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const home = await screen.findByRole("region", { name: "Home" });
-  const owners = within(home)
-    .getAllByRole("row")
-    .slice(1)
-    .map((held) => within(held).getAllByRole("cell")[1].textContent);
-  expect([...owners].sort()).toEqual(["D", "M", "S"]);
+  const creators = [/Pick one thread/, /Deploy question/, /Migration run/].map(
+    (named) => cells(named)[1],
+  );
+  expect([...creators].sort()).toEqual(["D", "M", "S"]);
   expect(within(home).queryByText("dana@example.com")).toBeNull();
 
   await userEvent.hover(within(row(/Deploy question/)).getByLabelText("Dana Reed"));
@@ -577,7 +651,7 @@ test("a filter that leaves nothing says so, and the bar stays put", async () => 
   const home = await screen.findByRole("region", { name: "Home" });
   expect(await within(home).findByText("No conversations match.")).toBeTruthy();
   expect(within(home).getByRole("tab", { name: "All" })).toBeTruthy();
-  expect(within(home).getAllByRole("columnheader").length).toBe(4);
+  expect(within(home).getAllByRole("columnheader").length).toBe(6);
 });
 
 test("a phone draws the chat alone, and the columns beside it are not stacked under it", async () => {
@@ -877,11 +951,11 @@ test("a pinned row leads with a pin where the dot stands, and an unpinned row ke
   await within(home).findByRole("row", { name: /Ship the plan/ });
 
   const pinned = mark(/Ship the plan/);
-  expect(pinned.getAttribute("aria-label")).toBe("Pinned, Idle");
+  expect(pinned.getAttribute("aria-label")).toBe("Pinned, Read");
   expect(pinned.querySelector("svg.tabler-icon-pin-filled")).toBeTruthy();
 
   const plain = mark(/Pick one thread/);
-  expect(plain.getAttribute("aria-label")).toBe("Idle");
+  expect(plain.getAttribute("aria-label")).toBe("Read");
   expect(plain.querySelector("svg")).toBeNull();
   expect(plain.querySelector("span.rounded-full")).toBeTruthy();
 });
@@ -917,7 +991,7 @@ test("Archived is the category to the right of Workspace, and unarchives from it
     within(home)
       .getAllByRole("tab")
       .map((one) => one.textContent),
-  ).toEqual(["All", "Mine", "Workspace", "Archived"]);
+  ).toEqual(["All", "Mine", "Archived", "Workspace"]);
   expect(titles(home)).toEqual(["Pick one thread"]);
 
   await userEvent.click(within(home).getByRole("tab", { name: "Archived" }));

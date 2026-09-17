@@ -4187,6 +4187,8 @@ async def test_the_rail_groups_the_members_own_conversations_and_everyone_elses(
     assert rows[str(mine_id)]["mine"] is True
     assert rows[str(theirs_id)]["mine"] is True
     assert rows[str(mine_id)]["speaker"] is None
+    assert rows[str(mine_id)]["speakers"] == ["owner@example.com"]
+    assert rows[str(theirs_id)]["speakers"] == ["peer@example.com", "owner@example.com"]
 
     peer_rows = {
         row["name"]: row
@@ -11289,6 +11291,7 @@ async def test_an_unreadable_conversation_states_no_words_and_no_speakers(
     assert row["opening"] is None
     assert row["source"] is None
     assert row["speaker"] is None
+    assert row["speakers"] == []
     assert row["owner_name"] is None
 
 

@@ -44,7 +44,10 @@ export const buttonVariants = cva(
       size: {
         default: "",
         commit: "px-3xl py-md",
-        bar: "h-(--size-control) whitespace-nowrap rounded-full px-2xl py-0 text-label",
+        bar: cn(
+          "h-(--size-control) whitespace-nowrap rounded-full px-lg py-0 text-label",
+          "[&_svg]:size-(--size-glyph)",
+        ),
         chip: "gap-sm rounded-full px-md text-label",
         icon: "size-(--size-control) rounded-full p-0 [&_svg]:size-(--size-glyph)",
         glyph: "size-(--size-glyph) rounded-control p-0 [&_svg]:size-(--size-glyph)",

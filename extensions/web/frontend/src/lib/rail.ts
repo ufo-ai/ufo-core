@@ -18,12 +18,14 @@ export function chatState(row: Conversation): ChatState {
   return row.unread ? "unread" : "idle";
 }
 
-export const CHAT_STATE_RANK: Record<ChatState, number> = {
-  working: 0,
-  waiting: 1,
-  unread: 2,
-  idle: 3,
-};
+/** The order those states rank in, and the only place it is written: the rail sorts by it, the
+ *  table sorts by it, and the table's bands stand in it. The rank is read off the same list rather
+ *  than written a second time, so a sort over 300 rows still pays one lookup per row. */
+export const CHAT_STATES: readonly ChatState[] = ["working", "waiting", "unread", "idle"];
+
+export const CHAT_STATE_RANK = Object.fromEntries(
+  CHAT_STATES.map((state, at) => [state, at]),
+) as Record<ChatState, number>;
 
 /** A listed conversation on the wire: the kind's row, its fields flat under `name`, and the agent
  *  the read ran under. */
@@ -260,7 +262,8 @@ export function railRows(rows: Conversation[], shown: RailShown, sort: RailSort)
   if (sort === "recency") return kept;
   return [...kept].sort(
     (one, two) =>
-      CHAT_STATE_RANK[chatState(one)] - CHAT_STATE_RANK[chatState(two)] || moment(two) - moment(one),
+      CHAT_STATE_RANK[chatState(one)] - CHAT_STATE_RANK[chatState(two)] ||
+      moment(two) - moment(one),
   );
 }
 

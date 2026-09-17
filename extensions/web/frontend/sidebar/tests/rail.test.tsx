@@ -383,6 +383,57 @@ test("a row from another surface draws its glyph and states the surface's own na
   expect((await hoverCard()).textContent).toContain("DM");
 });
 
+test("a pinned chat stands under a band of its own, above the recents", async () => {
+  const held = { ...CHAT_ROW, conversation_id: SECOND_ID, title: "Ship the plan", pinned: true };
+  wire({ ...chatsOnWire([CHAT_ROW, held]) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const rail = within(await screen.findByRole("navigation", { name: "Workspace" }));
+  const pinned = rail.getByRole("heading", { name: "Pinned" });
+  const recents = rail.getByRole("heading", { name: "Recents" });
+  const row = await screen.findByRole("button", { name: /Ship the plan/ });
+  expect(pinned.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(row.compareDocumentPosition(recents) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(
+    recents.compareDocumentPosition(screen.getByRole("button", { name: /Pick one thread/ })) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});
+
+test("either rail band folds its own rows away, and leaves the other standing", async () => {
+  const held = { ...CHAT_ROW, conversation_id: SECOND_ID, title: "Ship the plan", pinned: true };
+  wire({ ...chatsOnWire([CHAT_ROW, held]) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const rail = within(await screen.findByRole("navigation", { name: "Workspace" }));
+  await screen.findByRole("button", { name: /Ship the plan/ });
+
+  await userEvent.click(rail.getByRole("button", { name: "Pinned" }));
+
+  expect(screen.queryByRole("button", { name: /Ship the plan/ })).toBeNull();
+  expect(screen.getByRole("button", { name: /Pick one thread/ })).toBeTruthy();
+  expect(rail.getByRole("button", { name: "Pinned" }).getAttribute("aria-expanded")).toBe("false");
+
+  await userEvent.click(rail.getByRole("button", { name: "Recents" }));
+
+  expect(screen.queryByRole("button", { name: /Pick one thread/ })).toBeNull();
+  expect(localStorage.getItem("sections-shut")).toBe("Pinned\nRecents");
+
+  await userEvent.click(rail.getByRole("button", { name: "Pinned" }));
+
+  expect(screen.getByRole("button", { name: /Ship the plan/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Pick one thread/ })).toBeNull();
+});
+
+test("the rail names no pinned band where the member has pinned nothing", async () => {
+  wire({ ...chatsOnWire([CHAT_ROW]) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const rail = within(await screen.findByRole("navigation", { name: "Workspace" }));
+  await screen.findByRole("button", { name: /Pick one thread/ });
+  expect(rail.queryByRole("heading", { name: "Pinned" })).toBeNull();
+});
+
 test("a rail row that shared a file draws the clip, and one that shared none draws no mark", async () => {
   const shared = { ...CHAT_ROW, conversation_id: SECOND_ID, title: "Quarter report", artifacts: true };
   wire({ ...chatsOnWire([CHAT_ROW, shared]) });

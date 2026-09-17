@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import {
+  IconChevronDown,
   IconCirclePlusFilled,
   IconClockPlay,
   IconDotsVertical,
@@ -77,7 +78,7 @@ import {DrawerHost, useDrawerHost, useDrawerList} from "@/kernel/drawer";
 import {PaneFault} from "@/kernel/pane";
 
 import { agentName } from "@/lib/agentName";
-import { ChatStatus, ChatTrail } from "@/lib/chatMark";
+import { ChatStatus, ChatTrail, PINNED } from "@/lib/chatMark";
 import { rowMoment } from "@/lib/moments";
 import { cn } from "@/lib/cn";
 import {HOME_TITLE} from "@/lib/title";
@@ -104,6 +105,7 @@ import {
   foldSidebar,
   pickRailSort,
   pickRailShown,
+  pickSectionShut,
   quietRail,
   railRead,
   readRail,
@@ -316,14 +318,24 @@ function NavRow({
   );
 }
 
+const SECTION_CHEVRON =
+  "size-(--size-glyph) shrink-0 transition-transform duration-100 ease-control " +
+  "motion-reduce:transition-none";
+
+/** The name of a run of rows, and the control that folds it: the chevron stands beside the name
+ *  rather than at the row's edge, where the acts the pointer reveals stand. */
 function SectionHead({
   label,
   collapsed,
+  shut,
+  onShut,
   acts,
   children,
 }: {
   label: string;
   collapsed?: boolean;
+  shut: boolean;
+  onShut: (shut: boolean) => void;
   acts?: React.ReactNode;
   children?: React.ReactNode;
 }) {
@@ -334,13 +346,20 @@ function SectionHead({
         collapsed && "hidden",
       )}
     >
-      <h2
-        className={cn(
-          "m-0 min-w-0 flex-1 truncate px-sm",
-          "font-sans text-label font-medium text-ink-soft",
-        )}
-      >
-        {label}
+      <h2 className="m-0 flex min-w-0 flex-1 px-sm">
+        <button
+          type="button"
+          aria-expanded={!shut}
+          onClick={() => onShut(!shut)}
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-sm border-0 bg-transparent p-0 text-left",
+            "font-sans text-label font-medium text-ink-soft hover:text-ink",
+            "transition-[color] duration-100 ease-control motion-reduce:transition-none",
+          )}
+        >
+          <span className="min-w-0 truncate">{label}</span>
+          <IconChevronDown className={cn(SECTION_CHEVRON, shut && "-rotate-90")} aria-hidden />
+        </button>
       </h2>
       {acts}
       {children ? (
@@ -474,11 +493,8 @@ function WorkspaceSidebar({
           onClick={() => placeWorkspace(tabs[0], {}, "push")}
         />
       </ul>
-      <div className={cn("flex min-h-0 flex-1 flex-col gap-px", collapsed && "hidden")}>
-        <RailSettingsFlyout onCompose={startChat} />
-        <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto">
-          <RailList route={route} mainAgent={mainAgent} />
-        </div>
+      <div className={cn("flex min-h-0 flex-1 flex-col", collapsed && "hidden")}>
+        <RailList route={route} mainAgent={mainAgent} onCompose={startChat} />
       </div>
       <footer className="mt-auto shrink-0">
         <ul className="m-0 flex list-none flex-col gap-px p-0">
@@ -559,12 +575,22 @@ function RoutedPane({
   return missed;
 }
 
-function RailSettingsFlyout({ onCompose }: { onCompose: () => void }) {
+function RailSettingsFlyout({
+  shut,
+  onShut,
+  onCompose,
+}: {
+  shut: boolean;
+  onShut: (shut: boolean) => void;
+  onCompose: () => void;
+}) {
   const { shown, sort } = useRail();
   const host = useDrawerHost();
   return (
     <SectionHead
       label={RECENTS}
+      shut={shut}
+      onShut={onShut}
       acts={
         <button
           type="button"
@@ -630,10 +656,16 @@ function RailSkeleton() {
   );
 }
 
-function RailList({ route, mainAgent }: { route: Route; mainAgent: Agent | null }) {
-  const rail = useRail();
-  const rows = railRows(rail.rows, rail.shown, rail.sort);
-  const list = (
+function RailRows({
+  rows,
+  route,
+  mainAgent,
+}: {
+  rows: Conversation[];
+  route: Route;
+  mainAgent: Agent | null;
+}) {
+  return (
     <ul className="m-0 flex list-none flex-col gap-px p-0">
       {rows.map((row) => {
         const facts = [
@@ -653,8 +685,42 @@ function RailList({ route, mainAgent }: { route: Route; mainAgent: Agent | null 
       })}
     </ul>
   );
+}
+
+/** The whole rail scrolls as one column: a pinned run held above the scroll would take the
+ *  recents' room as it grew. */
+function RailList({
+  route,
+  mainAgent,
+  onCompose,
+}: {
+  route: Route;
+  mainAgent: Agent | null;
+  onCompose: () => void;
+}) {
+  const rail = useRail();
+  const rows = railRows(rail.rows, rail.shown, rail.sort);
+  const pinned = rows.filter((row) => row.pinned);
+  const recent = rows.filter((row) => !row.pinned);
+  const pinnedShut = rail.sectionsShut.includes(PINNED);
+  const recentsShut = rail.sectionsShut.includes(RECENTS);
   return (
-    <>
+    <div className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto">
+      {pinned.length ? (
+        <>
+          <SectionHead
+            label={PINNED}
+            shut={pinnedShut}
+            onShut={(shut) => pickSectionShut(PINNED, shut)}
+          />
+          {pinnedShut ? null : <RailRows rows={pinned} route={route} mainAgent={mainAgent} />}
+        </>
+      ) : null}
+      <RailSettingsFlyout
+        shut={recentsShut}
+        onShut={(shut) => pickSectionShut(RECENTS, shut)}
+        onCompose={onCompose}
+      />
       {rail.phase === "loading" ? <RailSkeleton /> : null}
       {rail.phase === "failed" ? (
         <div className="flex flex-col gap-2xs p-sm text-ink-soft">
@@ -668,8 +734,10 @@ function RailList({ route, mainAgent }: { route: Route; mainAgent: Agent | null 
           </button>
         </div>
       ) : null}
-      {rows.length ? list : null}
-    </>
+      {recentsShut || !recent.length ? null : (
+        <RailRows rows={recent} route={route} mainAgent={mainAgent} />
+      )}
+    </div>
   );
 }
 

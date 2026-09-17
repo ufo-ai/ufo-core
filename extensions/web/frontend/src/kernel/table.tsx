@@ -1,5 +1,5 @@
-import { IconChevronRight } from "@tabler/icons-react";
-import type { ReactNode } from "react";
+import { IconChevronDown, IconChevronRight } from "@tabler/icons-react";
+import { Fragment, type ReactNode } from "react";
 
 import { Table, TableNote, Td, TdActs, Th, tableFloor } from "@/components/ui/table";
 import { Pager, pagerSteps, type Paging } from "@/kernel/pager";
@@ -116,6 +116,42 @@ function Head({
   );
 }
 
+/** One named run of records inside a table, and whether the member has shut it. A run states what
+ *  its rows have in common, so the band is also the control: pressing the name is what folds the
+ *  run away, and a shut run keeps its band because the band is the way back to the rows. */
+export type Run<Row> = {
+  label: string;
+  rows: Row[];
+  shut: boolean;
+  onShut: (shut: boolean) => void;
+};
+
+const RUN_CHEVRON =
+  "size-(--size-glyph) shrink-0 transition-transform duration-100 ease-control " +
+  "motion-reduce:transition-none";
+
+function RunBand<Row>({ span, run }: { span: number; run: Run<Row> }) {
+  return (
+    <tr data-run="">
+      <Td colSpan={span}>
+        <button
+          type="button"
+          aria-expanded={!run.shut}
+          onClick={() => run.onShut(!run.shut)}
+          className={cn(
+            "flex items-center gap-sm border-0 bg-transparent p-0 text-left font-sans text-label",
+            "text-inherit transition-[opacity] duration-100 ease-control",
+            "hover:opacity-(--opacity-muted-faint) motion-reduce:transition-none",
+          )}
+        >
+          <IconChevronDown className={cn(RUN_CHEVRON, run.shut && "-rotate-90")} aria-hidden />
+          {run.label}
+        </button>
+      </Td>
+    </tr>
+  );
+}
+
 function Act({ verb }: { verb: string | null }) {
   if (!verb) return null;
   return (
@@ -139,6 +175,11 @@ function Act({ verb }: { verb: string | null }) {
  *  alone rather than stacking every column under it, because a stack of five labelled lines per
  *  record is a page of labels the member scrolls past to reach the next name.
  *
+ *  `runs` draws the records under named bands instead of one after another, and is the whole of the
+ *  order: a table takes rows or runs, never both. A run the caller leaves empty is a band over
+ *  nothing, so the caller builds only the runs that hold records; the pager and the empty note stand
+ *  under all of them, because the listing they answer for is the whole table.
+ *
  *  `bare` drops the head row, for a listing whose panel already names what it holds. The tracks then
  *  come off the body cells rather than the heads, so a bare table's columns must state their own
  *  width — `TdFill` and `TdStamp` carry theirs.
@@ -151,6 +192,7 @@ function Act({ verb }: { verb: string | null }) {
 export function DataTable<Row>({
   columns,
   rows,
+  runs,
   rowKey,
   empty,
   note,
@@ -165,7 +207,6 @@ export function DataTable<Row>({
   children,
 }: {
   columns: Column[];
-  rows: Row[];
   rowKey: (row: Row) => string;
   empty: string;
   note?: string;
@@ -178,21 +219,45 @@ export function DataTable<Row>({
   lede?: boolean;
   bare?: boolean;
   children: (row: Row) => ReactNode;
-}) {
-  if (!rows.length && !note) return <PanelBlank body={empty} />;
+} & ({ rows: Row[]; runs?: undefined } | { runs: Run<Row>[]; rows?: undefined })) {
+  const held = runs === undefined ? rows.length : runs.reduce((all, run) => all + run.rows.length, 0);
+  if (!held && !note) return <PanelBlank body={empty} />;
   const span = columns.length + (act ? 1 : 0);
   const facts = columns.filter(isFact).length;
   const stamps = columns.filter(isStamp).length;
   const drawn = columns.filter(isActs).length;
+  // A whole column is measured from the rows, so it reserves nothing: counted as prose it held 160
+  // pixels for a column of monograms and scrolled the table sideways in a window with room for it.
+  const wholes = columns.filter(isWhole).length;
   const filled = columns.some(isFill);
   const measured = filled || columns.some(isWhole);
+  const record = (row: Row) => {
+    const press = open?.(row) ?? null;
+    const control = press ? rowControl(press, true) : null;
+    const standing = current?.(row) ?? false;
+    return (
+      <tr
+        key={rowKey(row)}
+        {...control}
+        aria-current={standing || undefined}
+        className={cn(control && "hover:bg-fill", control?.className, standing && "bg-fill")}
+      >
+        {children(row)}
+        {act ? (
+          <Td data-acts="" className="w-(--size-act)">
+            <Act verb={act(row)} />
+          </Td>
+        ) : null}
+      </tr>
+    );
+  };
   return (
     <Table
       columns={stacks && !lede ? [...columns.map(label), ...(act ? [""] : [])] : undefined}
       measured={measured}
       lede={lede}
       floor={tableFloor({
-        prose: columns.length - facts - stamps - drawn,
+        prose: columns.length - facts - stamps - drawn - wholes,
         fact: facts,
         stamp: stamps,
         acts: drawn + (act ? 1 : 0),
@@ -219,33 +284,17 @@ export function DataTable<Row>({
         </thead>
       )}
       <tbody>
-        {rows.length ? (
-          rows.map((row) => {
-            const press = open?.(row) ?? null;
-            const control = press ? rowControl(press, true) : null;
-            const standing = current?.(row) ?? false;
-            return (
-              <tr
-                key={rowKey(row)}
-                {...control}
-                aria-current={standing || undefined}
-                className={cn(
-                  control && "hover:bg-fill",
-                  control?.className,
-                  standing && "bg-fill",
-                )}
-              >
-                {children(row)}
-                {act ? (
-                  <Td data-acts="" className="w-(--size-act)">
-                    <Act verb={act(row)} />
-                  </Td>
-                ) : null}
-              </tr>
-            );
-          })
-        ) : (
+        {!held ? (
           <TableNote span={span}>{note}</TableNote>
+        ) : runs === undefined ? (
+          rows.map(record)
+        ) : (
+          runs.map((run) => (
+            <Fragment key={run.label}>
+              <RunBand span={span} run={run} />
+              {run.shut ? null : run.rows.map(record)}
+            </Fragment>
+          ))
         )}
       </tbody>
       {pager && pagerSteps(pager) ? (

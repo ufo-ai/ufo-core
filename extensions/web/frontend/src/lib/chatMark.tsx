@@ -53,11 +53,14 @@ function Spinner({ glyph: Glyph, ink }: { glyph: typeof IconLoader; ink: string 
   return <Glyph className={cn(GLYPH, "animate-spin motion-reduce:animate-none", ink)} aria-hidden />;
 }
 
-const STATE_WORDS: Record<ChatState, string> = {
-  working: "Working",
+/** The one word for what a chat is doing: what a reader hears off the dot, and what the band a run
+ *  of them stands under is called. Two vocabularies for one reading would let the table's bands and
+ *  the marks in them name the same state differently. */
+export const STATE_WORDS: Record<ChatState, string> = {
+  working: "Running",
   waiting: "Waiting for you",
   unread: "Unread",
-  idle: "Idle",
+  idle: "Read",
 };
 
 const STATE_INK: Record<Exclude<ChatState, "working">, string> = {
@@ -190,27 +193,34 @@ export function channelWord(surface: string): string {
 }
 
 
-/** Where the conversation came in, drawn only where that is not the portal: most chats are the
- *  member's own web ones, so a mark on every row would say nothing and the rows that arrived from
- *  somewhere else would stop standing out.
+/** Where the conversation came in, as the column of channels draws it: the surface's glyph and the
+ *  one word for it, on every row. The column states one fact about every record or it is not a
+ *  column — a blank against a portal chat reads as a row that arrived from nowhere, not as the
+ *  ordinary case.
  *
- *  The glyph is the whole of it and the words are under the pointer — the surface's name, or the
- *  room it ran in where the surface reported one, because one Slack workspace fills a column with
- *  `#`-prefixed names that differ only in their last word. A room leads back out to the thread. */
+ *  The room the surface reported is under the pointer rather than in the column, because one Slack
+ *  workspace fills a column with `#`-prefixed names that differ only in their last word, and it
+ *  leads back out to the thread. A portal chat has neither a room nor a link out, so it is the word
+ *  alone. */
 export function ChannelMark({ row }: { row: Conversation }) {
-  if (isPortalChat(row.surface)) return null;
   const word = channelWord(row.surface);
   const mark = (
-    <span role="img" aria-label={row.surface_label ?? word} className="flex">
-      <ChannelGlyph surface={row.surface} className={cn(MARK, "text-ink-soft")} />
+    <span
+      role="img"
+      aria-label={row.surface_label ?? word}
+      className="flex items-center gap-2xs whitespace-nowrap"
+    >
+      <ChannelGlyph surface={row.surface} className={cn(GLYPH, "text-ink-soft")} />
+      {word}
     </span>
   );
   const out = slackLink(row.surface, row.source);
+  if (out === null && row.surface_label === null) return mark;
   return (
     <Tooltip>
       <TooltipTrigger asChild>{mark}</TooltipTrigger>
       {out === null ? (
-        <TooltipContent side="top">{row.surface_label ?? word}</TooltipContent>
+        <TooltipContent side="top">{row.surface_label}</TooltipContent>
       ) : (
         <LinkedTip at={out} says={row.surface_label ?? word} />
       )}

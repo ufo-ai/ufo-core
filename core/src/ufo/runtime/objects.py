@@ -96,7 +96,7 @@ type Relation = Literal[
 ]
 type AgentTargetVerb = Literal["list", "get", "create", "update", "delete"]
 
-type _SortRank = Literal[0, 1, 2, 3]
+type _SortRank = Literal[0, 1, 2, 3, 4]
 
 AGENT_TARGET_VERBS = frozenset({"list", "get", "create", "update", "delete"})
 
@@ -204,7 +204,7 @@ class _ObjectCursor(BaseModel):
     @model_validator(mode="after")
     def validate_rank(self) -> "_ObjectCursor":
         match self.rank, self.value:
-            case (0, "") | (1, int()) | (2, int() | float()) | (3, str()):
+            case (0, "") | (1, int()) | (2, int() | float()) | (3, str()) | (4, str()):
                 return self
             case _:
                 raise ValueError("cursor value does not match its sort rank")
@@ -306,6 +306,10 @@ def _sortable(value: JsonValue, field_name: str) -> tuple[_SortRank, str | int |
             return (2, value)
         case str():
             return (3, value)
+        # A run of names — a conversation's speakers — orders by the run itself, so a field a row
+        # legitimately carries as a list is an order the page answers rather than a 400 it raises.
+        case list() if all(isinstance(entry, str) for entry in value):
+            return (4, "\n".join(entry for entry in value if isinstance(entry, str)))
         case _:
             raise ValueError(
                 f"object list field {field_name!r} contains a non-scalar value and cannot order"
@@ -756,7 +760,7 @@ class ObjectKind[SpecT: BaseModel]:
     field lists, naming rules, which verbs refuse, pause and expiry semantics, admin exceptions,
     and visibility rules — because guidance is read by the turn that calls `object_explain`, while
     the description is read by every turn. `list_fields` is the kind's own filter and order
-    vocabulary — whatever scalar its rows carry, spec field or not, so a read-only kind exposes a
+    vocabulary — whatever a row carries, spec field or not, so a read-only kind exposes a
     filterable column without widening the spec its apply refuses — and declaring it makes filter
     and order validation independent of whether any rows currently exist. A row carrying a field
     the kind never declared is refused; a declared field its rows never produce reads as null, so

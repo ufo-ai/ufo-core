@@ -752,7 +752,7 @@ _acting_member_var = ActingMember.current
 
 
 def _member_row(entry: ListedConversation) -> ObjectRow:
-    speakers = [who.sender or who.email for who in entry.speakers]
+    speakers: list[JsonValue] = [who.sender or who.email for who in entry.speakers]
     stamp = entry.summary.last_turn_at or entry.summary.created_at
     portal = entry.summary.surface == PORTAL_SURFACE or entry.summary.surface.startswith(
         EXTENSION_SURFACE_PREFIX
@@ -765,6 +765,7 @@ def _member_row(entry: ListedConversation) -> ObjectRow:
             "opening": opening_sentence(entry.summary.opening_message),
             "mine": entry.mine,
             "speaker": None if entry.mine or not speakers else speakers[0],
+            "speakers": speakers,
             "surface": entry.summary.surface,
             "surface_label": entry.surface_label,
             "audience": entry.audience,
@@ -884,6 +885,7 @@ CONVERSATION_OBJECT = ObjectKind(
             "opening",
             "mine",
             "speaker",
+            "speakers",
             "portal",
             "audience",
             "member_email",

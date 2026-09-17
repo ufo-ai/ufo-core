@@ -1386,7 +1386,7 @@ test("a section's note stands under its heading, not under the bar", () => {
   expect(note.parentElement).toBe(heading.parentElement);
 });
 
-test("a table stands on the section's own ground, ruled only between its records", () => {
+test("a table stands on the section's own ground, ruled under its head and between its records", () => {
   render(
     <Table>
       <thead>
@@ -1405,7 +1405,8 @@ test("a table stands on the section's own ground, ruled only between its records
   expect(frame?.className).not.toContain("border-edge");
   expect(frame?.className).not.toContain("rounded-panel");
   const head = screen.getByRole("columnheader", { name: "Member" });
-  expect(head.className).not.toContain("border");
+  expect(head.className).toContain("border-b");
+  expect(head.className).not.toContain("border-t");
   const cell = screen.getByRole("cell", { name: "lead@example.com" });
   expect(cell.className).toContain("border-b");
   expect(cell.className).not.toContain("border-t");

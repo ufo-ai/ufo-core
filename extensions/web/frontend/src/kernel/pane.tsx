@@ -1,6 +1,5 @@
 import {
   IconChevronLeft,
-  IconFilter,
   IconLayoutGrid,
   IconList,
   IconX,
@@ -450,7 +449,7 @@ export function PageToolbar({ className, children, ...props }: ComponentProps<"d
  *  bar onto more than one line, where a vertical rule divides whichever two controls happen to
  *  land beside each other — so there it is not drawn. */
 export function ToolbarRule() {
-  return <span aria-hidden className="my-xs w-px shrink-0 self-stretch bg-edge max-narrow:hidden" />;
+  return <span aria-hidden className="my-sm w-px shrink-0 self-stretch bg-edge max-narrow:hidden" />;
 }
 
 export type Face = "tiles" | "table";
@@ -496,6 +495,22 @@ export function ViewSwitch({ face, onPick }: { face: Face; onPick: (face: Face) 
 
 export type FacetGroup = { label: string; options: FilterOption[] };
 
+/** Tabler's filter glyphs are a funnel or three rules, and neither is the mark this bar is drawn
+ *  with. Its trigger draws no ground but takes the control box: a 16-pixel target is a mark. */
+function FilterGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden className="size-(--size-glyph) shrink-0">
+      <path
+        d="M4 8h16M7 16h10"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 /** Every narrowing a listing offers, behind one glyph. A listing narrowed on more than one axis
  *  cannot draw them all as pill rows: two rows of pills fill the bar the search and the shape
  *  switch also stand in, and the member reads six choices to make one. The menu states the axes by
@@ -519,15 +534,12 @@ export function FacetMenu({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          variant="row"
+          variant="mark"
           size="icon"
           aria-label="Filter"
-          className={cn(
-            "border-transparent text-ink-soft hover:bg-fill",
-            value && "bg-fill text-ink",
-          )}
+          className={cn("-mx-sm", value && "text-ink")}
         >
-          <IconFilter aria-hidden />
+          <FilterGlyph />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">

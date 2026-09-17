@@ -1,6 +1,7 @@
-import { IconDotsVertical } from "@tabler/icons-react";
+import { IconDotsVertical, IconPlus } from "@tabler/icons-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { AvatarStack } from "@/components/ui/avatar-stack";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -8,23 +9,26 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Search } from "@/components/ui/field";
-import { Segmented } from "@/components/ui/filter";
-import { ACTS, TdActs, TdFact, TdFill, TdWhole } from "@/components/ui/table";
+import { Segmented, type Segment } from "@/components/ui/filter";
+import { ACTS, TdActs, TdFill, TdStamp, TdWhole } from "@/components/ui/table";
 import { BANDS, COLUMN, FacetMenu, Header, Page, PageToolbar, Pane } from "@/kernel/pane";
 import type { FacetGroup } from "@/kernel/pane";
 import { Notice, PanelEmpty, PanelSkeleton, Section, usePanelRead } from "@/kernel/panel";
 import type { PanelState } from "@/kernel/panel";
-import { DataTable } from "@/kernel/table";
+import { DataTable, type Run } from "@/kernel/table";
 import { SHARED_SUBJECT, ownerLabel, useViewer } from "@/lib/audience";
 import {
   ArtifactMark,
   AutomationMark,
   ChannelMark,
   ChatStatus,
+  PINNED,
+  STATE_WORDS,
   ShareMark,
   channelWord,
 } from "@/lib/chatMark";
 import { cn } from "@/lib/cn";
+import { useMainAgent } from "@/lib/mainAgent";
 import { Moment } from "@/lib/moments";
 import { OwnerMark } from "@/lib/ownerMark";
 import {
@@ -34,22 +38,25 @@ import {
   type Filed,
 } from "@/lib/chatFiling";
 import {
-  CHAT_STATE_RANK,
+  CHAT_STATES,
   FILING_MARKS,
   chatRows,
   chatState,
   mergeChats,
   type ConversationsPayload,
 } from "@/lib/rail";
-import { useRail } from "@/lib/railStore";
+import { pickSectionShut, useRail } from "@/lib/railStore";
+import { openNewChat } from "@/lib/router";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
 import type { Conversation } from "@/lib/types";
 import { HOME_TITLE } from "@/lib/title";
 
 const COLUMNS = [
   { label: "Chat", fill: true },
-  { label: "Owner", whole: true },
-  { label: "Time", fact: true },
+  { label: "Creator", stamp: true },
+  { label: "Members", whole: true },
+  { label: "Channel", whole: true },
+  { label: "Time", stamp: true },
   { label: "", acts: true },
 ];
 
@@ -59,6 +66,7 @@ const UNREADABLE = "Couldn't load conversations.";
 const SEARCH = "Search chats";
 const CUT = "Search to reach older chats.";
 const ARCHIVED = "Archived";
+const NEW = "New";
 
 /** The rows this member's own acts have filed, by conversation, as each act left them. */
 type Filings = Readonly<Record<string, Conversation>>;
@@ -95,9 +103,11 @@ function caught(rows: Conversation[], filings: Filings, archived: boolean): stri
   });
 }
 
-/** Every cell but the time states a fact the member came to read, so the table is drawn in the
- *  page's own ink and the stamp alone recedes. */
+/** The chat's own name is what the member came to read, so it is drawn in the page's own ink and
+ *  every fact beside it recedes. */
 const FACT = "text-ink";
+
+const BAND_HELD = "chats:";
 
 /** The listing behind the rail is bounded before it is paged, so narrowing the loaded rows answers
  *  `No conversations match` for a conversation that exists. */
@@ -123,11 +133,13 @@ type Scope = "all" | "mine" | "workspace" | "archived";
 
 const ARCHIVED_SCOPE: Scope = "archived";
 
-const SCOPE_SEGMENTS: { label: string; value: Scope }[] = [
+/** The rule is the seam: the first three narrow one listing of what the member is in, and the
+ *  fourth asks the workspace a different question. */
+const SCOPE_SEGMENTS: Segment[] = [
   { label: "All", value: "all" },
   { label: "Mine", value: "mine" },
-  { label: "Workspace", value: "workspace" },
   { label: ARCHIVED, value: ARCHIVED_SCOPE },
+  { label: "Workspace", value: "workspace", rule: true },
 ];
 
 function asScope(value: string | undefined): Scope {
@@ -185,14 +197,30 @@ function faceted(row: Conversation, picked: string): boolean {
   return false;
 }
 
-/** The rows arrive newest `last_at` first and a sort holds equal keys in the order it was given
- *  them, so recency orders each state's own run without being a key here. A pinned row leads. */
-function ordered(rows: Conversation[]): Conversation[] {
-  return [...rows].sort(
-    (one, two) =>
-      Number(two.pinned) - Number(one.pinned) ||
-      CHAT_STATE_RANK[chatState(one)] - CHAT_STATE_RANK[chatState(two)],
-  );
+/** The bands the table stands in: a pinned row leads whatever it is doing, and every other row falls
+ *  under the one word for what it is doing now, in the order those states rank. The rows arrive
+ *  newest `last_at` first and a band keeps them in the order it was given them, so recency runs
+ *  inside every band without being written here. A state no row holds draws no band — a name over
+ *  nothing is a run the member cannot open.
+ *
+ *  Which bands are shut is the member's, held by name in the same store the sidebar's sections use,
+ *  so a run folded away is still folded on the next visit. The table qualifies its names there: the
+ *  rail has a `Pinned` run of its own, and folding one is not folding the other. */
+export function chatBands(rows: Conversation[], shut: string[]): Run<Conversation>[] {
+  const held = rows.filter((row) => !row.pinned);
+  return [
+    { label: PINNED, rows: rows.filter((row) => row.pinned) },
+    ...CHAT_STATES.map((state) => ({
+      label: STATE_WORDS[state],
+      rows: held.filter((row) => chatState(row) === state),
+    })),
+  ]
+    .filter((band) => band.rows.length > 0)
+    .map((band) => ({
+      ...band,
+      shut: shut.includes(BAND_HELD + band.label),
+      onShut: (folded: boolean) => pickSectionShut(BAND_HELD + band.label, folded),
+    }));
 }
 
 /** The rows behind the table, from whichever source answered for them. */
@@ -333,12 +361,16 @@ export function Chats({
                     onPlace({ ...place, q: said || undefined, after: undefined }, "replace")
                   }
                 />
+                <NewChat />
               </span>
             </PageToolbar>
             <Section>
               <Listing
                 read={read}
-                rows={ordered(shown.filter((row) => faceted(row, picked)))}
+                runs={chatBands(
+                  shown.filter((row) => faceted(row, picked)),
+                  rail.sectionsShut,
+                )}
                 narrowed={narrowed}
                 after={place.after}
                 onPlace={(stepped) => onPlace({ ...place, after: stepped }, "push")}
@@ -373,9 +405,22 @@ function ChatSearch({ query, onSearch }: { query: string; onSearch: (query: stri
   );
 }
 
+/** The act the bar ends on. It stands past the search because it makes a record rather than
+ *  narrowing the ones on the screen. */
+function NewChat() {
+  const agent = useMainAgent();
+  if (!agent) return null;
+  return (
+    <Button variant="send" size="bar" onClick={() => openNewChat(agent.id)}>
+      <IconPlus aria-hidden />
+      {NEW}
+    </Button>
+  );
+}
+
 function Listing({
   read,
-  rows,
+  runs,
   narrowed,
   after,
   onPlace,
@@ -383,7 +428,7 @@ function Listing({
   onFiled,
 }: {
   read: Read;
-  rows: Conversation[];
+  runs: Run<Conversation>[];
   narrowed: boolean;
   after: string | undefined;
   onPlace: (after: string | undefined) => void;
@@ -396,7 +441,7 @@ function Listing({
     <>
     <DataTable
       columns={COLUMNS}
-      rows={rows}
+      runs={runs}
       rowKey={(row) => row.conversation_id}
       lede
       empty={NO_CHATS}
@@ -423,19 +468,24 @@ function ChatCells({ row, onFiled }: { row: Conversation; onFiled: Filed }) {
           <ChatStatus row={row} />
           <span className="truncate">{row.title}</span>
           <span className="ml-auto flex shrink-0 items-center gap-2xs">
-            <ChannelMark row={row} />
             {row.automation_name ? <AutomationMark row={row} /> : null}
             <ArtifactMark row={row} />
             <ShareMark subject={row.audience} />
           </span>
         </span>
       </TdFill>
-      <TdWhole className={FACT}>
+      <TdStamp>
         <OwnerMark name={row.owner_name} email={row.owner_email} />
+      </TdStamp>
+      <TdWhole>
+        <AvatarStack people={row.speakers.map((who) => ({ name: who }))} />
       </TdWhole>
-      <TdFact>
+      <TdWhole>
+        <ChannelMark row={row} />
+      </TdWhole>
+      <TdStamp>
         <Moment at={row.last_at} />
-      </TdFact>
+      </TdStamp>
       <TdActs>
         <div className={ACTS}>
           <RowActs row={row} onFiled={onFiled} />

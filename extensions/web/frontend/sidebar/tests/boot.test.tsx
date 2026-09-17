@@ -110,6 +110,7 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "Artifacts",
     "Connections",
     "Settings",
+    "Recents",
     "New chat",
     "Recents options",
     MEMBER.email,
@@ -151,7 +152,9 @@ test("a section heading names its list and holds its menu behind a mark drawn un
 
   const sidebar = screen.getByRole("navigation", { name: "Workspace" });
   expect(within(sidebar).getByRole("heading", { name: "Recents" })).toBeTruthy();
-  expect(within(sidebar).queryByRole("button", { name: "Recents" })).toBeNull();
+  expect(
+    within(sidebar).getByRole("button", { name: "Recents" }).getAttribute("aria-expanded"),
+  ).toBe("true");
 
   const compose = within(sidebar).getAllByRole("button", { name: "New chat" }).at(-1)!;
   expect(compose.getAttribute("class")).toContain("group-hover/head:opacity-100");
@@ -198,6 +201,7 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     "Artifacts",
     "Connections",
     "Settings",
+    "Recents",
     "New chat",
     "Recents options",
     MEMBER.email,

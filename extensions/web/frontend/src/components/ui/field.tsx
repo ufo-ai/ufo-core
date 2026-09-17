@@ -1,5 +1,5 @@
 import * as LabelPrimitive from "@radix-ui/react-label";
-import { IconX } from "@tabler/icons-react";
+import { IconSearch, IconX } from "@tabler/icons-react";
 import type { ComponentProps, ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
@@ -101,8 +101,8 @@ export function Search({
   return (
     <form
       className={cn(
-        "flex h-(--size-control) w-(--container-search) items-center gap-sm rounded-full",
-        "bg-fill px-lg",
+        "flex h-(--size-control) w-(--container-search) items-center gap-xs rounded-full",
+        "bg-fill px-2xl",
         "focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ink",
         className,
       )}
@@ -111,14 +111,7 @@ export function Search({
         onSubmit?.();
       }}
     >
-      <svg
-        viewBox="0 0 16 16"
-        aria-hidden
-        className="size-(--size-glyph) shrink-0 text-ink-soft"
-      >
-        <circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
-        <path d="M10.5 10.5L14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      </svg>
+      <IconSearch className="size-(--size-glyph) shrink-0 text-ink-soft" aria-hidden />
       <input
         type="search"
         aria-label={label}

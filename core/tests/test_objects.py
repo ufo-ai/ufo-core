@@ -983,6 +983,35 @@ def _check_a_declared_field_no_row_produces_reads_as_null() -> None:
     ]
 
 
+def _check_a_run_of_names_orders_by_the_run_rather_than_refusing() -> None:
+    """A row carries what its kind declared, and a conversation's speakers are a run of names. The
+    page orders by the run itself and stands them past every scalar, so a field a kind legitimately
+    carries as a list is an order the listing answers rather than a 400 it raises."""
+    rows = (
+        ObjectRow(name="quiet", summary="nobody", fields={"speakers": []}),
+        ObjectRow(name="pair", summary="two", fields={"speakers": ["ada", "bo"]}),
+        ObjectRow(name="one", summary="one", fields={"speakers": ["ada"]}),
+    )
+    query = ObjectListQuery(supported_fields=frozenset({"speakers"}), order_by="speakers")
+    assert [row.name for row in object_page(rows, query).rows] == ["quiet", "one", "pair"]
+    assert [row.name for row in object_page(rows, replace(query, order="desc")).rows] == [
+        "pair",
+        "one",
+        "quiet",
+    ]
+
+    # A page of them mints a continuation cursor at the run's own rank, so the walk to the rest is
+    # the cursor the first page handed back rather than a rank the cursor refuses to carry.
+    walked = tuple(
+        ObjectRow(name=f"c-{index:03d}", summary="", fields={"speakers": []})
+        for index in range(OBJECT_LIST_PAGE + 5)
+    )
+    first = object_page(walked, query)
+    assert first.next_cursor is not None
+    second = object_page(walked, replace(query, cursor=first.next_cursor))
+    assert [row.name for row in second.rows] == [row.name for row in walked[OBJECT_LIST_PAGE:]]
+
+
 async def _agent_row(
     workspace_id: UUID,
     name: str = "assistant",
@@ -5823,6 +5852,7 @@ def test_object_pure_contract(database_url: str) -> None:
         _check_boot_fails_on_an_unknown_agent_target_verb,
         _check_boot_fails_on_a_gate_violating_kind,
         _check_a_declared_field_no_row_produces_reads_as_null,
+        _check_a_run_of_names_orders_by_the_run_rather_than_refusing,
         _check_artifact_object_names_prefix_the_conversation_and_slug_the_filename,
     ):
         check()
