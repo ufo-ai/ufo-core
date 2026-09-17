@@ -1666,7 +1666,100 @@ test("a search matching no connector offers the credential and MCP paths instead
 
   expect(await screen.findByText("No connector matches this search.")).toBeTruthy();
   expect(screen.getByRole("link", { name: "Add credential" })).toBeTruthy();
-  expect(screen.getByRole("link", { name: "Add MCP server" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Add MCP server" })).toBeTruthy();
+});
+
+test("an address naming the MCP offer stands it beside the connectors that matched", async () => {
+  location.hash = sectionHash("connectors", { chip: "available", q: "mcp" });
+  library({
+    "/workspace/first-run": () =>
+      json({
+        ...CATALOG,
+        providers: [
+          {
+            name: "quartz",
+            label: "Quartz",
+            summary: "Reads an MCP catalogue.",
+            group: "Developer platforms",
+          },
+        ],
+      }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("button", { name: "Add MCP server" })).toBeTruthy();
+  expect(rowsNamed("Quartz")).toHaveLength(1);
+});
+
+test("the MCP offer adds the server it is pressed on, token and all", async () => {
+  const posted: string[] = [];
+  const intents: unknown[] = [];
+  location.hash = sectionHash("connectors", { chip: "available", q: "mcp" });
+  library({
+    "/workspace/credentials$": () => json({ actions: CREDENTIAL_ACTIONS, slots: [] }),
+    "/intents": (_url, init) => {
+      intents.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "", turn_id: TURN_ID });
+    },
+    "/actions/credential/request_credentials": () =>
+      json({
+        applied: true,
+        message: "",
+        turn_id: TURN_ID,
+        credentials: { sealed: "seal", reason: "", prompts: [] },
+      }),
+    "/credentials": (_url, init) => {
+      posted.push(String(init?.body));
+      return json({ stored: true });
+    },
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Add MCP server" }));
+
+  await userEvent.type(screen.getByLabelText("Name"), "docs");
+  await userEvent.type(screen.getByLabelText("Server URL"), "https://mcp.example.com/mcp");
+  await userEvent.type(screen.getByLabelText("Bearer token"), "tok-live");
+  await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Connect" }));
+
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(intents).toEqual([
+    {
+      verb: "apply",
+      kind: "mcp_server",
+      name: "docs",
+      spec: { url: "https://mcp.example.com/mcp" },
+    },
+  ]);
+  const sent = new URLSearchParams(posted[0]);
+  expect(sent.get("slot")).toBe("mcp_server_docs");
+  expect(sent.get("value")).toBe("tok-live");
+});
+
+test("a server that authorizes no token is added by its address alone", async () => {
+  const posted: string[] = [];
+  const intents: unknown[] = [];
+  location.hash = sectionHash("connectors", { opens: ["mcp-server"] });
+  library({
+    "/workspace/credentials$": () => json({ actions: CREDENTIAL_ACTIONS, slots: [] }),
+    "/intents": (_url, init) => {
+      intents.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "", turn_id: TURN_ID });
+    },
+    "/credentials": (_url, init) => {
+      posted.push(String(init?.body));
+      return json({ stored: true });
+    },
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.type(await screen.findByLabelText("Name"), "docs");
+  await userEvent.type(screen.getByLabelText("Server URL"), "https://mcp.example.com/mcp");
+  await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Connect" }));
+
+  await waitFor(() => expect(intents).toHaveLength(1));
+  expect(posted).toEqual([]);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
 test("a search that matches narrows the shelf to it and offers neither path", async () => {
@@ -1679,5 +1772,5 @@ test("a search that matches narrows the shelf to it and offers neither path", as
 
   await waitFor(() => expect(rowsNamed("Neon")).toHaveLength(1));
   expect(rowsNamed("Notion")).toHaveLength(0);
-  expect(screen.queryByRole("link", { name: "Add MCP server" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Add MCP server" })).toBeNull();
 });

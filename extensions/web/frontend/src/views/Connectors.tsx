@@ -237,6 +237,13 @@ type ConnectionRow = {
 const MCP_SERVER_KIND = "mcp_server";
 const MCP_TOKEN_SLOT_PREFIX = "mcp_server_";
 const MCP_PROVIDER_PREFIX = "mcp:";
+const MCP_TOKEN_LABEL = "Bearer token";
+/** The names the kind takes, so a refusal the member could have been spared never reaches the wire. */
+const MCP_NAME_PATTERN = "[a-z0-9][a-z0-9_-]{0,62}";
+/** The lane the add form opens on, so the address alone reaches it. A deploy-named server hangs its
+ *  own name off it, which is what tells the form the endpoint rather than asking for one. */
+const MCP_SHEET = "mcp-server";
+const MCP_SHEET_NAMED = MCP_SHEET + "/";
 
 type CredentialSlotView = { slot: string };
 type CredentialsPayload = { slots: CredentialSlotView[]; actions: ActionView[] };
@@ -390,32 +397,41 @@ function CredentialOffer() {
   );
 }
 
+const MCP_OFFER_TITLE = "MCP server";
+
+const MCP_OFFER_SUMMARY = "An address and token for a server with no row here.";
+
+/** The offer answers a search naming it as well as a search that matched nothing, so the address
+ *  carrying that term is the link a member follows to add a server. */
+function mcpOffered(query: string, standing: number): boolean {
+  if (standing === 0) return true;
+  const said = MCP_OFFER_TITLE + " " + MCP_OFFER_SUMMARY;
+  return query !== "" && said.toLowerCase().includes(query.toLowerCase());
+}
+
 /** The other half of what a search that matched nothing can still offer: a server this deploy names
- *  no row for is reached by its own address, which the credentials screen takes. */
-function McpOffer() {
+ *  no row for is reached by the address and token the member types here. */
+function McpOffer({ onAdd }: { onAdd: () => void }) {
   return (
     <Item>
       <MarkTile>
         <BrandMark provider="mcp" className="text-ink" />
       </MarkTile>
       <ItemContent>
-        <ItemTitle>MCP server</ItemTitle>
-        <ItemDescription>An address and token for a server with no row here.</ItemDescription>
+        <ItemTitle>{MCP_OFFER_TITLE}</ItemTitle>
+        <ItemDescription>{MCP_OFFER_SUMMARY}</ItemDescription>
       </ItemContent>
       <ItemActions>
-        <a
-          href={workspaceHash("credentials")}
-          className={cn(buttonVariants({ variant: "outline", size: "bar" }))}
-        >
+        <Button variant="outline" size="bar" onClick={onAdd}>
           Add MCP server
-        </a>
+        </Button>
       </ItemActions>
     </Item>
   );
 }
 
 /** Two steps, because a token is never an object's field: the intent lands the server, then the
- *  sealed handoff fills the slot its name derives. */
+ *  sealed handoff fills the slot its name derives — and a server authorizing none skips that step. */
 function ConnectMcpServer({
   tile,
   agentId,
@@ -423,12 +439,14 @@ function ConnectMcpServer({
   onDone,
   onClose,
 }: {
-  tile: McpServerTile;
+  tile: McpServerTile | null;
   agentId: string;
   actions: ActionView[];
   onDone: (notice: NoticeState) => void;
   onClose: () => void;
 }) {
+  const [name, setName] = useState(tile?.name ?? "");
+  const [url, setUrl] = useState(tile?.url ?? "");
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
@@ -436,23 +454,32 @@ function ConnectMcpServer({
 
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (busy || !token.trim() || !request) return;
+    if (busy) return;
+    const server = name.trim();
+    const endpoint = url.trim();
+    const secret = token.trim();
+    if (!server || !endpoint || !request) return;
     setBusy(true);
     const landed = await postIntent(agentId, {
       verb: "apply",
       kind: MCP_SERVER_KIND,
-      name: tile.name,
-      spec: { url: tile.url },
+      name: server,
+      spec: { url: endpoint },
     });
     if (!landed.applied) {
       setBusy(false);
       setNotice(outcomeNotice(landed));
       return;
     }
-    const slot = MCP_TOKEN_SLOT_PREFIX + tile.name;
+    if (!secret) {
+      setBusy(false);
+      onDone({ text: (tile?.label ?? server) + " connected.", refused: false });
+      return;
+    }
+    const slot = MCP_TOKEN_SLOT_PREFIX + server;
     const outcome = await postAction(agentId, request.call, {
-      reason: "Sent to " + tile.url + " and nowhere else. Stored encrypted and never shown again.",
-      prompts: [{ slot, prompt: tile.token }],
+      reason: "Sent to " + endpoint + " and nowhere else. Stored encrypted and never shown again.",
+      prompts: [{ slot, prompt: tile?.token ?? MCP_TOKEN_LABEL }],
     });
     const sealed = outcome.credentials?.sealed;
     if (!sealed) {
@@ -464,7 +491,7 @@ function ConnectMcpServer({
     try {
       res = await fetch(BASE + "/credentials", {
         method: "POST",
-        body: new URLSearchParams({ sealed, slot, value: token.trim() }),
+        body: new URLSearchParams({ sealed, slot, value: secret }),
         credentials: "same-origin",
       });
     } catch {
@@ -477,25 +504,60 @@ function ConnectMcpServer({
       setNotice({ text: (await res.text().catch(() => "")) || "The token was not stored.", refused: true });
       return;
     }
-    onDone({ text: tile.label + " connected.", refused: false });
+    onDone({ text: (tile?.label ?? server) + " connected.", refused: false });
   }
 
   return (
-    <Sheet open title={"Connect " + tile.label} onClose={onClose}>
+    <Sheet open title={tile ? "Connect " + tile.label : "Add MCP server"} onClose={onClose}>
       <OutcomeNotice state={notice} />
       <form onSubmit={save} className="flex flex-col gap-2xl">
-        <Facts rows={[{ label: "Server", value: tile.url }]} />
+        {tile ? (
+          <Facts rows={[{ label: "Server", value: tile.url }]} />
+        ) : (
+          <>
+            <Field
+              label="Name"
+              htmlFor="mcp-name"
+              description="What the agent calls the server. Lowercase letters, digits, hyphen and underscore."
+            >
+              <Input
+                id="mcp-name"
+                autoComplete="off"
+                autoFocus
+                required
+                pattern={MCP_NAME_PATTERN}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </Field>
+            <Field label="Server URL" htmlFor="mcp-url">
+              <Input
+                id="mcp-url"
+                type="url"
+                autoComplete="off"
+                required
+                placeholder="https://mcp.example.com/mcp"
+                value={url}
+                onChange={(event) => setUrl(event.target.value)}
+              />
+            </Field>
+          </>
+        )}
         <Field
-          label={tile.token}
+          label={tile?.token ?? MCP_TOKEN_LABEL}
           htmlFor="mcp-token"
-          description="Stored encrypted and never shown again."
+          description={
+            tile
+              ? "Stored encrypted and never shown again."
+              : "Stored encrypted and never shown again. Leave empty for a server that takes none."
+          }
         >
           <Input
             id="mcp-token"
             type="password"
             autoComplete="off"
-            autoFocus
-            required
+            autoFocus={tile !== null}
+            required={tile !== null}
             value={token}
             onChange={(event) => setToken(event.target.value)}
           />
@@ -725,7 +787,6 @@ export function Connectors({
   const [watching, setWatching] = useState<string | null>(null);
   const [handoff, setHandoff] = useState<Handoff | null>(null);
   const [removing, setRemoving] = useState<ConnectionRow | null>(null);
-  const [connecting, setConnecting] = useState<McpServerTile | null>(null);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [toast, setToast] = useState<ToastState>(arrivedToast);
   const consent = useRef<Window | null>(null);
@@ -850,8 +911,28 @@ export function Connectors({
         ]
       : [];
 
+  const servers = catalog.phase === "ready" ? catalog.payload.mcp_servers : [];
+
   const sheet = opens.slice(-1).map((id) => {
     if (id === COVERAGE) return <CoverageRecord key={id} legs={legs} onClose={() => shut(id)} />;
+    if (id === MCP_SHEET || id.startsWith(MCP_SHEET_NAMED)) {
+      const named = servers.find((one) => one.name === id.slice(MCP_SHEET_NAMED.length)) ?? null;
+      if (!agent || (id !== MCP_SHEET && named === null)) return null;
+      return (
+        <ConnectMcpServer
+          key={id}
+          tile={named}
+          agentId={agent.id}
+          actions={credentials.phase === "ready" ? credentials.payload.actions : []}
+          onDone={(outcome) => {
+            shut(id);
+            setNotice(outcome);
+            setReloads((count) => count + 1);
+          }}
+          onClose={() => shut(id)}
+        />
+      );
+    }
     const entry = pooled.find((one) => CONNECTION + one.grant === id);
     if (!entry) return null;
     return (
@@ -1007,7 +1088,7 @@ export function Connectors({
                                   disabled={busy !== null && waiting !== row.name}
                                   onClick={() =>
                                     row.mcp
-                                      ? setConnecting(row.mcp)
+                                      ? show(MCP_SHEET_NAMED + row.mcp.name)
                                       : connect(row.name, row.label)
                                   }
                                 >
@@ -1022,14 +1103,12 @@ export function Connectors({
                         <>
                           <ItemSeparator />
                           <CredentialOffer />
-                          {/* A search that matched nothing is the one moment the open-ended path is
-                              what the member wants, so it stands under the shelf's own offer. */}
-                          {standing.length ? null : (
+                          {mcpOffered(query, standing.length) ? (
                             <>
                               <ItemSeparator />
-                              <McpOffer />
+                              <McpOffer onAdd={() => show(MCP_SHEET)} />
                             </>
-                          )}
+                          ) : null}
                         </>
                       ) : null}
                     </ItemGroup>
@@ -1050,19 +1129,6 @@ export function Connectors({
         }}
       </Panel>
       {sheet}
-      {connecting && agent ? (
-        <ConnectMcpServer
-          tile={connecting}
-          agentId={agent.id}
-          actions={credentials.phase === "ready" ? credentials.payload.actions : []}
-          onDone={(outcome) => {
-            setConnecting(null);
-            setNotice(outcome);
-            setReloads((count) => count + 1);
-          }}
-          onClose={() => setConnecting(null)}
-        />
-      ) : null}
       <Dialog open={removing !== null} onOpenChange={(next) => !next && setRemoving(null)}>
         {removing?.entry && agent ? (
           <RemoveConnection
