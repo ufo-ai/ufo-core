@@ -1,0 +1,43 @@
+name = "workspace-export-routing"
+base = "e79f797619391da8a9616ea0744a22efb6ecfd1a"
+suites = ["workspace_export"]
+repeats = 2
+concurrency = 2
+max_stacks = 1
+budget_usd = 15.0
+est_usd_per_case = 0.30
+model = "z-ai/glm-5.3-flash"
+reasoning = "medium"
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+browser = { cdp_provider = "browserbase" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+memory = { index_backend = "turbopuffer" }
+models = { auto_model = "z-ai/glm-5.3-flash" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "short-description"
+[[arm.replacements]]
+path = "extensions/memory/ufo_ext_memory/workspace_export.py"
+old = '''        "Export workspace conversations, original artifact files, and memory for an admin. "
+        "Request in the admin's private conversation with the main agent. "
+        "The archive lists exclusions; unreadable included data refuses the export."
+'''
+new = '''        "Export workspace conversations, artifacts, and memory."
+'''
+
+[[arm]]
+name = "no-description"
+[[arm.replacements]]
+path = "extensions/memory/ufo_ext_memory/workspace_export.py"
+old = '''        "Export workspace conversations, original artifact files, and memory for an admin. "
+        "Request in the admin's private conversation with the main agent. "
+        "The archive lists exclusions; unreadable included data refuses the export."
+'''
+new = '''        ""
+'''

@@ -142,6 +142,25 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `job` | Recurring/one-time background work (source sync, page-change fan-out, turn dispatch, subagent result delivery, extension jobs). |
 | `scheduled_task` (scheduled_tasks extension) | Agent-namespaced, member-private recurring invocation with names unique per agent and optional UTC expiry, enforced before invocation. The extension owns the table — core migrations created it and it was adopted in place; fires ride the internal `invoke` capability as scheduled turns. Creation binds the executor, its reporting conversation, and that turn's internet restriction. `created_by_member_id` owns the management row but is not an execution principal. Stored internet scope either inherits the agent policy or denies internet; an omitted writer value denies internet. An internet-scoped turn addresses only tasks within its scope, so it cannot reactivate a wider task. Updates never move the task or widen its internet scope and never rewrite the marks a fire left, so run history outlives an edit. The main agent may target an existing child-agent task from any conversation: its creator may inspect, edit, pause, resume, run, or cancel it; an admin may list management metadata, pause a running task, or cancel it, but cannot resume or run it or read or change its cadence, expiry, prompt, description, or responses; another member cannot see it. A paused task keeps its definition and run history and fires nothing until its creator resumes it; a cancel deletes the row. Each recurring turn carries no speaker, acts for its creator, and carries only the exact claimed UTC occurrence and stored internet capability; when its following occurrence reaches expiry, runtime adds a continuation check-in to the completed work. An apply carrying `run_now` places the first fire in the present, so the next runner tick fires it and the schedule owns every fire after it; `run_now` is an act and is stored nowhere. |
 
+## Workspace export
+
+The memory extension binds `workspace:export` to the chat object-action dispatcher. An admin
+requests it in their private conversation with the main agent. The runtime supplies scoped reads
+of its conversation, turn, message, reply, and artifact records; extensions cannot read these
+runtime-owned tables directly. Memory supplies its own records and shared member profiles.
+
+The download is a tar archive containing JSON lines and original artifact bytes. Its manifest
+states exclusions and read times. Reads include workspace-shared data and the admin's own private
+data, subject to agent and source access. Other members' private data and rooms whose membership
+cannot be verified are excluded. Connector content, source pages, credentials, configuration,
+usage, audit records, model context, and search indexes are outside this export. Generated
+workspace archives are marked on their artifact records and excluded from later exports.
+
+A missing artifact, content mismatch, unavailable store, or exceeded bound refuses the export;
+no partial archive is published. Each record file is bounded to 100,000 rows and 32 MiB; the
+streamed archive is bounded to 1 GiB. Runtime records share one database snapshot; the manifest
+does not claim an atomic snapshot across memory and blob storage.
+
 ## Agent loop
 
 One runtime workflow: inbound → admission (identity, spend preflight) → queue row → harness-backed

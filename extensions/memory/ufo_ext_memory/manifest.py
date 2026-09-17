@@ -113,6 +113,7 @@ from ufo_ext_memory.store import (
 )
 from ufo_ext_memory.surface import ROUTES as MEMORY_ROUTES
 from ufo_ext_memory.surface import SURFACE_MEMORY
+from ufo_ext_memory.workspace_export import EXPORT_ACTION
 
 NAME = "memory"
 VERSION = "0.1.0"
@@ -931,6 +932,7 @@ def manifest() -> Manifest:
         name=NAME,
         version=VERSION,
         tools=(
+            EXPORT_ACTION,
             ToolDef(
                 name="memory_search",
                 description=(

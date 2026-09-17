@@ -87,6 +87,7 @@ from evals.suites import (
     ufo_app_bench,
     ufo_app_qa_replay,
     web_research,
+    workspace_export,
     writing_subagent,
 )
 from evals.suites.asd_writing import asd_writing_task
@@ -145,6 +146,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task(
         "artifact_ownership", artifact_ownership.CASES, judge_model=SEMANTIC_JUDGE_MODEL
     ),
+    capability_task("workspace_export", workspace_export.CASES),
     capability_task("object_tools", object_tools.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     scenario_task(
         "object_tools_flows",

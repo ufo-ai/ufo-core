@@ -923,6 +923,7 @@ shared_artifact = sa.Table(
     sa.Column("subject", sa.Text, nullable=True),
     sa.Column("media_type", sa.Text, nullable=False),
     sa.Column("size_bytes", sa.BigInteger, nullable=False),
+    sa.Column("is_workspace_export", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("request_fingerprint", sa.Text, nullable=True),
     sa.Column("digest", sa.Text, nullable=True),
     sa.Column("is_text", sa.Boolean, nullable=True),

@@ -45,7 +45,7 @@ import asyncio
 import json
 import shlex
 from base64 import b64encode
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
@@ -98,6 +98,7 @@ if TYPE_CHECKING:
     from ufo.runtime.access.workspace_slots import WorkspaceSlots
 
 SHARED_BYTES_LIMIT = 256 * 1024
+SHARED_STREAM_LIMIT = 1024 * 1024 * 1024
 SHARE_PREFLIGHT_TIMEOUT_SECONDS = 300
 SHA256_DIGEST_PREFIX = "sha256:"
 ARTIFACT_PUT_MAX_BYTES = 5 * 1024 * 1024 * 1024
@@ -620,6 +621,19 @@ async def store_artifact(
             await blob.put_stream(key, sandbox.read_file(scoped))
 
 
+async def _sized_artifact_stream(
+    chunks: AsyncIterator[bytes], expected: int
+) -> AsyncIterator[bytes]:
+    size = 0
+    async for chunk in chunks:
+        size += len(chunk)
+        if size > expected:
+            raise ValueError("artifact stream exceeds its declared size")
+        yield chunk
+    if size != expected:
+        raise ValueError("artifact stream does not match its declared size")
+
+
 @dataclass(frozen=True)
 class ToolContext:
     sandbox: Sandbox
@@ -814,6 +828,33 @@ class ToolContext:
             not preview.blob_key.startswith(ARTIFACT_KEY_PREFIX) or preview_media_type is None
         ):
             raise ValueError("shared artifact preview is not a bounded stored raster")
+        await self._share_artifact(filename, data, len(data), subject, preview)
+
+    async def share_artifact_stream(
+        self,
+        filename: str,
+        chunks: AsyncIterator[bytes],
+        size_bytes: int,
+        subject: str,
+        *,
+        is_workspace_export: bool = False,
+    ) -> None:
+        """Publish a bounded generated file through the artifact delivery path."""
+        await self._share_artifact(
+            filename, chunks, size_bytes, subject, None, is_workspace_export=is_workspace_export
+        )
+
+    async def _share_artifact(
+        self,
+        filename: str,
+        data: bytes | AsyncIterator[bytes],
+        size_bytes: int,
+        subject: str | None,
+        preview: StoredPreview | None,
+        *,
+        is_workspace_export: bool = False,
+    ) -> None:
+        preview_media_type = None if preview is None else raster_image_media_type(preview.blob_key)
         artifact_id = (
             uuid5(NAMESPACE_URL, f"{self.idempotency_key}/{filename}")
             if self.idempotency_key is not None
@@ -829,7 +870,17 @@ class ToolContext:
                     )
                 )
             ).scalar_one_or_none()
-        await self.blob.put(key, data)
+        match data:
+            case bytes():
+                await self.blob.put(key, data)
+            case _:
+                if recorded is not None:
+                    if self.publish_artifacts is not None:
+                        await self.publish_artifacts()
+                    return
+                if not 0 <= size_bytes <= SHARED_STREAM_LIMIT:
+                    raise ValueError(f"shared artifact exceeds {SHARED_STREAM_LIMIT} bytes")
+                await self.blob.put_stream(key, _sized_artifact_stream(data, size_bytes))
         now = datetime.now(UTC)
         try:
             async with workspace_tx() as connection:
@@ -845,8 +896,9 @@ class ToolContext:
                         filename=filename,
                         subject=subject,
                         media_type=artifact_media_type(filename),
-                        size_bytes=len(data),
+                        size_bytes=size_bytes,
                         role="file",
+                        is_workspace_export=is_workspace_export,
                         preview_blob_key=None if preview is None else preview.blob_key,
                         preview_media_type=preview_media_type,
                         preview_size_bytes=None if preview is None else preview.size_bytes,

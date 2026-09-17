@@ -152,6 +152,7 @@ REQUESTER_ACTIONS = frozenset(
         "action:site:publish_website",
         "action:surface:imessage_connect",
         "action:surface:slack_connect",
+        "action:workspace:export",
         "action:workspace:manage_billing",
     }
 )
