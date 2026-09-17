@@ -3,11 +3,13 @@ import { useState } from "react";
 import { FileSheet } from "@/kernel/artifact";
 import type { AudienceEntry } from "@/lib/audience";
 import { AudienceMark } from "@/lib/audienceMark";
+import { automationId } from "@/lib/automationLane";
 import { COLUMN, Header, Pane } from "@/kernel/pane";
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
 import { Markdown } from "@/lib/markdown";
 import { Moment } from "@/lib/moments";
+import { automationsHash } from "@/lib/route";
 import type { Crumb } from "@/lib/title";
 import type { ConversationAgent } from "@/lib/types";
 import { formatSize } from "@/lib/size";
@@ -15,6 +17,9 @@ import { formatSize } from "@/lib/size";
 /** A word set in a 13px line is 18px tall, so at a phone width each control keeps the control height as
  *  the box a finger has to land on. */
 const TAP_FLOOR = "max-narrow:inline-flex max-narrow:min-h-(--size-control) max-narrow:items-center";
+
+/** The slot reads the scheduled-task store, so every automation it draws is of that one kind. */
+const AUTOMATION_KIND = "scheduled_task";
 
 export type ConversationSlotSummary = {
   id: string;
@@ -165,7 +170,7 @@ export function ConversationSlotPane({
           </PanelEmpty>
         )}
       >
-        {(payload) => <SlotContent payload={payload} />}
+        {(payload) => <SlotContent payload={payload} agentId={agent.id} />}
       </Panel>
     </div>
   );
@@ -218,7 +223,7 @@ export function SlotIcon({ icon }: { icon: PortalIcon }) {
   );
 }
 
-function SlotContent({ payload }: { payload: SlotPayload }) {
+function SlotContent({ payload, agentId }: { payload: SlotPayload; agentId: string }) {
   if (payload.type === "changes") {
     if (!payload.changes.length && !payload.truncated) return <PanelEmpty>No changes.</PanelEmpty>;
     return (
@@ -234,7 +239,8 @@ function SlotContent({ payload }: { payload: SlotPayload }) {
   }
   if (payload.type === "artifacts") return <ArtifactsContent payload={payload} />;
   if (payload.type === "tasks") return <TasksContent payload={payload} />;
-  if (payload.type === "automations") return <AutomationsContent payload={payload} />;
+  if (payload.type === "automations")
+    return <AutomationsContent payload={payload} agentId={agentId} />;
   if (payload.type === "sites") return <SitesContent payload={payload} />;
   if (!payload.sources.length && !payload.truncated) return <PanelEmpty>No sources.</PanelEmpty>;
   return (
@@ -308,14 +314,28 @@ function TasksContent({ payload }: { payload: TasksSlotPayload }) {
   );
 }
 
-function AutomationsContent({ payload }: { payload: AutomationsPayload }) {
+function AutomationsContent({
+  payload,
+  agentId,
+}: {
+  payload: AutomationsPayload;
+  agentId: string;
+}) {
   if (!payload.automations.length && !payload.truncated) {
     return <PanelEmpty>No automations report to this conversation.</PanelEmpty>;
   }
   return (
     <div className="flex min-w-0 flex-col gap-xl">
       {payload.automations.map((automation) => (
-        <article key={automation.name} className="min-w-0 rounded-panel border border-edge p-lg">
+        <a
+          key={automation.name}
+          href={automationsHash({
+            opens: [
+              automationId({ agent: agentId, kind: AUTOMATION_KIND, name: automation.name }),
+            ],
+          })}
+          className="block min-w-0 rounded-panel border border-edge p-lg text-inherit no-underline"
+        >
           <div className="flex items-start gap-md">
             <div className="min-w-0 flex-1">
               <h2 className="m-0 break-all font-mono text-label font-strong">
@@ -342,7 +362,7 @@ function AutomationsContent({ payload }: { payload: AutomationsPayload }) {
           {automation.latest_response ? (
             <p className="m-0 mt-sm break-words">{automation.latest_response}</p>
           ) : null}
-        </article>
+        </a>
       ))}
       {payload.truncated ? (
         <p className="m-0 text-ink-soft">Some automations may not be shown.</p>

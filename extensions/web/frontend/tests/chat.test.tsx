@@ -10,7 +10,14 @@ import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 import { ADMIN_DISCLOSURE } from "@/lib/audience";
 import { resetStreams } from "@/lib/turnStream";
 import type { EarlierMessages } from "@/lib/earlier";
-import { chatHash, conversationSlotHash, newChatHash, workspaceHash } from "@/lib/route";
+import { automationId } from "@/lib/automationLane";
+import {
+  automationsHash,
+  chatHash,
+  conversationSlotHash,
+  newChatHash,
+  workspaceHash,
+} from "@/lib/route";
 import { Chat } from "@/views/Chat";
 import { ConversationTranscript } from "@/views/Conversations";
 
@@ -1662,6 +1669,12 @@ test("automations slot renders cadence, state, and visible description", async (
   expect(lastRun.textContent).toMatch(/^Last .+ · done$/);
   expect(screen.getByText(/0 9 \* \* \* · Next/)).toBeTruthy();
   expect(document.querySelector('[data-slot-icon="calendar"]')).toBeTruthy();
+  const card = screen.getByText("daily-brief").closest("a")!;
+  expect(card.getAttribute("href")).toBe(
+    automationsHash({
+      opens: [automationId({ agent: AGENT.id, kind: "scheduled_task", name: "daily-brief" })],
+    }),
+  );
 });
 
 test.each([
