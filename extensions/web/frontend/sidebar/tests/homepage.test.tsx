@@ -25,6 +25,7 @@ const LISTED = {
   description: "Pick one thread",
   source: null,
   speakers: [MEMBER.email],
+  speaker_emails: [MEMBER.email],
   turn_count: 1,
   created_at: "2026-08-01T09:00:00",
   last_turn_at: "2026-08-01T09:00:01",

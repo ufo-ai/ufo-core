@@ -5,6 +5,7 @@ import {
   audienceDetail,
   audienceLabel,
   ownerLabel,
+  speakerName,
   surfaceWord,
 } from "@/lib/audience";
 
@@ -63,4 +64,10 @@ test("a surface the map does not name reads as its own word", () => {
   expect(surfaceWord("slack")).toBe("Slack");
   expect(surfaceWord("ufo")).toBe("Terminal");
   expect(surfaceWord("teams")).toBe("teams");
+});
+
+test("a reported speaker reads as the name the surface named them under", () => {
+  expect(speakerName("Rae Whitlock (rae@example.com)")).toBe("Rae Whitlock");
+  expect(speakerName("sam@example.com")).toBe("sam");
+  expect(speakerName("Guest")).toBe("Guest");
 });

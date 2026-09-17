@@ -1,10 +1,12 @@
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { BRAND_MARKS, BrandMark } from "@/lib/brandMark";
-import { FaceCircle } from "@/lib/memberFace";
+import { FaceCircle, photoAddress } from "@/lib/memberFace";
 
 export type AvatarStackPerson = {
   name: string;
   company?: string;
+  email?: string | null;
+  photo_url?: string | null;
 };
 
 const SHOWN = 3;
@@ -18,9 +20,9 @@ const LEADING_WWW = /^www\./;
  *  for exactly this reason.
  *
  *  A member is drawn by the mark the theme carries for their company where it carries one — their
- *  real mark, vendored — and by their initials everywhere else. No picture is asked of any host: who
- *  a workspace's members are is the workspace's, and the portal's own policy names no picture host,
- *  so a face drawn from a page is drawn from what the page already holds.
+ *  real mark, vendored — then by the picture this workspace holds for them, and by their initials
+ *  where it holds none. No picture is asked of another host: the portal serves a member's stored
+ *  picture from its own origin, and its policy names no picture host.
  *
  *  The stack is one graphic and it names everyone, the faces the cap left out included, so a
  *  member reading by ear is told who is here once instead of hearing each set of initials spelled
@@ -63,8 +65,8 @@ function Face({ person, overlapped }: { person: AvatarStackPerson; overlapped: b
   return (
     <FaceCircle
       name={person.name}
-      photo={null}
-      tint={person.name}
+      photo={photoAddress(person.photo_url)}
+      tint={person.email ?? person.name}
       title={person.name}
       stacked
       className={overlap}

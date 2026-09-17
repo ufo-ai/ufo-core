@@ -72,7 +72,10 @@ export type ConversationTurn = "running" | "queued" | "parked" | "idle";
 /** One conversation as the `conversation` kind lists and resolves it: the rail's row, the Home
  *  table's, the open chat's and a permalink's are one record, `conversation_id` the kind's `name`.
  *  `readable` is whether its content reads now, `disclosable` whether an admin may open it by
- *  acknowledging, and `speakable` whether the member's messages land in it. */
+ *  acknowledging, and `speakable` whether the member's messages land in it. `speakers` names each
+ *  speaker as the admitting surface reported them and `speaker_emails` runs in the same order with
+ *  the workspace address their turns are attributed to — the reported line is a name to print, the
+ *  address is who they are. */
 export type Conversation = {
   conversation_id: string;
   agent_id: string;
@@ -96,6 +99,7 @@ export type Conversation = {
   unread: boolean;
   artifacts: boolean;
   speakers: string[];
+  speaker_emails: string[];
   turn_count: number;
   created_at: string;
   last_turn_at: string | null;

@@ -752,6 +752,12 @@ _acting_member_var = ActingMember.current
 
 
 def _member_row(entry: ListedConversation) -> ObjectRow:
+    """One listed conversation as a member reads it. `speakers` is the line the admitting surface
+    reported each speaker under, in order of first appearance — a name to print and never an
+    identity, since a Slack display name holds whatever the member typed into it, an address
+    included. `speaker_emails` runs in the same order and carries the workspace address each of
+    those turns is attributed to, off the `member` row the turn names: the one key a reader joins a
+    speaker to a member on."""
     speakers: list[JsonValue] = [who.sender or who.email for who in entry.speakers]
     stamp = entry.summary.last_turn_at or entry.summary.created_at
     portal = entry.summary.surface == PORTAL_SURFACE or entry.summary.surface.startswith(
@@ -766,6 +772,7 @@ def _member_row(entry: ListedConversation) -> ObjectRow:
             "mine": entry.mine,
             "speaker": None if entry.mine or not speakers else speakers[0],
             "speakers": speakers,
+            "speaker_emails": [who.email for who in entry.speakers],
             "surface": entry.summary.surface,
             "surface_label": entry.surface_label,
             "audience": entry.audience,
@@ -886,6 +893,7 @@ CONVERSATION_OBJECT = ObjectKind(
             "mine",
             "speaker",
             "speakers",
+            "speaker_emails",
             "portal",
             "audience",
             "member_email",

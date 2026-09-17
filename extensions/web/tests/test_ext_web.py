@@ -11292,7 +11292,46 @@ async def test_an_unreadable_conversation_states_no_words_and_no_speakers(
     assert row["source"] is None
     assert row["speaker"] is None
     assert row["speakers"] == []
+    assert row["speaker_emails"] == []
     assert row["owner_name"] is None
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_listed_speaker_carries_the_address_their_turns_are_attributed_to(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Slack reports a speaker under the display name they chose, and a member may put any address
+    at all in it. The line is what a row prints; `speaker_emails` is who spoke, off the member row
+    the turn names, so a reader joining a speaker to a member never reads the line for it."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "mal@example.com")
+    await _seed_member(workspace_id, "dana@example.com")
+    shared = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C9:1.0",
+        audience="shared",
+        member_id=None,
+        surface="slack",
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        shared,
+        agent_id,
+        seq=1,
+        inbound="who is on call",
+        speaker_member_id=member_id,
+        context=TurnContext(sender="Mal (dana@example.com)", source=SLACK_THREAD_PERMALINK),
+    )
+
+    listed = await client.get(
+        _agent_conversations_path(agent_id), headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+
+    row = next(entry for entry in listed.json()["objects"] if entry["name"] == str(shared))
+    assert row["speakers"] == ["Mal (dana@example.com)"]
+    assert row["speaker_emails"] == ["mal@example.com"]
 
 
 @pytest.mark.usefixtures("database_url")

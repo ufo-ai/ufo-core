@@ -98,6 +98,7 @@ export function founded(
     unread: false,
     artifacts: false,
     speakers: [member.email],
+    speaker_emails: [member.email],
     turn_count: 1,
     created_at: at,
     last_turn_at: at,

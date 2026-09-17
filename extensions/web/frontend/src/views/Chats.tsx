@@ -1,7 +1,7 @@
 import { IconDotsVertical, IconPlus } from "@tabler/icons-react";
 import { useCallback, useEffect, useState } from "react";
 
-import { AvatarStack } from "@/components/ui/avatar-stack";
+import { AvatarStack, type AvatarStackPerson } from "@/components/ui/avatar-stack";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -16,7 +16,7 @@ import type { FacetGroup } from "@/kernel/pane";
 import { Notice, PanelEmpty, PanelSkeleton, Section, usePanelRead } from "@/kernel/panel";
 import type { PanelState } from "@/kernel/panel";
 import { DataTable, type Run } from "@/kernel/table";
-import { SHARED_SUBJECT, ownerLabel, useViewer } from "@/lib/audience";
+import { SHARED_SUBJECT, ownerLabel, speakerName, useViewer } from "@/lib/audience";
 import {
   ArtifactMark,
   AutomationMark,
@@ -29,6 +29,7 @@ import {
 } from "@/lib/chatMark";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
+import { useMemberFaces, type MemberFaces } from "@/lib/memberDirectory";
 import { Moment } from "@/lib/moments";
 import { OwnerMark } from "@/lib/ownerMark";
 import {
@@ -460,7 +461,20 @@ function Listing({
   );
 }
 
+/** A speaker as the stack draws them: the face is the member the listing attributed the turns to,
+ *  and the reported line is a name to print, never a row to look up. */
+function speakerPerson(
+  spoken: string,
+  email: string | undefined,
+  faces: MemberFaces,
+): AvatarStackPerson {
+  const face = faces(email);
+  if (face === null) return { name: speakerName(spoken) };
+  return { name: face.name || speakerName(spoken), email: face.email, photo_url: face.photo_url };
+}
+
 function ChatCells({ row, onFiled }: { row: Conversation; onFiled: Filed }) {
+  const faces = useMemberFaces();
   return (
     <>
       <TdFill className={FACT}>
@@ -478,7 +492,9 @@ function ChatCells({ row, onFiled }: { row: Conversation; onFiled: Filed }) {
         <OwnerMark name={row.owner_name} email={row.owner_email} />
       </TdStamp>
       <TdWhole>
-        <AvatarStack people={row.speakers.map((who) => ({ name: who }))} />
+        <AvatarStack
+          people={row.speakers.map((who, at) => speakerPerson(who, row.speaker_emails[at], faces))}
+        />
       </TdWhole>
       <TdWhole>
         <ChannelMark row={row} />

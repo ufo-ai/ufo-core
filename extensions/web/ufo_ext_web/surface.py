@@ -3243,6 +3243,7 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
                 "description": entry.title,
                 "source": entry.source,
                 "speakers": [who.sender or who.email for who in entry.speakers],
+                "speaker_emails": [who.email for who in entry.speakers],
                 "turn_count": entry.summary.turn_count,
                 "created_at": _iso(entry.summary.created_at),
                 "last_turn_at": _iso(entry.summary.last_turn_at),

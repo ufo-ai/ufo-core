@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -224,6 +224,7 @@ test("the members column draws a face per speaker, and counts everyone past the 
     conversation_id: ALERT_ID,
     title: "Release window",
     speakers: ["Ada Lovelace", "Bo Diaz", "Cass Field", "Dev Rao"],
+    speaker_emails: ["ada@example.com", "bo@example.com", "cass@example.com", "dev@example.com"],
   };
   wire({ ...chatsOnWire([CHAT_ROW, crowded]), "/transcript": () => json({ messages: [] }) });
   location.hash = "#/chats";
@@ -450,6 +451,90 @@ test("a row with no name for its owner names the address alone above the monogra
   await userEvent.hover(within(row(/Migration run/)).getByLabelText("sam@example.com"));
 
   expect((await screen.findByRole("tooltip")).textContent).toBe("sam@example.com");
+});
+
+/** jsdom fetches no image, so the loader is what stands in — Radix sets `src` the moment a source
+ *  is given. */
+function pictures(): string[] {
+  const asked: string[] = [];
+  vi.stubGlobal(
+    "Image",
+    class {
+      complete = false;
+      naturalWidth = 0;
+      addEventListener() {}
+      removeEventListener() {}
+      set src(url: string) {
+        asked.push(url);
+      }
+    },
+  );
+  return asked;
+}
+
+const ROSTER: Route = () =>
+  json({
+    members: [
+      MEMBER,
+      {
+        id: "m2",
+        email: "dana@example.com",
+        admin: false,
+        name: "Dana Reed",
+        photo_url: "members/m2/photo?v=dana123",
+      },
+    ],
+    can_add: false,
+    actions: [],
+  });
+
+test("the creator and the members are the pictures the workspace holds for them", async () => {
+  const asked = pictures();
+  const spoken: Conversation = {
+    ...COLLEAGUE,
+    speakers: ["Dana Reed (dana@example.com)", "guest@another.example"],
+    speaker_emails: ["dana@example.com", "guest@another.example"],
+  };
+  wire({
+    ...chatsOnWire([spoken]),
+    "/workspace/team$": ROSTER,
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByRole("region", { name: "Home" });
+  await waitFor(() =>
+    expect(asked.filter((url) => url.endsWith("members/m2/photo?v=dana123"))).toHaveLength(2),
+  );
+  const drawn = within(row(/Deploy question/));
+  expect(drawn.getByLabelText("Dana Reed")).toBeTruthy();
+  expect(drawn.getByRole("img", { name: "Dana Reed, guest" })).toBeTruthy();
+});
+
+test("a speaker named under another member's address is drawn as nobody but themselves", async () => {
+  const asked = pictures();
+  const spoken: Conversation = {
+    ...COLLEAGUE,
+    owner_email: "mal@example.com",
+    owner_name: null,
+    speaker: "Mal (dana@example.com)",
+    speakers: ["Mal (dana@example.com)"],
+    speaker_emails: ["mal@example.com"],
+  };
+  wire({
+    ...chatsOnWire([spoken]),
+    "/workspace/team$": ROSTER,
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByRole("region", { name: "Home" });
+  const drawn = within(row(/Deploy question/));
+  expect(drawn.getByRole("img", { name: "Mal" })).toBeTruthy();
+  expect(drawn.queryByLabelText("Dana Reed")).toBeNull();
+  expect(asked.filter((url) => url.includes("members/m2/photo"))).toEqual([]);
 });
 
 test("every owner is drawn in one ink, whoever they are", async () => {

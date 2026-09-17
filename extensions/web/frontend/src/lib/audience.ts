@@ -132,8 +132,14 @@ export function ownerLabel(email: string | null, viewer: string | null): string 
   return email === viewer ? "You" : email;
 }
 
+const REPORTED_SPEAKER = /^(.+) \(([^()]+@[^()]+)\)$/;
+
+/** The name to print for a speaker the admitting surface reported, and a name alone: a Slack
+ *  display name carries whatever the member typed into it, an address included, so no address read
+ *  out of this line names anybody. Who the speaker is travels beside it, in
+ *  `Conversation.speaker_emails`. */
 export function speakerName(speaker: string): string {
-  const reported = speaker.match(/^(.+) \(([^()]+@[^()]+)\)$/);
+  const reported = speaker.match(REPORTED_SPEAKER);
   if (reported) return reported[1];
   return speaker.includes("@") ? speaker.split("@", 1)[0] : speaker;
 }

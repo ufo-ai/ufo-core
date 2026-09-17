@@ -124,3 +124,17 @@ test("two members may share a name, and the stack draws both", () => {
   );
   expect(document.querySelectorAll("[data-slot=avatar]")).toHaveLength(3);
 });
+
+test("a member the workspace holds a picture for is drawn by it", async () => {
+  const asked = pictures();
+  render(
+    <AvatarStack
+      people={[
+        { name: "Rae Whitlock", email: "rae@example.com", photo_url: "members/m1/photo?v=abc123" },
+        { name: "Ada Lowe" },
+      ]}
+    />,
+  );
+  await vi.waitFor(() => expect(asked).toEqual(["/surface/web/members/m1/photo?v=abc123"]));
+  expect(screen.getByText("A")).toBeTruthy();
+});

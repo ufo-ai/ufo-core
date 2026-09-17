@@ -305,6 +305,7 @@ export const CHAT_ROW: Conversation = {
   unread: false,
   artifacts: false,
   speakers: [],
+  speaker_emails: [],
   turn_count: 1,
   created_at: "2026-08-01T09:00:00.000Z",
   last_turn_at: "2026-08-01T09:00:00.000Z",

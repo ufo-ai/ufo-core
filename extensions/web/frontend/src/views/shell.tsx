@@ -34,6 +34,7 @@ import { useAppStatus } from "@/lib/appStatusStore";
 import { Me, Viewer, WorkspaceId } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { MainAgentProvider } from "@/lib/mainAgent";
+import { MemberFacesProvider } from "@/lib/memberDirectory";
 import { deployment, type Deployment } from "@/lib/mark";
 import { useNarrow } from "@/lib/narrow";
 import { readRail, seekChat, useRail, watchRail, type RailState } from "@/lib/railStore";
@@ -211,7 +212,9 @@ export function ShellProviders({
         <Me.Provider value={member}>
           <SurfacesProvider surfaces={surfaces}>
             <MainAgentProvider agents={agents} onAgents={onAgents}>
-              <TooltipProvider>{children}</TooltipProvider>
+              <MemberFacesProvider>
+                <TooltipProvider>{children}</TooltipProvider>
+              </MemberFacesProvider>
             </MainAgentProvider>
           </SurfacesProvider>
         </Me.Provider>
