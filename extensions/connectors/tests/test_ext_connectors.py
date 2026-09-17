@@ -59,6 +59,7 @@ from ufo.runtime.tools.context import SpeakerRequired, ToolContext
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.authproxy import Credential
+from ufo.sdk.tools import TRUSTED_TOOL_INPUT
 
 TOOL_NARRATION = "using the connected account"
 
@@ -764,6 +765,18 @@ def test_the_model_cannot_choose_the_attribution_identity() -> None:
     assert CallExternalToolInput.model_validate(wire).attribution_bot_user_id is None
     claimed = CallExternalToolInput.model_validate({**wire, "attribution_bot_user_id": "U0MODEL"})
     assert claimed.attribution_bot_user_id is None
+    for context in (None, "TRUSTED_TOOL_INPUT", {"trusted": True}, object()):
+        assert (
+            CallExternalToolInput.model_validate(
+                {**wire, "attribution_bot_user_id": "U0MODEL"}, context=context
+            ).attribution_bot_user_id
+            is None
+        )
+    restored = CallExternalToolInput.model_validate_json(
+        claimed.model_copy(update={"attribution_bot_user_id": "U0HOOK"}).model_dump_json(),
+        context=TRUSTED_TOOL_INPUT,
+    )
+    assert restored.attribution_bot_user_id == "U0HOOK"
     assert (
         claimed.model_copy(update={"attribution_bot_user_id": "U0HOOK"}).attribution_bot_user_id
         == "U0HOOK"

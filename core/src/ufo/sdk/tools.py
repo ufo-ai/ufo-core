@@ -62,6 +62,9 @@ from ufo.runtime.tools.registry import (
     REQUESTED_BY as REQUESTED_BY,
 )
 from ufo.runtime.tools.registry import (
+    TRUSTED_TOOL_INPUT as TRUSTED_TOOL_INPUT,
+)
+from ufo.runtime.tools.registry import (
     ActionBinding as ActionBinding,
 )
 from ufo.runtime.tools.registry import (

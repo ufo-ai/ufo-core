@@ -43,6 +43,7 @@ OBJECT_LIST_TOOL = "object_list"
 OBJECT_GET_TOOL = "object_get"
 ACTION_READ_TOOLS = (OBJECT_LIST_TOOL, OBJECT_GET_TOOL)
 ACTION_ID_PREFIX = "action:"
+TRUSTED_TOOL_INPUT = object()
 REQUESTED_BY = "requested_by"
 REQUESTED_BY_DESCRIPTION = (
     "Message ref that explicitly requested this call. Required for any member-specific authority "

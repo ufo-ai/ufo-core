@@ -1,19 +1,33 @@
+import ast
 import base64
 import importlib
+import pickle
 import sys
 import types
+from collections.abc import Iterator
+from dataclasses import make_dataclass
 from datetime import UTC, datetime
-from uuid import uuid4
+from decimal import Decimal
+from pathlib import Path
+from typing import get_args
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import BaseModel, ValidationError, create_model
 from ufo_ext_context_compact.compaction import _CompactionRequest
+from ufo_ext_skill_create.manifest import UserSkillSpec
 
 from ufo.harness.durability import MOVED_MODULES, ReplaySafeSerializer
-from ufo.runtime.engine import Arrival, DispatchResult
+from ufo.runtime import engine as engine_module
+from ufo.runtime.engine import Arrival, DispatchResult, _AuthorizationPreflight
 from ufo.schema.records import MEMBER_ADMISSION
 
 SERIALIZER = ReplaySafeSerializer()
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+SOURCE_ROOTS = ("core/src", "extensions")
+STEP_DECORATOR = "@DBOS.step"
+RECORDABLE_LEAVES = (type(None), bool, int, float, str, bytes, UUID, datetime, Decimal)
 
 RECORDED_SHAPE = create_model("Record", __module__=__name__, id=(int, ...))
 SHAPE_WITH_ADDED_FIELD = create_model(
@@ -167,3 +181,79 @@ def test_a_rebuild_reference_from_before_its_move_still_resolves() -> None:
 def test_every_moved_module_maps_to_a_module_that_imports() -> None:
     for new in MOVED_MODULES.values():
         importlib.import_module(new)
+
+
+def _module_name(path: Path) -> str:
+    parts = [path.stem]
+    package = path.parent
+    while (package / "__init__.py").exists():
+        parts.append(package.name)
+        package = package.parent
+    return ".".join(reversed(parts))
+
+
+def _step_returns() -> Iterator[tuple[str, object]]:
+    for root in SOURCE_ROOTS:
+        for path in sorted((REPOSITORY_ROOT / root).glob("**/*.py")):
+            yield from _step_returns_in(path)
+
+
+def _step_returns_in(path: Path) -> Iterator[tuple[str, object]]:
+    source = path.read_text()
+    if STEP_DECORATOR in source:
+        module = importlib.import_module(_module_name(path))
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+                continue
+            decorators = {ast.unparse(decorator).split("(")[0] for decorator in node.decorator_list}
+            if "DBOS.step" not in decorators:
+                continue
+            assert node.returns is not None, f"{node.name} declares no return type"
+            yield node.name, eval(ast.unparse(node.returns), vars(module))
+
+
+def _leaves(annotation: object) -> Iterator[object]:
+    arguments = get_args(annotation)
+    if not arguments:
+        yield annotation
+        return
+    for argument in arguments:
+        yield from _leaves(argument)
+
+
+def _recordable(leaf: object) -> bool:
+    if leaf is None or leaf is Ellipsis or leaf in RECORDABLE_LEAVES:
+        return True
+    return isinstance(leaf, type) and issubclass(leaf, BaseModel)
+
+
+def test_dbos_steps_declare_data_return_types() -> None:
+    steps = list(_step_returns())
+    assert {"_stream_once", "_dispatch_step", "_compact"} <= {name for name, _ in steps}
+    unrecordable = {
+        name: leaf
+        for name, annotation in steps
+        for leaf in _leaves(annotation)
+        if not _recordable(leaf)
+    }
+    assert unrecordable == {}
+
+
+def test_preflight_flat_pickle_restores_nested_input_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = UserSkillSpec.model_validate({"files": {"SKILL.md": {"from": "draft.md"}}})
+    record = make_dataclass(
+        "_AuthorizationPreflight",
+        [("args", object), ("request_target", object), ("context", object)],
+        frozen=True,
+        module=engine_module.__name__,
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(engine_module, "_AuthorizationPreflight", record)
+        recording = pickle.dumps(record(args, None, object()))
+    restored = SERIALIZER.deserialize(base64.b64encode(recording).decode())
+    assert isinstance(restored, _AuthorizationPreflight)
+    replayed = SERIALIZER.deserialize(SERIALIZER.serialize(restored))
+    assert isinstance(replayed, _AuthorizationPreflight)
+    assert UserSkillSpec.model_validate_json(replayed.args_json) == args

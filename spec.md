@@ -157,7 +157,9 @@ state commits on the failure path too.
   conversation audience. With another member or an unattributed active message, omission means
   common work, while a named message selects its author for a side `gpt-5.6-luna` decision over the
   member's words, the validated call arguments, and the unresolved object target. A round
-  preflights those decisions concurrently, then dispatches in call order.
+  preflights those decisions concurrently, then dispatches in call order. The preflight checkpoint
+  stores policy-rewritten arguments and authorization decisions; dispatch rebuilds live context
+  and checks the current standing binding against the recorded request.
   Pre-use policy runs before private member capabilities bind; a rewrite causes the final effect to
   be classified again.
   Exact standing permission admits automatically.

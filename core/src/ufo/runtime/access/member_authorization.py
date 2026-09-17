@@ -335,9 +335,10 @@ class AuthorizationAnswer(BaseModel):
     choice: Literal["allow", "deny", "always"]
 
 
-@dataclass(frozen=True)
-class AuthorizationRequest:
+class AuthorizationRequest(BaseModel):
     """One selected member message requesting authority for one exact effect."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     workspace_id: UUID
     conversation_id: UUID
@@ -355,7 +356,8 @@ class AuthorizationRequest:
     message_complete: bool = True
     answer: AuthorizationAnswer | None = None
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_request(self) -> "AuthorizationRequest":
         selected = self.context.selected
         if (
             selected.ref != str(self.message_ref)
@@ -374,6 +376,12 @@ class AuthorizationRequest:
             )
             if self.scope != stable:
                 raise ValueError("authorization scope does not match its execution binding")
+        return self
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        if "__dict__" not in state:
+            state = type(self).model_validate(state).__getstate__()
+        super().__setstate__(state)
 
 
 @dataclass(frozen=True)
@@ -386,9 +394,10 @@ class AuthorizationResolution:
     requesting_message_ref: UUID | None = None
 
 
-@dataclass(frozen=True)
-class AuthorizationAttempt:
+class AuthorizationAttempt(BaseModel):
     """One side-model verdict bound to the exact request and durable state it classified."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     request: AuthorizationRequest
     verdict: AuthorizationVerdict | None = None
@@ -397,6 +406,11 @@ class AuthorizationAttempt:
     replay: Literal["allow", "deny", "ask"] | None = None
     consumed: bool = False
     refusal: str | None = None
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        if "__dict__" not in state:
+            state = type(self).model_validate(state).__getstate__()
+        super().__setstate__(state)
 
 
 class AuthorizationModel(Protocol):

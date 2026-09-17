@@ -11,7 +11,7 @@ from ufo.runtime.access.member_authorization import (
 @dataclass(frozen=True)
 class PermitMemberAuthorization:
     async def preflight(self, request: AuthorizationRequest) -> AuthorizationAttempt:
-        return AuthorizationAttempt(request)
+        return AuthorizationAttempt(request=request)
 
     async def authorize(
         self, request: AuthorizationRequest, attempt: AuthorizationAttempt | None = None

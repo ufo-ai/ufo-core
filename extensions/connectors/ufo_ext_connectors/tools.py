@@ -43,7 +43,7 @@ from urllib.parse import quote, unquote
 from uuid import UUID, uuid4
 
 import httpx
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from ufo.sdk.connectors import (
@@ -58,6 +58,7 @@ from ufo.sdk.context import JsonValue
 from ufo.sdk.o11y import log
 from ufo.sdk.sandbox import WORKSPACE_DIR, workspace_path
 from ufo.sdk.tools import (
+    TRUSTED_TOOL_INPUT,
     AuthorizationBinding,
     AuthorizationScope,
     ConnectorConnection,
@@ -231,9 +232,9 @@ class CallExternalToolInput(BaseModel):
 
     @field_validator("attribution_bot_user_id", mode="before")
     @classmethod
-    def _no_model_supplied_attribution_identity(cls, value: object) -> None:
+    def _no_model_supplied_attribution_identity(cls, value: object, info: ValidationInfo) -> object:
         """A call the model wrote cannot choose the identity named in the footer."""
-        return None
+        return value if info.context is TRUSTED_TOOL_INPUT else None
 
 
 class SearchConnectorToolsInput(BaseModel):

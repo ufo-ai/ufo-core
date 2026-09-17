@@ -224,6 +224,7 @@ from ufo.runtime.tools.registry import (
     OBJECT_GET_TOOL,
     OBJECT_LIST_TOOL,
     REQUESTED_BY,
+    TRUSTED_TOOL_INPUT,
     ToolDef,
     ToolRegistry,
 )
@@ -667,18 +668,24 @@ class _DispatchReady:
     target: ObjectActionTarget | None
 
 
-@dataclass(frozen=True)
-class _AuthorizationPreflight:
-    args: BaseModel
+class _AuthorizationPreflight(BaseModel, frozen=True):
+    args_json: str
     request_target: ObjectActionRequestTarget | None
-    context: ToolContext
-    scope: AuthorizationScope | None = None
-    binding: AuthorizationBinding | None = None
     attempt: AuthorizationAttempt | None = None
     denied: str | None = None
     failed_closed: str | None = None
     authority_error: str | None = None
     authority_error_class: str | None = None
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        if "__dict__" not in state:
+            fields = dict(state)
+            args = fields.pop("args")
+            if not isinstance(args, BaseModel):
+                raise TypeError("authorization preflight arguments must be a model")
+            fields["args_json"] = args.model_dump_json(round_trip=True, by_alias=True)
+            state = type(self).model_validate(fields).__getstate__()
+        super().__setstate__(state)
 
 
 @dataclass(frozen=True)
@@ -4177,14 +4184,17 @@ class TurnEngine:
         if prepared.denied is not None:
             return prepared
         try:
-            context, final_args, scope, binding = await self._standing_authorization(
-                bound, prepared.context, prepared.args
+            _, final_args, scope, binding = await self._standing_authorization(
+                bound,
+                bound.context,
+                type(args).model_validate_json(prepared.args_json, context=TRUSTED_TOOL_INPUT),
             )
         except Exception as error:
-            return replace(
-                prepared,
-                authority_error=_error_text(bound.call.name, error, bound.member_refs),
-                authority_error_class=type(error).__name__,
+            return prepared.model_copy(
+                update={
+                    "authority_error": _error_text(bound.call.name, error, bound.member_refs),
+                    "authority_error_class": type(error).__name__,
+                }
             )
         request = self._member_authorization_request(
             bound, final_args, request_target, scope, binding
@@ -4192,14 +4202,7 @@ class TurnEngine:
         if request is None:
             raise RuntimeError("selected member call has no authorization request")
         attempt = await self.member_authorization.preflight(request)
-        return replace(
-            prepared,
-            context=context,
-            args=final_args,
-            scope=scope,
-            binding=binding,
-            attempt=attempt,
-        )
+        return prepared.model_copy(update={"attempt": attempt})
 
     async def _pre_tool_use(
         self,
@@ -4222,9 +4225,10 @@ class TurnEngine:
             self.sandbox,
         )
         return _AuthorizationPreflight(
-            args=resolved.tool_input if resolved.tool_input is not None else args,
+            args_json=(
+                resolved.tool_input if resolved.tool_input is not None else args
+            ).model_dump_json(round_trip=True, by_alias=True),
             request_target=request_target,
-            context=bound.context,
             denied=resolved.denied,
             failed_closed=resolved.failed_closed,
         )
@@ -4266,7 +4270,14 @@ class TurnEngine:
             args = validated.args
             request_target = validated.request_target
         else:
-            args = authorization_preflight.args
+            input_model = (
+                type(effective.action_args)
+                if effective.action_args is not None
+                else tool.input_model
+            )
+            args = input_model.model_validate_json(
+                authorization_preflight.args_json, context=TRUSTED_TOOL_INPUT
+            )
             request_target = authorization_preflight.request_target
         pre = authorization_preflight
         if pre is None:
@@ -4278,6 +4289,7 @@ class TurnEngine:
                 if bound.selected_from_multiple or bound.authorization_pending
                 else bound.context.speaker_member_id,
             )
+            args = type(args).model_validate_json(pre.args_json, context=TRUSTED_TOOL_INPUT)
         if pre.denied is not None:
             outcome, error_class = (
                 ("hook_denied", None)
@@ -4298,9 +4310,9 @@ class TurnEngine:
         authorized = await self._authorize_member_dispatch(
             bound,
             pre,
+            args,
             request_target,
             target,
-            resolve_standing=authorization_preflight is None,
         )
         if isinstance(authorized, _DispatchGate):
             return authorized
@@ -4344,10 +4356,9 @@ class TurnEngine:
         self,
         bound: _BoundToolCall,
         pre: _AuthorizationPreflight,
+        args: BaseModel,
         request_target: ObjectActionRequestTarget | None,
         target: ObjectActionTarget | None,
-        *,
-        resolve_standing: bool,
     ) -> _AuthorizedDispatch | _DispatchGate:
         call = bound.call
         if pre.authority_error is not None:
@@ -4362,24 +4373,22 @@ class TurnEngine:
                 outcome="authority_failed",
                 error_class=pre.authority_error_class,
             )
-        context, args, scope, binding = pre.context, pre.args, pre.scope, pre.binding
-        if resolve_standing:
-            try:
-                context, args, scope, binding = await self._standing_authorization(
-                    bound, context, args
-                )
-            except Exception as error:
-                return _DispatchGate(
-                    target,
-                    result=DispatchResult(
-                        tool_use_id=call.id,
-                        text=_error_text(call.name, error, bound.member_refs),
-                        is_error=True,
-                        activity=True,
-                    ),
-                    outcome="authority_failed",
-                    error_class=type(error).__name__,
-                )
+        try:
+            context, args, scope, binding = await self._standing_authorization(
+                bound, bound.context, args
+            )
+        except Exception as error:
+            return _DispatchGate(
+                target,
+                result=DispatchResult(
+                    tool_use_id=call.id,
+                    text=_error_text(call.name, error, bound.member_refs),
+                    is_error=True,
+                    activity=True,
+                ),
+                outcome="authority_failed",
+                error_class=type(error).__name__,
+            )
         request = self._member_authorization_request(bound, args, request_target, scope, binding)
         if request is None:
             return _AuthorizedDispatch(context, args)

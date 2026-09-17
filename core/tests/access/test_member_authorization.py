@@ -1,8 +1,9 @@
 import asyncio
 import json
+import pickle
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, make_dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -26,6 +27,7 @@ from ufo.runtime.access.member_authorization import (
     MEMBER_AUTHORIZATION_UNDISCLOSABLE,
     SUPERSEDED_AUTHORIZATION_DECISION,
     AuthorizationAnswer,
+    AuthorizationAttempt,
     AuthorizationBinding,
     AuthorizationContext,
     AuthorizationContextMessage,
@@ -233,6 +235,56 @@ def _request(
         message_complete=message_complete,
         answer=answer,
     )
+
+
+@pytest.mark.parametrize("flat_state", [False, True])
+def test_authorization_attempt_restores_pickled_records(
+    monkeypatch: pytest.MonkeyPatch, flat_state: bool
+) -> None:
+    request = _request((uuid4(), uuid4(), uuid4(), uuid4()), "Send it")
+    attempt = AuthorizationAttempt(
+        request=request,
+        verdict=_verdict(
+            decision="allow",
+            basis="selected_message",
+            evidence="Send it",
+            selected_message_ref=request.message_ref,
+        ),
+        permission_id=uuid4(),
+    )
+    if flat_state:
+        request_record = make_dataclass(
+            "AuthorizationRequest",
+            [(name, object) for name in request.__dict__],
+            frozen=True,
+            module=member_authorization_module.__name__,
+        )
+        attempt_record = make_dataclass(
+            "AuthorizationAttempt",
+            [(name, object) for name in attempt.__dict__],
+            frozen=True,
+            module=member_authorization_module.__name__,
+        )
+        with monkeypatch.context() as patch:
+            patch.setattr(member_authorization_module, "AuthorizationRequest", request_record)
+            patch.setattr(member_authorization_module, "AuthorizationAttempt", attempt_record)
+            encoded = pickle.dumps(
+                attempt_record(
+                    **{
+                        **attempt.__dict__,
+                        "request": request_record(**request.__dict__),
+                    }
+                )
+            )
+    else:
+        encoded = pickle.dumps(attempt)
+
+    restored = pickle.loads(encoded)
+
+    assert isinstance(restored, AuthorizationAttempt)
+    assert isinstance(restored.request, AuthorizationRequest)
+    assert restored == attempt
+    assert AuthorizationAttempt.model_validate_json(restored.model_dump_json()) == attempt
 
 
 def _answer(
@@ -453,13 +505,14 @@ async def test_a_structured_deny_cannot_be_reinterpreted_as_allow(db: None) -> N
     asked = await gate.authorize(_request(ids, "Maybe send it"))
     answer_request = _request(ids, "Deny", answer=_answer(asked, "deny"))
     attempt = await gate.preflight(answer_request)
-    forged = replace(
-        attempt,
-        verdict=_verdict(
-            decision="allow",
-            basis="pending_answer",
-            evidence="Deny",
-        ),
+    forged = attempt.model_copy(
+        update={
+            "verdict": _verdict(
+                decision="allow",
+                basis="pending_answer",
+                evidence="Deny",
+            ),
+        },
     )
 
     result = await gate.authorize(answer_request, forged)
@@ -969,9 +1022,8 @@ async def test_pending_requests_are_scoped_to_their_conversation(db: None) -> No
                 updated_at=sa.func.now(),
             )
         )
-    second_request = replace(
-        _request(ids, "Send it", selected_from_multiple=False),
-        conversation_id=second_conversation_id,
+    second_request = _request(ids, "Send it", selected_from_multiple=False).model_copy(
+        update={"conversation_id": second_conversation_id},
     )
 
     result = await gate.authorize(second_request)

@@ -28,11 +28,20 @@ from opentelemetry.sdk.metrics.export import (
 )
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
+from ufo_ext_connectors.tools import (
+    ATTRIBUTION_MRKDWN,
+    SLACK_PROVIDER,
+    CallExternalToolInput,
+    slack_attributed,
+)
 from ufo_ext_context_rollover.rollover import (
     ROLLOVER_PREFIX,
     BoundaryOutcome,
     ContextRollover,
 )
+from ufo_ext_skill_create.manifest import UserSkillSpec
+from ufo_ext_slack.hooks import CONNECTOR_CALL_TOOL, attribute_connector_send
+from ufo_ext_slack.surface import SELF_USER_ID_STORE_KEY, SLACK_EXTENSION
 from ufo_testsupport.member_authorization import PermitMemberAuthorization
 from ufo_testsupport.models import CORE_SPECS, serving_model
 
@@ -41,6 +50,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness import o11y
 from ufo.harness.agent import ToolCall as HarnessToolCall
+from ufo.harness.durability import ReplaySafeSerializer
 from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, CORE_PRICING, OPENAI_KEY_SLOT
 from ufo.harness.models.interface import (
     ConversationCacheTtl,
@@ -315,7 +325,7 @@ class RecordingMemberAuthorization:
 
     async def preflight(self, request: AuthorizationRequest) -> AuthorizationAttempt:
         self.preflight_requests.append(request)
-        return AuthorizationAttempt(request)
+        return AuthorizationAttempt(request=request)
 
     async def authorize(
         self, request: AuthorizationRequest, attempt: AuthorizationAttempt | None = None
@@ -2501,7 +2511,7 @@ async def test_multi_speaker_authorization_preflights_overlap_before_ordered_dis
             if len(self.entered) == 2:
                 self.both_entered.set()
             await asyncio.wait_for(self.both_entered.wait(), timeout=1)
-            return AuthorizationAttempt(request)
+            return AuthorizationAttempt(request=request)
 
         async def authorize(
             self, request: AuthorizationRequest, attempt: AuthorizationAttempt | None = None
@@ -10193,3 +10203,140 @@ async def test_a_tool_result_publishes_its_sources_after_its_own_label(
     assert [published for published in hub.frames if isinstance(published, Sources)] == [
         Sources(items=(WEB_SOURCE,))
     ]
+
+
+@pytest.mark.parametrize("checkpoint", [False, True])
+async def test_dispatch_restores_nested_input_aliases(
+    db: None, tmp_path: Path, checkpoint: bool
+) -> None:
+    seen: list[UserSkillSpec] = []
+
+    async def capture(ctx: ToolContext, args: UserSkillSpec) -> ToolResult:
+        seen.append(args)
+        return ToolResult(content=(TextContent(text="ok"),))
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="skill_probe", description="d", input_model=UserSkillSpec, handler=capture
+                ),
+            )
+        ),
+    )
+    arguments = {"files": {"SKILL.md": {"from": "draft.md"}}}
+    bound = await engine._bind_or_error(
+        _dispatch_context(engine),
+        engine._resolve_call(ToolUseBlock(id="alias", name="skill_probe", input=arguments)),
+        {},
+    )
+    assert isinstance(bound, _BoundToolCall)
+    preflight = None
+    if checkpoint:
+        prepared = await engine._pre_tool_use(
+            bound, UserSkillSpec.model_validate(arguments), None, None
+        )
+        serializer = ReplaySafeSerializer()
+        preflight = serializer.deserialize(serializer.serialize(prepared))
+        assert isinstance(preflight, _AuthorizationPreflight)
+    result = await engine._dispatch_step_recovering(bound, None, preflight)
+    assert not result.is_error
+    assert seen == [UserSkillSpec.model_validate(arguments)]
+
+
+@pytest.mark.parametrize("checkpoint", [False, True])
+async def test_dispatch_preserves_hook_proved_slack_attribution(
+    db: None, tmp_path: Path, checkpoint: bool
+) -> None:
+    async def send(ctx: ToolContext, args: CallExternalToolInput) -> ToolResult:
+        arguments = slack_attributed(
+            args.source_id,
+            args.tool_name,
+            args.arguments,
+            destination_internal=True,
+            bot_user_id=args.attribution_bot_user_id,
+        )
+        return ToolResult(content=(TextContent(text=json.dumps(arguments)),))
+
+    turn = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    first = await _seat_member(turn.workspace_id, "first@example.com")
+    second = await _seat_member(turn.workspace_id, "second@example.com")
+    second_ref = uuid4()
+    bot_user_id = "U0BOTUFO"
+    ext = context_for(SLACK_EXTENSION, frozenset())
+    with ws(turn.workspace_id):
+        await ext.store.put(SELF_USER_ID_STORE_KEY, bot_user_id)
+    gate = RecordingMemberAuthorization(AuthorizationResolution("allow"))
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        member_authorization=gate,
+        hooks=HookChain(
+            hooks={
+                "pre_tool_use": (
+                    BoundHook(
+                        spec=HookSpec(
+                            event="pre_tool_use",
+                            handler=attribute_connector_send,
+                            tools=(CONNECTOR_CALL_TOOL,),
+                        ),
+                        ext=ext,
+                    ),
+                )
+            }
+        ),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name=CONNECTOR_CALL_TOOL,
+                    description="d",
+                    input_model=CallExternalToolInput,
+                    handler=send,
+                ),
+            )
+        ),
+    )
+    arguments = {
+        "source_id": SLACK_PROVIDER,
+        "tool_name": "SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL",
+        "arguments": {"channel": "C1", "text": "The plan is posted."},
+        "attribution_bot_user_id": "U0SPOOF",
+    }
+    assert CallExternalToolInput.model_validate(arguments).attribution_bot_user_id is None
+    if checkpoint:
+        arguments["requested_by"] = str(second_ref)
+    bound = await engine._bind_or_error(
+        _dispatch_context(engine),
+        engine._resolve_call(
+            ToolUseBlock(id="attribution", name=CONNECTOR_CALL_TOOL, input=arguments)
+        ),
+        {
+            turn.id: ActiveMessage(member_id=first, rendered="Review it"),
+            second_ref: ActiveMessage(member_id=second, rendered="Post the plan"),
+        }
+        if checkpoint
+        else {},
+    )
+    assert isinstance(bound, _BoundToolCall)
+    preflight = None
+    with ws(turn.workspace_id):
+        if checkpoint:
+            [prepared] = await engine._preflight_member_authorizations((bound,))
+            serializer = ReplaySafeSerializer()
+            preflight = serializer.deserialize(serializer.serialize(prepared))
+            assert isinstance(preflight, _AuthorizationPreflight)
+        result = await engine._dispatch_step_recovering(bound, None, preflight)
+    assert not result.is_error
+    assert json.loads(result.text)["blocks"][-1] == {
+        "type": "context",
+        "elements": [
+            {
+                "type": "mrkdwn",
+                "text": ATTRIBUTION_MRKDWN.format(subject=f"<@{bot_user_id}>"),
+            }
+        ],
+    }
+    if checkpoint:
+        [request] = gate.preflight_requests
+        assert request.effect.arguments["attribution_bot_user_id"] == bot_user_id
