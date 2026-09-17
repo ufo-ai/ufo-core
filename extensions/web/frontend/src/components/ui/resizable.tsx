@@ -1,4 +1,3 @@
-import { IconGripVertical } from "@tabler/icons-react";
 import * as ResizablePrimitive from "react-resizable-panels";
 
 import { cn } from "@/lib/cn";
@@ -17,11 +16,7 @@ export function ResizablePanel(props: ResizablePrimitive.PanelProps) {
   return <ResizablePrimitive.Panel data-slot="resizable-panel" {...props} />;
 }
 
-export function ResizableHandle({
-  withHandle,
-  className,
-  ...props
-}: ResizablePrimitive.SeparatorProps & { withHandle?: boolean }) {
+export function ResizableHandle({ className, ...props }: ResizablePrimitive.SeparatorProps) {
   return (
     <ResizablePrimitive.Separator
       data-slot="resizable-handle"
@@ -31,12 +26,6 @@ export function ResizableHandle({
         className,
       )}
       {...props}
-    >
-      {withHandle ? (
-        <div className="z-10 flex h-4 w-3 items-center justify-center rounded-xs border border-edge bg-fill">
-          <IconGripVertical className="size-2.5" aria-hidden />
-        </div>
-      ) : null}
-    </ResizablePrimitive.Separator>
+    />
   );
 }

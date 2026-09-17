@@ -67,7 +67,7 @@ export function SheetHost({ children }: { children: ReactNode }) {
           </ResizablePanel>
           {beside ? (
             <>
-              <ResizableHandle withHandle />
+              <ResizableHandle />
               <ResizablePanel
                 defaultSize={SHEET_SHARE}
                 minSize={SHEET_FLOOR}
