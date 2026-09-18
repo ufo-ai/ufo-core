@@ -135,7 +135,7 @@ const LANE = cn(
   "flex box-content shrink-0 items-center justify-center overflow-hidden",
   /* An `fr` track keeps an automatic `auto` minimum, so `0fr` cannot close over a control that
      states its own height; the height this opens to is known, so it is the thing animated. */
-  "h-0 py-sm has-[[data-active=true]]:h-(--size-touch)",
+  "h-0 has-[[data-active=true]]:h-(--size-touch) has-[[data-active=true]]:py-sm",
   "transition-[height] duration-200 ease-(--ease-leave)",
   "has-[[data-active=true]]:ease-(--ease-enter) motion-reduce:transition-none",
 );
