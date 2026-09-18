@@ -114,7 +114,7 @@
 :root {
   --background: var(--bkgd-100);
   --foreground: var(--text-primary);
-  --card: var(--bkgd-100);
+  --card: var(--bkgd-000);
   --card-foreground: var(--text-primary);
   --popover: var(--bkgd-100);
   --popover-foreground: var(--text-primary);
@@ -155,7 +155,9 @@
   --color-field: var(--bkgd-200);
   --color-field-ink: var(--text-primary);
 
-  --color-edge: var(--bkgd-300);
+  /* A boundary clears 3:1 against every ground it is drawn on — surface, raised, fill — in both
+     schemes (WCAG 1.4.11). 75% is the least hold that does: the light fill measures 3.05:1. */
+  --color-edge: color-mix(in srgb, var(--text-secondary) 75%, var(--bkgd-100));
   --color-edge-strong: var(--text-secondary);
 
   /* A word clears 4.5:1. Each accent held towards the text step keeps its hue and carries both schemes,
@@ -167,14 +169,10 @@
   --color-fill-strong: var(--bkgd-300);
   --color-fill-ink: #191A1A;
   --color-scrim: color-mix(in srgb, var(--text-primary) 50%, transparent);
-  --color-tile: color-mix(in srgb, var(--text-primary) 8%, transparent);
 
   --blur-scrim: 3px;
 
   --color-affirm: color-mix(in srgb, var(--accent-primary) 15%, var(--bkgd-100));
-  /* The member's own words: the one place the first accent lands as a surface rather than a mark,
-     so it is held to the same 15% step the tints above use and carries both schemes with them. */
-  --color-said: color-mix(in srgb, var(--accent-primary) 15%, var(--bkgd-100));
 
   /* Each channel is a pair the cell mixes between, and both ends are the palette laid over the
      pane, so a scheme still turns on the seven declarations alone. */
@@ -219,6 +217,13 @@
     }
   }
 
+  @keyframes unfold {
+    from {
+      grid-template-rows: 0fr;
+      opacity: 0;
+    }
+  }
+
   --animate-raise: raise 0.14s var(--ease-control);
 
   @keyframes raise {
@@ -250,7 +255,6 @@
 
   @keyframes marked {
     50% {
-      background-color: color-mix(in srgb, var(--accent-secondary) 34%, var(--bkgd-100));
       outline-color: var(--accent-secondary);
     }
   }
@@ -282,6 +286,7 @@
   --radius-answer: 16px;
   --radius-panel: var(--radius);
   --radius-bubble: 16px;
+  --radius-tail: 4px;
   --radius-menu: 16px;
 
   --radius-avatar: 8px;
@@ -309,7 +314,7 @@
   --tracking-key: 0.1em;
 
   --leading-chrome: 1.5;
-  --leading-reading: 1.65;
+  --leading-reading: 1.6;
 
   --font-weight-strong: 600;
 
@@ -327,7 +332,6 @@
   --container-dialog: min(560px, calc(100vw - 32px));
   --container-settings: min(880px, calc(100vw - 32px));
   --container-spotlight: min(720px, calc(100vw - 32px));
-  --container-bubble: 70ch;
   --container-said: 80%;
   --container-section: 728px;
   --container-page: calc(var(--container-section) + 2 * var(--spacing-2xl));
@@ -338,7 +342,6 @@
   --container-control-row: 20ch;
   --container-search: 144px;
   --container-title: 208px;
-  --container-attachment: 160px;
   --container-record: min(440px, 45%);
   --container-menu: 168px;
   --media-tall: 60vh;
@@ -346,7 +349,6 @@
   --size-thumbnail: 88px;
   --size-digest-picture: 96px;
   --size-avatar: 24px;
-  --size-site-tile: 24px;
   --size-site-icon: 16px;
   --size-band: 128px;
   --size-waiting: max(100%, 128px);
@@ -379,9 +381,8 @@
   --size-switch-throw: 14px;
   --size-fact: 16ch;
   --size-glyph: 16px;
-  /* One cell of a decoding line. The cipher is set in the mono face, so a character's own width is
-     a column every glyph on the line shares. */
-  --size-decode-cell: 1ch;
+  --size-dot: 6px;
+  --size-hairline: 0.5px;
   --size-icon: 1em;
   --size-surface-mark: 24px;
   --size-brand-mark: 32px;
@@ -742,6 +743,14 @@ body[data-shell="sidebar"] {
   [data-part="skeleton"] {
     animation: var(--animate-waiting);
   }
+}
+
+/** A line that arrives opens the height it needs rather than appearing in it: the row is a grid of
+ *  one track animated from nothing, so the block it is in grows continuously. */
+@utility unfolds {
+  display: grid;
+  grid-template-rows: 1fr;
+  animation: unfold 0.18s var(--ease-enter);
 }
 
 /* Built to shadcn's shimmer, whose highlight is `oklch(from currentColor …)` — refused by the

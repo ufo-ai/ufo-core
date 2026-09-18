@@ -806,7 +806,9 @@ const THREAD_ACTS = "Thread options";
 /** The ground and the gradient ahead of it mask the title, which runs under the marks otherwise.
  *  `bg-fill` is the pill's, because every state that draws the trail has already filled the pill. */
 const RAIL_ROW_TRAIL = cn(
-  "absolute end-0 top-1/2 flex h-full -translate-y-1/2 items-center gap-2xs",
+  /* An element at zero opacity still takes a pointer, so this strip and its fade would swallow
+     every press within their width. */
+  "pointer-events-none absolute end-0 top-1/2 flex h-full -translate-y-1/2 items-center gap-2xs",
   "rounded-e-row bg-fill pe-xs ps-sm",
   "opacity-0 transition-opacity duration-100 ease-control motion-reduce:transition-none",
   "group-hover/row:opacity-100 group-has-[:focus-visible]/row:opacity-100",
@@ -815,7 +817,7 @@ const RAIL_ROW_TRAIL = cn(
 );
 
 const RAIL_ROW_GLYPH = cn(
-  "rounded-control border-0 bg-transparent p-hair text-ink-soft",
+  "pointer-events-auto rounded-control border-0 bg-transparent p-hair text-ink-soft",
   "hover:bg-fill-strong data-[state=open]:bg-fill-strong",
 );
 

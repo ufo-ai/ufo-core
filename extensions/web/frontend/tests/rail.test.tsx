@@ -6,6 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import { App as SidebarShell } from "../sidebar/src/App";
 import { NARROW } from "@/lib/narrow";
 import { agentName } from "@/lib/agentName";
 import { RESTING_STATUS_MS, WORKING_STATUS_MS } from "@/lib/appStatusStore";
@@ -976,8 +977,8 @@ test("a markdown file in a Slack conversation opens the attachment sheet", async
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const card = await screen.findByRole("button", { name: "notes.md" });
-  expect(screen.queryByRole("link", { name: "notes.md" })).toBeNull();
+  const card = await screen.findByRole("button", { name: /notes\.md/ });
+  expect(screen.queryByRole("link", { name: /notes\.md/ })).toBeNull();
   await userEvent.click(card);
   expect(location.hash).toBe("#/c/" + CONVO_ID);
   const sheet = await screen.findByRole("dialog", { name: "notes.md" });
@@ -1285,4 +1286,22 @@ test("a browser that was muted opens on the mark that unmutes it", async () => {
     "true",
   );
   expect(rail.queryByRole("button", { name: "Mute sounds" })).toBeNull();
+});
+
+test("the sidebar rail's trailing marks pass a press to the row, and the acts mark takes its own", async () => {
+  wire({ ...chatsOnWire([CHAT_ROW]) });
+  const view = render(<SidebarShell agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const press = await screen.findByRole("button", { name: new RegExp(CHAT_ROW.title) });
+  const line = press.closest("li") as HTMLElement;
+  const mark = within(line).getByRole("button", { name: "Thread options" });
+  const trail = mark.parentElement as HTMLElement;
+
+  expect(trail.contains(press)).toBe(false);
+  expect(trail.className).toContain("absolute");
+  expect(trail.className).toContain("h-full");
+  expect(trail.className).toContain("pointer-events-none");
+  expect(mark.className).toContain("pointer-events-auto");
+
+  view.unmount();
 });

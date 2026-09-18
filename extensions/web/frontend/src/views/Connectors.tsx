@@ -18,6 +18,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Card } from "@/components/ui/card";
 import {
   Item,
   ItemActions,
@@ -1009,109 +1010,111 @@ export function Connectors({
               >
                 <div className="flex flex-col gap-2xl">
                   {standing.length || narrowed || shelf === "available" ? (
-                    <ItemGroup>
-                      <ItemHead>
-                        <Search
-                          label="Search connectors"
-                          placeholder="Search"
-                          className="w-full"
-                          value={query}
-                          onChange={(event) => setQuery(event.target.value)}
-                        />
-                        {groups.length > 1 ? (
-                          <Segmented
-                            variant="tag"
-                            label="Category"
-                            segments={[{ label: "All", value: "", count: shelved.length }, ...groups]}
-                            value={picked}
-                            onPick={(next: string) => onPlace({ kind: next || undefined })}
+                    <Card rows>
+                      <ItemGroup>
+                        <ItemHead>
+                          <Search
+                            label="Search connectors"
+                            placeholder="Search"
+                            className="w-full"
+                            value={query}
+                            onChange={(event) => setQuery(event.target.value)}
                           />
-                        ) : null}
-                      </ItemHead>
-                      {standing.length ? null : (
-                        <>
-                          <ItemSeparator />
-                          <Item>
-                            <ItemContent>
-                              <ItemDescription whole>No connector matches this search.</ItemDescription>
-                            </ItemContent>
-                          </Item>
-                        </>
-                      )}
-                      {standing.map((row) => (
-                        <Fragment key={row.key}>
-                          <ItemSeparator />
-                          <ConnectionRowItem
-                            row={row}
-                            current={
-                              row.entry
-                                ? opens.includes(CONNECTION + row.entry.grant)
-                                : row.name === GITHUB && opens.includes(COVERAGE)
-                            }
-                            open={
-                              row.entry
-                                ? () => show(CONNECTION + row.entry!.grant)
-                                : row.name === GITHUB
-                                  ? () => show(COVERAGE)
-                                  : null
-                            }
-                            act={
-                              row.entry || row.installed ? (
-                                row.entry?.own ? (
-                                  <DropdownMenu modal={false}>
-                                    <DropdownMenuTrigger asChild>
-                                      <Button
-                                        variant="quiet"
-                                        size="icon"
-                                        aria-label={"Menu for " + row.label}
-                                      >
-                                        <IconDots aria-hidden />
-                                      </Button>
-                                    </DropdownMenuTrigger>
-                                    <DropdownMenuContent
-                                      align="end"
-                                      className="w-(--container-menu)"
-                                    >
-                                      <DropdownMenuItem
-                                        onSelect={() => setRemoving(row)}
-                                      >
-                                        {"Remove " + row.label}
-                                      </DropdownMenuItem>
-                                    </DropdownMenuContent>
-                                  </DropdownMenu>
-                                ) : null
-                              ) : (
-                                <Button
-                                  variant="outline"
-                                  size="bar"
-                                  busy={waiting === row.name}
-                                  disabled={busy !== null && waiting !== row.name}
-                                  onClick={() =>
-                                    row.mcp
-                                      ? show(MCP_SHEET_NAMED + row.mcp.name)
-                                      : connect(row.name, row.label)
-                                  }
-                                >
-                                  {waiting === row.name ? "Connecting" : "Connect"}
-                                </Button>
-                              )
-                            }
-                          />
-                        </Fragment>
-                      ))}
-                      {shelf === "available" ? (
-                        <>
-                          <ItemSeparator />
-                          <CredentialOffer />
-                          {mcpOffered(query, standing.length) ? (
-                            <>
-                              <ItemSeparator />
-                              <McpOffer onAdd={() => show(MCP_SHEET)} />
-                            </>
+                          {groups.length > 1 ? (
+                            <Segmented
+                              variant="tag"
+                              label="Category"
+                              segments={[{ label: "All", value: "", count: shelved.length }, ...groups]}
+                              value={picked}
+                              onPick={(next: string) => onPlace({ kind: next || undefined })}
+                            />
                           ) : null}
-                        </>
-                      ) : null}
-                    </ItemGroup>
+                        </ItemHead>
+                        {standing.length ? null : (
+                          <>
+                            <ItemSeparator />
+                            <Item>
+                              <ItemContent>
+                                <ItemDescription whole>No connector matches this search.</ItemDescription>
+                              </ItemContent>
+                            </Item>
+                          </>
+                        )}
+                        {standing.map((row) => (
+                          <Fragment key={row.key}>
+                            <ItemSeparator />
+                            <ConnectionRowItem
+                              row={row}
+                              current={
+                                row.entry
+                                  ? opens.includes(CONNECTION + row.entry.grant)
+                                  : row.name === GITHUB && opens.includes(COVERAGE)
+                              }
+                              open={
+                                row.entry
+                                  ? () => show(CONNECTION + row.entry!.grant)
+                                  : row.name === GITHUB
+                                    ? () => show(COVERAGE)
+                                    : null
+                              }
+                              act={
+                                row.entry || row.installed ? (
+                                  row.entry?.own ? (
+                                    <DropdownMenu modal={false}>
+                                      <DropdownMenuTrigger asChild>
+                                        <Button
+                                          variant="quiet"
+                                          size="icon"
+                                          aria-label={"Menu for " + row.label}
+                                        >
+                                          <IconDots aria-hidden />
+                                        </Button>
+                                      </DropdownMenuTrigger>
+                                      <DropdownMenuContent
+                                        align="end"
+                                        className="w-(--container-menu)"
+                                      >
+                                        <DropdownMenuItem
+                                          onSelect={() => setRemoving(row)}
+                                        >
+                                          {"Remove " + row.label}
+                                        </DropdownMenuItem>
+                                      </DropdownMenuContent>
+                                    </DropdownMenu>
+                                  ) : null
+                                ) : (
+                                  <Button
+                                    variant="outline"
+                                    size="bar"
+                                    busy={waiting === row.name}
+                                    disabled={busy !== null && waiting !== row.name}
+                                    onClick={() =>
+                                      row.mcp
+                                        ? show(MCP_SHEET_NAMED + row.mcp.name)
+                                        : connect(row.name, row.label)
+                                    }
+                                  >
+                                    {waiting === row.name ? "Connecting" : "Connect"}
+                                  </Button>
+                                )
+                              }
+                            />
+                          </Fragment>
+                        ))}
+                        {shelf === "available" ? (
+                          <>
+                            <ItemSeparator />
+                            <CredentialOffer />
+                            {mcpOffered(query, standing.length) ? (
+                              <>
+                                <ItemSeparator />
+                                <McpOffer onAdd={() => show(MCP_SHEET)} />
+                              </>
+                            ) : null}
+                          </>
+                        ) : null}
+                      </ItemGroup>
+                    </Card>
                   ) : (
                     <PanelBlank body={SHELF_BLANKS[shelf as Exclude<Shelf, "available">]} />
                   )}

@@ -5,7 +5,13 @@ import { IconCheck, IconCopy, IconX } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 
-const TAP_FLOOR = "max-narrow:inline-flex max-narrow:min-h-(--size-control) max-narrow:items-center";
+/** The glyph draws at the meta line's own type — 12 pixels. The box opens at its leading edge
+ *  rather than around it, because the model's mark stands 10 pixels before it. */
+const TAP_TARGET = cn(
+  "relative",
+  "before:absolute before:start-0 before:top-1/2 before:-translate-y-1/2",
+  "before:size-(--size-touch)",
+);
 
 const COPY_LABELS = {
   idle: "Copy message",
@@ -43,11 +49,7 @@ export function CopyAct({ text }: { text: string }) {
       size="glyph"
       aria-label={COPY_LABELS[state]}
       tone={state === "failed" ? "attention" : undefined}
-      className={cn(
-        "size-(--size-icon) [&_svg]:size-(--size-icon)",
-        TAP_FLOOR,
-        "max-narrow:min-w-(--size-control) max-narrow:justify-center",
-      )}
+      className={cn("size-(--size-icon) [&_svg]:size-(--size-icon)", TAP_TARGET)}
       onClick={copy}
     >
       {state === "copied" ? (

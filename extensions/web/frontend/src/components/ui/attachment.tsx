@@ -1,72 +1,49 @@
 import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
-import { cva, type VariantProps } from "class-variance-authority";
+
+import {
+  IconFile,
+  IconFileTypeCsv,
+  IconFileTypeDoc,
+  IconFileTypeDocx,
+  IconFileTypeHtml,
+  IconFileTypeJpg,
+  IconFileTypePdf,
+  IconFileTypePng,
+  IconFileTypePpt,
+  IconFileTypeSvg,
+  IconFileTypeTxt,
+  IconFileTypeXls,
+  IconFileTypeZip,
+  type Icon,
+} from "@tabler/icons-react";
 
 import { BASE } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
-const attachmentVariants = cva(
-  cn(
-    "flex w-fit max-w-full min-w-(--container-attachment) shrink-0 flex-wrap items-center",
-    "rounded-panel border border-edge bg-card text-card-foreground",
-  ),
-  {
-    variants: {
-      size: {
-        sm: cn(
-          "gap-md text-small",
-          "has-data-[slot=attachment-content]:px-sm has-data-[slot=attachment-content]:py-xs",
-        ),
-      },
-    },
-    defaultVariants: { size: "sm" },
-  },
-);
+/** The browser's media type does not carry a file's kind — empty for `.md`, inconsistent for the
+ *  office types — so the mark is read off the extension, and what the table misses is a plain sheet. */
+const FILE_MARKS: Record<string, Icon> = {
+  csv: IconFileTypeCsv,
+  doc: IconFileTypeDoc,
+  docx: IconFileTypeDocx,
+  htm: IconFileTypeHtml,
+  html: IconFileTypeHtml,
+  jpeg: IconFileTypeJpg,
+  jpg: IconFileTypeJpg,
+  pdf: IconFileTypePdf,
+  png: IconFileTypePng,
+  ppt: IconFileTypePpt,
+  pptx: IconFileTypePpt,
+  svg: IconFileTypeSvg,
+  txt: IconFileTypeTxt,
+  xls: IconFileTypeXls,
+  xlsx: IconFileTypeXls,
+  zip: IconFileTypeZip,
+};
 
-export function Attachment({
-  className,
-  size = "sm",
-  ...props
-}: ComponentProps<"div"> & VariantProps<typeof attachmentVariants>) {
-  return (
-    <div
-      data-slot="attachment"
-      className={cn(attachmentVariants({ size }), className)}
-      {...props}
-    />
-  );
-}
-
-export function AttachmentContent({ className, ...props }: ComponentProps<"div">) {
-  return (
-    <div
-      data-slot="attachment-content"
-      className={cn("max-w-full min-w-0 flex-1 leading-chrome", className)}
-      {...props}
-    />
-  );
-}
-
-export function AttachmentTitle({ className, ...props }: ComponentProps<"span">) {
-  return (
-    <span
-      data-slot="attachment-title"
-      className={cn("block max-w-full min-w-0 truncate font-medium", className)}
-      {...props}
-    />
-  );
-}
-
-export function AttachmentDescription({ className, ...props }: ComponentProps<"span">) {
-  return (
-    <span
-      data-slot="attachment-description"
-      className={cn(
-        "mt-hair block max-w-full min-w-0 truncate text-small text-ink-soft",
-        className,
-      )}
-      {...props}
-    />
-  );
+export function FileMark({ filename }: { filename: string }) {
+  const Mark = FILE_MARKS[filename.split(".").pop()?.toLowerCase() ?? ""] ?? IconFile;
+  return <Mark aria-hidden className="size-(--size-glyph) text-ink-soft" />;
 }
 
 export function AttachmentGroup({ className, ...props }: ComponentProps<"div">) {
@@ -76,7 +53,6 @@ export function AttachmentGroup({ className, ...props }: ComponentProps<"div">) 
       className={cn(
         "-mx-sm flex min-w-0 gap-2xs overflow-x-auto overscroll-x-contain px-sm py-2xs",
         "scroll-fade-x scrollbar-none snap-x snap-mandatory scroll-px-sm",
-        "*:data-[slot=attachment]:flex-none *:data-[slot=attachment]:snap-start",
         "*:data-[slot=attachment-thumbnail]:snap-start",
         className,
       )}
@@ -85,28 +61,7 @@ export function AttachmentGroup({ className, ...props }: ComponentProps<"div">) 
   );
 }
 
-const ATTACHMENT_BADGES: Record<string, string> = {
-  pdf: "PDF",
-  docx: "DOCX",
-  xlsx: "XLSX",
-  pptx: "PPTX",
-  csv: "CSV",
-  md: "MD",
-  svg: "SVG",
-  mp4: "MP4",
-  mov: "MOV",
-  webm: "WEBM",
-  mkv: "MKV",
-};
 const DOCUMENT_PREVIEW_TYPES = /\.(pdf|docx|xlsx|pptx|csv|md|svg)$/i;
-
-/** The browser's media type does not carry the kind — empty for `.md`, inconsistent for office types —
- *  so the badge is read off the extension. */
-export function attachmentBadgeFor(filename: string): string | null {
-  const dot = filename.lastIndexOf(".");
-  const ext = dot === -1 ? "" : filename.slice(dot + 1).toLowerCase();
-  return ATTACHMENT_BADGES[ext] ?? null;
-}
 
 export function AttachmentThumbnail({
   filename,
@@ -124,13 +79,13 @@ export function AttachmentThumbnail({
   const [failed, setFailed] = useState<string | null>(null);
   const drawn = previewUrl !== null && failed !== previewUrl ? previewUrl : null;
   const shimmering = loading && drawn === null;
-  const badge = attachmentBadgeFor(filename);
   const documentPreview = DOCUMENT_PREVIEW_TYPES.test(filename);
   return (
     <div
       data-slot="attachment-thumbnail"
+      title={filename}
       className={cn(
-        "relative flex size-(--size-thumbnail) shrink-0 items-end",
+        "relative flex size-(--size-thumbnail) shrink-0 items-center justify-center",
         "overflow-hidden rounded-bubble border border-edge bg-card text-card-foreground",
         className,
       )}
@@ -156,28 +111,9 @@ export function AttachmentThumbnail({
           className="absolute inset-0 animate-pulse bg-muted"
         />
       ) : null}
-      <div className="relative flex min-w-0 flex-1 items-end gap-xs p-sm">
-        {badge === null ? null : <AttachmentBadge>{badge}</AttachmentBadge>}
-        {drawn === null && !shimmering ? (
-          <span className="min-w-0 flex-1 truncate text-small leading-chrome">{filename}</span>
-        ) : null}
-      </div>
+      {drawn === null && !shimmering ? <FileMark filename={filename} /> : null}
       {children}
     </div>
-  );
-}
-
-export function AttachmentBadge({ className, ...props }: ComponentProps<"span">) {
-  return (
-    <span
-      data-slot="attachment-badge"
-      className={cn(
-        "rounded-control border border-edge bg-card px-xs py-hair",
-        "text-small leading-chrome font-medium text-card-foreground",
-        className,
-      )}
-      {...props}
-    />
   );
 }
 

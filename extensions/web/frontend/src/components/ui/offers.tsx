@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { IconCornerDownRight } from "@tabler/icons-react";
 
-import { PressRow } from "@/components/ui/pressrow";
+import { Button } from "@/components/ui/button";
+import { Ticker } from "@/components/ui/ticker";
 
 /* Every row that sends a sentence draws the same arrow: the mark says the press sends the words,
    which is the one thing these rows have to say before they are read. */
@@ -19,15 +21,34 @@ export function OfferRows({
 }) {
   if (!offers.length) return null;
   return (
-    <div data-testid="follow-ups" className="mt-2xl flex flex-col border-t border-edge pt-lg">
+    <div
+      data-testid="follow-ups"
+      className="flex flex-col items-start gap-sm border-t border-edge pt-6xl"
+    >
       {offers.map((offer) => (
-        <PressRow
-          key={offer.hook}
-          glyph={<AskMark />}
-          line={offer.hook}
-          onPress={() => onPress(offer.prompt)}
-        />
+        <OfferRow key={offer.hook} hook={offer.hook} onPress={() => onPress(offer.prompt)} />
       ))}
     </div>
+  );
+}
+
+function OfferRow({ hook, onPress }: { hook: string; onPress: () => void }) {
+  const [asks, setAsks] = useState(0);
+  return (
+    <Button
+      variant="framed"
+      size="reading"
+      onClick={onPress}
+      className="max-w-full justify-start"
+      onPointerEnter={() => setAsks((asked) => asked + 1)}
+      onPointerLeave={() => setAsks(0)}
+      onFocus={() => setAsks((asked) => asked + 1)}
+      onBlur={() => setAsks(0)}
+    >
+      <AskMark />
+      <Ticker asks={asks} className="min-w-0 flex-1 max-narrow:whitespace-normal">
+        {hook}
+      </Ticker>
+    </Button>
   );
 }

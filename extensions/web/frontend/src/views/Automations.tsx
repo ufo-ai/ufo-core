@@ -12,6 +12,7 @@ import {
 } from "@tabler/icons-react";
 
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -123,9 +124,6 @@ const ANOTHER_MEMBER = "another member";
 const EVERY_STREAM = "Every stream synced from ";
 const WHOLE_FEED = "the whole feed of ";
 const ON = " on ";
-/** The surface a connection card draws, which these cards share: one radius, one hairline, one
- *  ground, so the two grids read as one product. */
-const HERO_CARD = "flex flex-col gap-2xl rounded-card border border-edge bg-raised p-2xl";
 const HERO_LINE = "m-0 line-clamp-2 text-small text-ink-soft";
 const HERO_PLACES = [0, 1, 2];
 const HERO_LINES = ["w-full", "w-4/5"];
@@ -984,26 +982,28 @@ function Heroes({ agentId }: { agentId: string }) {
 function HeroCard({ hero, onStart }: { hero: Hero; onStart: () => void }) {
   const control = rowControl(onStart);
   return (
-    <li {...control} className={cn(HERO_CARD, control.className, "hover:bg-fill")}>
-      <MarkTile>
-        <AgentIcon name={hero.mark} className="size-(--size-brand-mark)" />
-      </MarkTile>
-      <div className="flex min-w-0 flex-col">
-        <span
-          data-part="primary"
-          className="truncate text-body leading-(--leading-chrome) font-medium text-ink"
-        >
-          {hero.title}
-        </span>
-        <p data-part="body" className={HERO_LINE}>
-          {hero.line}
-        </p>
-      </div>
-      <div className="mt-auto flex items-center">
-        <Button variant="send" size="bar" onClick={onStart}>
-          {CREATE}
-        </Button>
-      </div>
+    <li className="flex">
+      <Card {...control} className={cn(control.className, "flex-1 hover:bg-fill")}>
+        <MarkTile>
+          <AgentIcon name={hero.mark} className="size-(--size-brand-mark)" />
+        </MarkTile>
+        <div className="flex min-w-0 flex-col">
+          <span
+            data-part="primary"
+            className="truncate text-body leading-(--leading-chrome) font-medium text-ink"
+          >
+            {hero.title}
+          </span>
+          <p data-part="body" className={HERO_LINE}>
+            {hero.line}
+          </p>
+        </div>
+        <div className="mt-auto flex items-center">
+          <Button variant="send" size="bar" onClick={onStart}>
+            {CREATE}
+          </Button>
+        </div>
+      </Card>
     </li>
   );
 }
@@ -1012,25 +1012,27 @@ function HeroCard({ hero, onStart }: { hero: Hero; onStart: () => void }) {
  *  takes the same room the placeholder held. */
 function HeroWaiting() {
   return (
-    <li className={HERO_CARD}>
-      <Skeleton className="size-(--size-touch) shrink-0 rounded-control" />
-      <div className="flex min-w-0 flex-col">
-        <span className="relative text-body leading-(--leading-chrome)">
-          {BLANK}
-          <Skeleton className="absolute inset-y-0 left-0 w-3/5" />
-        </span>
-        <p className={cn(HERO_LINE, "m-0")}>
-          {HERO_LINES.map((width, index) => (
-            <span key={index} className="relative block">
-              {BLANK}
-              <Skeleton className={cn("absolute inset-y-0 left-0", width)} />
-            </span>
-          ))}
-        </p>
-      </div>
-      <div className="mt-auto flex items-center">
-        <Skeleton className="h-(--size-control) w-(--size-act) rounded-full" />
-      </div>
+    <li className="flex">
+      <Card className="flex-1">
+        <Skeleton className="size-(--size-touch) shrink-0 rounded-control" />
+        <div className="flex min-w-0 flex-col">
+          <span className="relative text-body leading-(--leading-chrome)">
+            {BLANK}
+            <Skeleton className="absolute inset-y-0 left-0 w-3/5" />
+          </span>
+          <p className={cn(HERO_LINE, "m-0")}>
+            {HERO_LINES.map((width, index) => (
+              <span key={index} className="relative block">
+                {BLANK}
+                <Skeleton className={cn("absolute inset-y-0 left-0", width)} />
+              </span>
+            ))}
+          </p>
+        </div>
+        <div className="mt-auto flex items-center">
+          <Skeleton className="h-(--size-control) w-(--size-act) rounded-full" />
+        </div>
+      </Card>
     </li>
   );
 }

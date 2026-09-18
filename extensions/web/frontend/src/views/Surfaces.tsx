@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 
 import { Badge, ConnectedBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/field";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { MarkTile } from "@/components/ui/item";
@@ -497,29 +498,28 @@ function ChannelCard({
   onConnect: () => void;
 }) {
   return (
-    <li
-      aria-label={row.label}
-      className="flex flex-col gap-2xl rounded-card border border-edge bg-raised p-2xl"
-    >
-      <MarkTile>
-        <Mark name={row.name} />
-      </MarkTile>
-      <div className="flex min-w-0 flex-col">
-        <span className="flex items-center gap-sm text-body leading-(--leading-chrome) font-medium text-ink">
-          {row.label}
-          {row.connected ? <ConnectedBadge label={row.label} /> : null}
-        </span>
-        <span className={SUMMARY}>{SUMMARIES[row.name]}</span>
-      </div>
-      <div className="mt-auto flex items-center">
-        {row.offered ? (
-          <Button variant="send" size="bar" onClick={onConnect}>
-            {row.connected ? "Configure" : "Connect"}
-          </Button>
-        ) : (
-          <span className={SUMMARY}>{NOT_OFFERED[row.name]}</span>
-        )}
-      </div>
+    <li aria-label={row.label} className="flex">
+      <Card className="flex-1">
+        <MarkTile>
+          <Mark name={row.name} />
+        </MarkTile>
+        <div className="flex min-w-0 flex-col">
+          <span className="flex items-center gap-sm text-body leading-(--leading-chrome) font-medium text-ink">
+            {row.label}
+            {row.connected ? <ConnectedBadge label={row.label} /> : null}
+          </span>
+          <span className={SUMMARY}>{SUMMARIES[row.name]}</span>
+        </div>
+        <div className="mt-auto flex items-center">
+          {row.offered ? (
+            <Button variant="send" size="bar" onClick={onConnect}>
+              {row.connected ? "Configure" : "Connect"}
+            </Button>
+          ) : (
+            <span className={SUMMARY}>{NOT_OFFERED[row.name]}</span>
+          )}
+        </div>
+      </Card>
     </li>
   );
 }

@@ -32,7 +32,7 @@ export function Meta({
       variant="stamp"
       align={mine ? "end" : "start"}
       reveal={!last}
-      className="mt-2xs gap-md"
+      className="gap-md"
     >
       {mark && model ? (
         <Tooltip>

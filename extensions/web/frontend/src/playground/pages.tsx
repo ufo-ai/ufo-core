@@ -12,14 +12,26 @@ import { TurnAgent } from "@/playground/examples/turn-agent";
 import { TurnStamp } from "@/playground/examples/turn-stamp";
 import { TurnEntering } from "@/playground/examples/turn-entering";
 import { MessageCopy } from "@/playground/examples/message-copy";
-import { ActivityWorking } from "@/playground/examples/activity-working";
 import { ActivitySourcesMany } from "@/playground/examples/activity-sources-many";
 import { ActivitySourcesUnknown } from "@/playground/examples/activity-sources-unknown";
 import { ActivitySourcesWeb } from "@/playground/examples/activity-sources-web";
 import { ActivitySourcesWorkspace } from "@/playground/examples/activity-sources-workspace";
-import { ActivitySubagents } from "@/playground/examples/activity-subagents";
+import {
+  ActivityFirstStep,
+  ActivityReconnecting,
+  ActivitySettledFolded,
+  ActivitySettledOneStep,
+  ActivitySettledRuns,
+  ActivitySettledUntimed,
+  ActivityStepsLive,
+  ActivityWaitingOnRuns,
+  ActivityCancelled,
+  ActivityFailed,
+  ActivityIncomplete,
+  ActivityParked,
+  ActivityLost,
+} from "@/playground/examples/activity-states";
 import { ActivityThinking } from "@/playground/examples/activity-thinking";
-import { ActivityThinkingLoop } from "@/playground/examples/activity-thinking-loop";
 import { ActivityThinkingPlain } from "@/playground/examples/activity-thinking-plain";
 import { FilesPicture } from "@/playground/examples/files-picture";
 import { FilesPictures } from "@/playground/examples/files-pictures";
@@ -39,6 +51,7 @@ import { OfferOne } from "@/playground/examples/offer-one";
 import { OffersSeveral } from "@/playground/examples/offers-several";
 import { OfferLong } from "@/playground/examples/offer-long";
 import { HandoffConnect } from "@/playground/examples/handoff-connect";
+import { HandoffUnnamed } from "@/playground/examples/handoff-unnamed";
 import { HandoffConnected } from "@/playground/examples/handoff-connected";
 import { HandoffCredential } from "@/playground/examples/handoff-credential";
 import { TranscriptDefault } from "@/playground/examples/transcript-default";
@@ -53,7 +66,6 @@ import { TranscriptWatching } from "@/playground/examples/transcript-watching";
 import { ComposerResting } from "@/playground/examples/composer-resting";
 import { ComposerFiles } from "@/playground/examples/composer-files";
 import { ComposerStops } from "@/playground/examples/composer-stops";
-import { ComposerEyebrow } from "@/playground/examples/composer-eyebrow";
 import { ComposerAttention } from "@/playground/examples/composer-attention";
 import { ToastSurface } from "@/playground/examples/toast-surface";
 import { ToastDescription } from "@/playground/examples/toast-description";
@@ -66,9 +78,11 @@ import { ButtonQuietPressed } from "@/playground/examples/button-quiet-pressed";
 import { ButtonOptionPressed } from "@/playground/examples/button-option-pressed";
 import { ButtonMark } from "@/playground/examples/button-mark";
 import { ButtonCorner } from "@/playground/examples/button-corner";
+import { ButtonFramed } from "@/playground/examples/button-variant-framed";
 import { ButtonSizeDefault } from "@/playground/examples/button-size-default";
 import { ButtonSizeCommit } from "@/playground/examples/button-size-commit";
 import { ButtonSizeBar } from "@/playground/examples/button-size-bar";
+import { ButtonSizeReading } from "@/playground/examples/button-size-reading";
 import { ButtonSizeChip } from "@/playground/examples/button-size-chip";
 import { ButtonSizeIcon } from "@/playground/examples/button-size-icon";
 import { ButtonSizeGlyph } from "@/playground/examples/button-size-glyph";
@@ -233,8 +247,9 @@ export const CHAT_PAGES: Page[] = [
       {
         of: "Bubble",
         rows: [
-          { name: "variant", type: "\"default\" | \"said\" | \"ghost\"", fallback: "\"default\"", description: "Which fill the words are read on. said is the one that keeps typed line breaks; ghost drops the fill, the rounding and the inset, so the words run the full column." },
+          { name: "variant", type: "\"default\" | \"said\" | \"ghost\"", fallback: "\"default\"", description: "Which frame the words are read in. said is the one that keeps the line breaks the member typed; ghost drops the frame and the inset, so the words run the column to the same measure every bubble takes." },
           { name: "align", type: "\"start\" | \"end\"", fallback: "\"start\"", description: "Which side of the row the bubble stands on." },
+          { name: "tail", type: "boolean", fallback: "false", description: "The bubble closes a run, so the corner on its own side turns down to the tail radius. A bubble mid-run keeps every corner round." },
           { name: "entering", type: "boolean", fallback: "false", description: "Fades the turn in from transparent over 300ms. Set it for the turn that just landed, never for the transcript behind it." },
           { name: "...props", type: "ComponentProps<\"div\">", description: "Everything a div takes." },
         ],
@@ -325,11 +340,27 @@ export const CHAT_PAGES: Page[] = [
     modules: ["turn-activity.tsx", "marker.tsx", "decode.tsx", "sources.tsx"],
     spread: "full",
     owns: "Everything a turn draws under itself while it runs: the step it is on, that step resolving out of braille, the pages and records it read, and the steps of the subagents it waits on.",
+    axes: ["ending"],
     examples: [
       {
         group: "Steps under a turn",
-        title: "the step a turn is on",
-        render: () => <ActivityWorking />,
+        title: "the first step, nothing read yet",
+        render: () => <ActivityFirstStep />,
+      },
+      {
+        group: "Steps under a turn",
+        title: "steps taken, each with what it read",
+        render: () => <ActivityStepsLive />,
+      },
+      {
+        group: "Steps under a turn",
+        title: "waiting on a subagent",
+        render: () => <ActivityWaitingOnRuns />,
+      },
+      {
+        group: "Steps under a turn",
+        title: "the connection dropped",
+        render: () => <ActivityReconnecting />,
       },
       {
         group: "Steps under a turn",
@@ -339,18 +370,28 @@ export const CHAT_PAGES: Page[] = [
       },
       {
         group: "Steps under a turn",
-        title: "loop (a step that outlasts its words)",
-        render: () => <ActivityThinkingLoop />,
-      },
-      {
-        group: "Steps under a turn",
         title: "color={false}",
         render: () => <ActivityThinkingPlain />,
       },
       {
-        group: "Steps under a turn",
-        title: "the steps of the subagents it waits on",
-        render: () => <ActivitySubagents />,
+        group: "The reasoning a turn read back",
+        title: "folded, with how long it took",
+        render: () => <ActivitySettledFolded />,
+      },
+      {
+        group: "The reasoning a turn read back",
+        title: "a subagent's steps under it",
+        render: () => <ActivitySettledRuns />,
+      },
+      {
+        group: "The reasoning a turn read back",
+        title: "one step, nothing to fold",
+        render: () => <ActivitySettledOneStep />,
+      },
+      {
+        group: "The reasoning a turn read back",
+        title: "no duration on the summary",
+        render: () => <ActivitySettledUntimed />,
       },
       {
         group: "What the turn read",
@@ -372,14 +413,42 @@ export const CHAT_PAGES: Page[] = [
         title: "a source that draws no mark of its own",
         render: () => <ActivitySourcesUnknown />,
       },
+      {
+        group: "How the turn ended",
+        title: 'ending="cancelled"',
+        render: () => <ActivityCancelled />,
+      },
+      {
+        group: "How the turn ended",
+        title: 'ending="failed"',
+        render: () => <ActivityFailed />,
+      },
+      {
+        group: "How the turn ended",
+        title: 'ending="incomplete"',
+        render: () => <ActivityIncomplete />,
+      },
+      {
+        group: "How the turn ended",
+        title: 'ending="parked"',
+        render: () => <ActivityParked />,
+      },
+      {
+        group: "How the turn ended",
+        title: 'ending="lost"',
+        render: () => <ActivityLost />,
+      },
     ],
     props: [
       {
         of: "TurnActivity",
         rows: [
-          { name: "working", type: "string | null", description: "The step the turn is on, as the turn last named it. Null draws no step line, and a turn holding no running run then draws nothing at all: its reply is what it did." },
-          { name: "runs", type: "SubagentRun[]", description: "Every subagent the turn started. The running ones are counted in place of the step — Awaiting 2 subagents — and each draws its own step indented under it, because a count alone reads as a stuck turn." },
-          { name: "sources", type: "SourceRef[]", fallback: "[]", description: "What the turn read, drawn between the step and the subagents." },
+          { name: "working", type: "string | null", description: "The step the turn is on. It carries the shimmer while the turn runs, and the decode carries one step's words into the next." },
+          { name: "steps", type: "{ label, sources }[]", fallback: "[]", description: "Every step the turn has closed, each with what it read. A live row holds the ones before the working line; a settled one holds them all." },
+          { name: "reading", type: "SourceRef[]", fallback: "[]", description: "What the step the turn is on has read so far, drawn beside its words." },
+          { name: "runs", type: "SubagentRun[]", description: "Every subagent the turn started, each a branch of the tree with its own steps under it. A count alone reads as a stuck turn." },
+          { name: "took", type: "number", description: "How long the turn took, in milliseconds, as the summary states it. A transcript read carries it; a turn settled live does not, and says only that its reasoning is done." },
+          { name: "settled", type: "boolean", fallback: "false", description: "The turn is over, so the head states the duration and folds the tree behind a caret. One step and no runs states itself instead: there is no process to fold." },
         ],
       },
       {
@@ -428,7 +497,7 @@ export const CHAT_PAGES: Page[] = [
   {
     slug: "files",
     name: "Files",
-    modules: ["turn-files.tsx", "turn-apps.tsx", "kernel/messages.tsx"],
+    modules: ["turn-files.tsx", "turn-apps.tsx", "card.tsx", "kernel/messages.tsx"],
     spread: "full",
     owns: "What a turn sends back and what a member sends with their own words: the pictures, the documents, the report a long answer is carried in, and the applications a turn built.",
     examples: [
@@ -495,20 +564,6 @@ export const CHAT_PAGES: Page[] = [
         ],
       },
       {
-        of: "FileCard",
-        rows: [
-          { name: "file", type: "ChatFile", description: "The document. The cover is drawn where the file has a preview, and the size under the name where the wire carried one." },
-          { name: "onOpen", type: "() => void", description: "What the press opens. Both the cover and the name take it, so the whole card is the act." },
-        ],
-      },
-      {
-        of: "CarriedReport",
-        rows: [
-          { name: "file", type: "ChatFile", description: "The answer too long for a bubble. Its subject is what the link reads, or Open detailed report where it carries none; a file with no address is its filename in the mono step, since there is nothing to open." },
-          { name: "onOpen", type: "() => void", description: "What the press opens." },
-        ],
-      },
-      {
         of: "AttachedFiles",
         rows: [
           { name: "files", type: "ChatFile[]", description: "What the member sent, once the turn has taken them. Each is a thumbnail that opens the run." },
@@ -522,6 +577,14 @@ export const CHAT_PAGES: Page[] = [
           { name: "opened", type: "Opened", description: "The files a press opened and which of them stands open: { files, at }. A picture opens in the lightbox and everything else in the file sheet." },
           { name: "onMove", type: "(at: number) => void", description: "Called as the member moves through the run." },
           { name: "onClose", type: "() => void", description: "Called when they close it." },
+        ],
+      },
+      {
+        of: "Card",
+        rows: [
+          { name: "tone", type: "\"default\" | \"attention\"", fallback: "\"default\"", description: "attention tints the ground for the one block that asks for the member. Every card a turn hands back takes the default." },
+          { name: "rows", type: "boolean", fallback: "false", description: "The card holds a ruled list rather than prose, so it drops its own inset and clips to its corners: a row's hover and the rules between rows run edge to edge." },
+          { name: "...props", type: "ComponentProps<\"div\">", description: "Everything a div takes. Space around the card belongs to whatever stacks it." },
         ],
       },
       {
@@ -735,6 +798,11 @@ export const CHAT_PAGES: Page[] = [
       },
       {
         group: "An account a turn asks for",
+        title: "an account the turn cannot name",
+        render: () => <HandoffUnnamed />,
+      },
+      {
+        group: "An account a turn asks for",
         title: "once the account is connected",
         render: () => <HandoffConnected />,
       },
@@ -848,7 +916,7 @@ export const CHAT_PAGES: Page[] = [
         of: "MessageScrollerItem",
         rows: [
           { name: "messageId", type: "string", description: "The id a jump names. A row without one cannot be jumped to." },
-          { name: "mark", type: "\"held\" | \"letting-go\"", fallback: "—", description: "The mark a jump leaves on the row it landed on: held is the second accent as a fill and a 2px outline, letting-go crosses both to transparent over 500ms." },
+          { name: "mark", type: "\"held\" | \"letting-go\"", fallback: "—", description: "The mark a jump leaves on the words it landed on: held rings the row's first bubble in the second accent at 2px, letting-go crosses it to transparent over 500ms. A turn that drew no bubble is ringed on the row." },
           { name: "throb", type: "boolean", fallback: "false", description: "Pulses the mark twice over 1.5s as the row arrives. The caller reads the motion preference, so a member who asked for less motion gets the hold and the fade without it." },
           { name: "scrollAnchor", type: "boolean", fallback: "false", description: "Anchors the viewport to this row, so rows landing elsewhere do not move it." },
           { name: "...props", type: "ComponentProps<Item>", description: "Everything the primitive's item takes." },
@@ -942,11 +1010,6 @@ export const CHAT_PAGES: Page[] = [
       },
       {
         group: "The line above the composer",
-        title: "the line above it",
-        render: () => <ComposerEyebrow />,
-      },
-      {
-        group: "The line above the composer",
         title: "the line that asks for the member",
         render: () => <ComposerAttention />,
       },
@@ -962,11 +1025,9 @@ export const CHAT_PAGES: Page[] = [
       {
         of: "PromptInputEyebrow",
         rows: [
-          { name: "label", type: "string", description: "What the next turn carries. It truncates rather than widening the line." },
-          { name: "tone", type: "\"default\" | \"attention\"", fallback: "\"default\"", description: "attention is the one tone that asks for the member, and the one carrying role=\"status\", so a screen reader hears it arrive." },
+          { name: "label", type: "string", description: "Why the member cannot send. It truncates rather than widening the line." },
           { name: "glyph", type: "ReactNode", description: "A mark before the label." },
           { name: "action", type: "ReactNode", description: "An act at the end of the line." },
-          { name: "onDismiss", type: "() => void", description: "Offers the way to put the line away." },
         ],
       },
       {
@@ -1002,37 +1063,6 @@ export const CHAT_PAGES: Page[] = [
         ],
       },
       {
-        of: "Attachment",
-        rows: [
-          { name: "size", type: "\"sm\"", fallback: "\"sm\"", description: "The card's inset and type step." },
-          { name: "...props", type: "ComponentProps<\"div\">", description: "Everything a div takes." },
-        ],
-      },
-      {
-        of: "AttachmentContent",
-        rows: [
-          { name: "...props", type: "ComponentProps<\"div\">", description: "Everything a div takes. It holds the title and the description, and takes the width the badge leaves." },
-        ],
-      },
-      {
-        of: "AttachmentTitle",
-        rows: [
-          { name: "...props", type: "ComponentProps<\"span\">", description: "Everything a span takes. It truncates." },
-        ],
-      },
-      {
-        of: "AttachmentDescription",
-        rows: [
-          { name: "...props", type: "ComponentProps<\"span\">", description: "Everything a span takes. It truncates." },
-        ],
-      },
-      {
-        of: "AttachmentBadge",
-        rows: [
-          { name: "...props", type: "ComponentProps<\"span\">", description: "Everything a span takes. attachmentBadgeFor() reads the kind off a filename, and answers null for a kind that carries no badge." },
-        ],
-      },
-      {
         of: "AttachmentGroup",
         rows: [
           { name: "...props", type: "ComponentProps<\"div\">", description: "Everything a div takes. It scrolls sideways, snaps its cards to the start, and fades at both ends." },
@@ -1041,7 +1071,7 @@ export const CHAT_PAGES: Page[] = [
       {
         of: "PickedThumbnail",
         rows: [
-          { name: "file", type: "File", description: "The file the member picked. A picture under 10 MB is read in the browser; a document or a video under 25 MB is rastered by the preview route, pulsing until its cover arrives; anything else draws its name." },
+          { name: "file", type: "File", description: "The file the member picked. A picture under 10 MB is read in the browser; a document or a video under 25 MB is rastered by the preview route, pulsing until its cover arrives; anything else draws the mark of its kind." },
           { name: "children", type: "ReactNode", description: "What stands over the square, such as the act that drops the file." },
           { name: "className", type: "string", description: "Layout only; the square, the border and the radius are the component's." },
         ],
@@ -1102,6 +1132,11 @@ export const CHAT_PAGES: Page[] = [
       },
       {
         group: "Variants",
+        title: "variant=\"framed\"",
+        render: () => <ButtonFramed />,
+      },
+      {
+        group: "Variants",
         title: "variant=\"row\"",
         render: () => <ButtonRow />,
       },
@@ -1149,6 +1184,11 @@ export const CHAT_PAGES: Page[] = [
         group: "Sizes",
         title: "size=\"chip\"",
         render: () => <ButtonSizeChip />,
+      },
+      {
+        group: "Sizes",
+        title: "size=\"reading\"",
+        render: () => <ButtonSizeReading />,
       },
       {
         group: "Sizes",

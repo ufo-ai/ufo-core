@@ -167,6 +167,28 @@ test("the line steps on the frame, not between two of them", async () => {
   expect(line()).toBe(TEXT);
 });
 
+test("a cell stands in the column of the character it resolves to, so the line never shuffles", async () => {
+  vi.useFakeTimers();
+  render(<DecodeLine text={TEXT} />);
+  const letters = Array.from(TEXT).filter((character) => character !== " ");
+
+  const cells = [...document.querySelectorAll("[data-slot=decode-cell]")];
+  expect(cells.map((cell) => cell.parentElement!.getAttribute("data-char"))).toEqual(letters);
+  for (const cell of cells) {
+    expect(cell.parentElement!.className).toContain("before:content-[attr(data-char)]");
+    expect(cell.className).toContain("w-0");
+  }
+
+  await step(RESOLVED_FRAME);
+
+  const resolved = [...document.querySelectorAll("[data-slot=decode-cell]")];
+  expect(resolved.map((cell) => cell.textContent)).toEqual(letters);
+  for (const cell of resolved) {
+    expect(cell.parentElement!.getAttribute("data-char")).toBeNull();
+    expect(cell.className).toBe("");
+  }
+});
+
 test("a line that decodes once stops its timer once it has", async () => {
   vi.useFakeTimers();
   render(<DecodeLine text={TEXT} loop={false} />);

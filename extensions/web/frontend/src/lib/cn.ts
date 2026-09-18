@@ -25,6 +25,7 @@ const RADIUS = [
   "answer",
   "panel",
   "bubble",
+  "tail",
   "menu",
   "avatar",
   "card",

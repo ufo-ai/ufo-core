@@ -11,7 +11,7 @@ export function TurnColleagueInitial() {
     <Message>
       <FaceCircle name={SPEAKER.name} photo={null} tint={SPEAKER.email} />
       <MessageContent>
-        <BubbleHeader speaker={SPEAKER} />
+        <BubbleHeader name={SPEAKER.name} />
         <Bubble>
           <BubbleContent>
             Billing signed off on the migration this morning, so the note can name a date. I put

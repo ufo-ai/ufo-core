@@ -1,18 +1,15 @@
 import type { ComponentProps, ReactNode } from "react";
 
+import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/cn";
 
 export function Empty({ className, children, ...props }: ComponentProps<"div">) {
   return (
-    <div
-      data-slot="empty"
-      className={cn("rounded-card border border-edge bg-raised p-sm", className)}
-      {...props}
-    >
-      <div className="flex flex-col items-center justify-center gap-2xl rounded-card border border-dashed border-edge px-2xl py-6xl text-center">
+    <Card data-slot="empty" rows className={className} {...props}>
+      <div className="m-sm flex flex-col items-center justify-center gap-2xl rounded-card border border-dashed border-edge px-2xl py-6xl text-center">
         {children}
       </div>
-    </div>
+    </Card>
   );
 }
 

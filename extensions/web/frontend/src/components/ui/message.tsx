@@ -26,7 +26,7 @@ export function MessageContent({ className, ...props }: ComponentProps<"div">) {
     <div
       data-slot="message-content"
       className={cn(
-        "flex w-full min-w-0 flex-col gap-md wrap-anywhere",
+        "flex w-full min-w-0 flex-col gap-sm wrap-anywhere",
         "group-data-[align=end]/message:*:data-slot:self-end",
         className,
       )}

@@ -179,50 +179,55 @@ export function DecodeLine({
   return (
     <span className={className}>
       <span className="sr-only">{text}</span>
-      <Cells cells={decodeFrame(text, t, elapsed / 1_000, settled)} color={color} />
+      <Cells cells={decodeFrame(text, t, elapsed / 1_000, settled)} text={text} color={color} />
     </span>
   );
 }
 
-/** A column one character wide only holds glyphs a face gives one width to: in a proportional face
- *  a braille cell out of a fallback and an `m` beside it spill their columns and collide. */
-function Cells({ cells, color }: { cells: DecodeCell[]; color: boolean }) {
+/** A cell holds the column of the character it resolves to, drawn invisibly behind it, so the line
+ *  stands at its final measure from the first frame and no glyph a fallback face draws moves it. */
+function Cells({ cells, text, color }: { cells: DecodeCell[]; text: string; color: boolean }) {
+  const characters = Array.from(text);
   const words: { cell: DecodeCell; at: number }[][] = [[]];
   cells.forEach((cell, at) => {
     if (cell.glyph === " ") words.push([]);
     else words[words.length - 1].push({ cell, at });
   });
   return (
-    <span aria-hidden data-slot="decode-text" className="font-mono text-small">
+    <span aria-hidden data-slot="decode-text">
       {words.map((word, index) => (
         <span key={index}>
           {index > 0 ? " " : null}
           <span className="inline-block whitespace-pre">
-            {word.map(({ cell, at }) => (
-              <span
-                key={at}
-                data-slot="decode-cell"
-                data-resolved={cell.resolved ? "" : undefined}
-                data-accent={cell.accent ? "" : undefined}
-                style={
-                  color && !cell.resolved
-                    ? ({ "--f": cell.mix.toFixed(1) } as CSSProperties)
-                    : undefined
-                }
-                className={cn(
-                  "inline-block w-(--size-decode-cell) text-center",
-                  cell.resolved
-                    ? "font-medium text-foreground"
-                    : color
-                      ? cell.accent
-                        ? "decode-pulse"
-                        : "decode-ripple"
-                      : "text-muted-foreground",
-                )}
-              >
-                {cell.glyph}
-              </span>
-            ))}
+            {word.map(({ cell, at }) =>
+              cell.resolved ? (
+                <span key={at} data-slot="decode-cell">
+                  {cell.glyph}
+                </span>
+              ) : (
+                <span
+                  key={at}
+                  data-char={characters[at]}
+                  className="before:invisible before:content-[attr(data-char)]"
+                >
+                  <span
+                    data-slot="decode-cell"
+                    data-accent={cell.accent ? "" : undefined}
+                    style={color ? ({ "--f": cell.mix.toFixed(1) } as CSSProperties) : undefined}
+                    className={cn(
+                      "inline-flex w-0 justify-center",
+                      color
+                        ? cell.accent
+                          ? "decode-pulse"
+                          : "decode-ripple"
+                        : "text-muted-foreground",
+                    )}
+                  >
+                    {cell.glyph}
+                  </span>
+                </span>
+              ),
+            )}
           </span>
         </span>
       ))}

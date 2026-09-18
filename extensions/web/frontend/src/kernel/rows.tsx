@@ -1,5 +1,6 @@
 import { Fragment, type ReactNode } from "react";
 
+import { Card } from "@/components/ui/card";
 import {
   Item,
   ItemActions,
@@ -45,8 +46,9 @@ export function RowLines<Row>({
   whole?: boolean;
 }) {
   return (
-    <ItemGroup>
-      {rows.map((row, index) => {
+    <Card rows>
+      <ItemGroup>
+        {rows.map((row, index) => {
         const press = open?.(row) ?? null;
         const control = press ? rowControl(press) : null;
         const acts = action?.(row);
@@ -71,8 +73,9 @@ export function RowLines<Row>({
             </Item>
           </Fragment>
         );
-      })}
-    </ItemGroup>
+        })}
+      </ItemGroup>
+    </Card>
   );
 }
 

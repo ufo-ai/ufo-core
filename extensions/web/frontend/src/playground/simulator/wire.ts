@@ -1,10 +1,12 @@
+import { chatState } from "@/lib/chatStore";
 import { resetStreams, setReattachTimer } from "@/lib/turnStream";
+import type { Message } from "@/lib/types";
 import {
   ANSWERED,
-  PACES,
+  PACE_FACTOR,
+  SIMULATED_CONVERSATION,
   SIMULATED_TURN,
   type Beat,
-  type Pace,
   type Scenario,
 } from "@/playground/simulator/scenarios";
 
@@ -31,9 +33,10 @@ const FOLLOW_UPS = [
 ];
 
 let armed: Beat[] = [];
-let factor = 1;
 let dropped = false;
 let opened: SimulatedStream | null = null;
+let sentAt = 0;
+const took: number[] = [];
 
 function pause(ms: number): Promise<void> {
   return new Promise((wake) => setTimeout(wake, ms));
@@ -85,7 +88,7 @@ class SimulatedStream {
     this.readyState = OPEN;
     this.deliver("open", null);
     for (const beat of beats) {
-      if (factor) await pause(beat.wait * factor);
+      await pause(beat.wait * PACE_FACTOR);
       if (this.done) return;
       if ("drop" in beat) {
         dropped = true;
@@ -93,6 +96,7 @@ class SimulatedStream {
         return;
       }
       this.deliver(beat.event, beat.data);
+      if (beat.event === "terminal" && beat.data.status === "done") took.push(Date.now() - sentAt);
     }
   }
 
@@ -118,6 +122,7 @@ function posted(init: RequestInit): Response {
     opened?.cut();
     return Response.json({ stopped: true });
   }
+  sentAt = Date.now();
   if (headers.get(ANSWER_HEADER)) {
     armed = ANSWERED;
     dropped = false;
@@ -126,9 +131,20 @@ function posted(init: RequestInit): Response {
   return Response.json({ turn_id: SIMULATED_TURN, opened_run: true });
 }
 
+/** Each settled reply's summary carries how long its turn ran, send to terminal, as the server's
+ *  transcript read states it and no terminal frame does. */
+function transcript(): Message[] {
+  let settled = 0;
+  return (chatState(SIMULATED_CONVERSATION).messages ?? []).map((message) =>
+    message.summary === undefined
+      ? message
+      : { ...message, summary: { ...message.summary, duration_ms: took[settled++] } },
+  );
+}
+
 function answered(path: string, init?: RequestInit): Response {
   if (init?.method === "POST") return posted(init);
-  if (path.endsWith("/transcript")) return Response.json({ messages: [] });
+  if (path.endsWith("/transcript")) return Response.json({ messages: transcript() });
   if (path.endsWith("/follow-ups")) return Response.json({ offers: FOLLOW_UPS, ranking: false });
   if (path.endsWith("/starters")) return Response.json({ starters: [], unlock: null });
   if (path.endsWith("/status")) return Response.json({ statuses: [], out_of_credit: false });
@@ -140,7 +156,7 @@ const simulated: typeof fetch = (input, init) => {
   return Promise.resolve(answered(url.split("?")[0], init));
 };
 
-const reattach = (fn: () => void) => setTimeout(fn, REATTACH_MS * factor);
+const reattach = (fn: () => void) => setTimeout(fn, REATTACH_MS * PACE_FACTOR);
 
 /** Stub `fetch` and `EventSource` for this page, and hand `turnStream` a reattach delay a reader
  *  can sit through. The simulator is its own entry, so nothing of the portal runs beside it.
@@ -164,16 +180,11 @@ export function armScenario(scenario: Scenario): void {
   dropped = false;
 }
 
-export function holdPace(pace: Pace): void {
-  const held = PACES.find((option) => option.pace === pace);
-  if (!held) throw new Error("The simulator has no pace named " + pace);
-  factor = held.factor;
-}
-
 /** Close the open stream, drop every reattach it scheduled, and forget the drop it ended on. */
 export function clearWire(): void {
   resetStreams();
   setReattachTimer(reattach);
   opened = null;
   dropped = false;
+  took.length = 0;
 }

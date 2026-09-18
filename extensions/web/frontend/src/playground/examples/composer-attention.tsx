@@ -10,7 +10,7 @@ import {
 export function ComposerAttention() {
   return (
     <PromptInput onSend={() => true} className="w-full">
-      <PromptInputEyebrow label="The run stopped" tone="attention" onDismiss={() => {}} />
+      <PromptInputEyebrow label="No credit left in this workspace." />
       <PromptInputTextarea value="" onChange={() => {}} placeholder="Ask anything" />
       <PromptInputToolbar>
         <PromptInputAttach />

@@ -2,13 +2,17 @@ import { useState } from "react";
 
 import { IconFileText, IconWorld } from "@tabler/icons-react";
 
-import { Marker, MarkerContent } from "@/components/ui/marker";
+import {
+  AVATAR_GROUP_MARK,
+  AVATAR_GROUP_SHOWN,
+  AvatarGroup,
+  AvatarGroupCount,
+} from "@/components/ui/avatar";
 import { BrandMark } from "@/lib/brandMark";
 import type { SourceRef } from "@/lib/types";
 
 const FAVICON_SERVICE = "https://www.google.com/s2/favicons";
 const FAVICON_SIZE = 32;
-const SOURCE_TILES_PER_ROW = 8;
 
 /** The favicon service answers by host, so an address that names none draws the globe instead. */
 export function faviconUrl(url: string): string | null {
@@ -36,11 +40,7 @@ export function SourceTile({ source }: { source: SourceRef }) {
     <Glyph className="size-(--size-site-icon) text-ink-soft" aria-hidden />
   );
   const tile = (
-    <span
-      data-slot="source-tile"
-      title={source.title}
-      className="grid size-(--size-site-tile) shrink-0 place-items-center rounded-key bg-tile"
-    >
+    <span data-slot="source-tile" title={source.title} className={AVATAR_GROUP_MARK}>
       {drawn}
       <span className="sr-only">{source.title}</span>
     </span>
@@ -67,17 +67,21 @@ function tiled(items: SourceRef[]): SourceRef[] {
   });
 }
 
-/** What the turn has read so far, one row: a tile per site or record, then how many. */
+/** What the turn has read so far: the first few sites or records as a group of marks, everything
+ *  past them as a count. */
 export function Sources({ sources }: { sources: SourceRef[] }) {
   if (sources.length === 0) return null;
+  const marks = tiled(sources);
+  const shown = marks.slice(0, AVATAR_GROUP_SHOWN);
+  const rest = marks.length - shown.length;
   return (
-    <Marker data-slot="sources" className="mt-2xs">
-      <span className="flex items-center gap-hair">
-        {tiled(sources)
-          .slice(0, SOURCE_TILES_PER_ROW)
-          .map((source) => <SourceTile key={source.url || source.ref} source={source} />)}
-      </span>
-      <MarkerContent>{sources.length + (sources.length === 1 ? " source" : " sources")}</MarkerContent>
-    </Marker>
+    <span data-slot="sources" className="flex min-w-0 items-center">
+      <AvatarGroup label={marks.map((source) => source.title).join(", ")}>
+        {shown.map((source) => (
+          <SourceTile key={source.url || source.ref} source={source} />
+        ))}
+        {rest ? <AvatarGroupCount count={rest} /> : null}
+      </AvatarGroup>
+    </span>
   );
 }

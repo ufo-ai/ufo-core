@@ -114,9 +114,8 @@ test("every colour the portal paints resolves through the palette's eight steps"
     "--color-ink-soft": String.raw`var\(--text-secondary\)`,
     "--color-ink-quiet": String.raw`var\(--text-tertiary\)`,
     "--color-field": String.raw`var\(--bkgd-200\)`,
-    "--color-edge": String.raw`var\(--bkgd-300\)`,
+    "--color-edge": String.raw`color-mix\(in srgb, var\(--text-secondary\) 75%, var\(--bkgd-100\)\)`,
     "--color-fill": String.raw`var\(--bkgd-200\)`,
-    "--color-said": String.raw`color-mix\(in srgb, var\(--accent-primary\) 15%, var\(--bkgd-100\)\)`,
     "--color-fill-ink": "#191a1a",
     "--color-link": String.raw`color-mix\(in srgb, var\(--accent-primary\) 70%, var\(--text-primary\)\)`,
     "--color-attention-ink": String.raw`color-mix\(in srgb, var\(--accent-secondary\) 70%, var\(--text-primary\)\)`,
@@ -129,6 +128,71 @@ test("every colour the portal paints resolves through the palette's eight steps"
   for (const [token, value] of Object.entries(hues)) {
     expect(packedStyles()).toContain(`${token}:${value}`);
   }
+});
+
+const SCHEMES = ["light", "dark"] as const;
+
+const channels = (hex: string): number[] => {
+  const digits = hex.slice(1);
+  const full = digits.length === 3 ? [...digits].map((digit) => digit + digit).join("") : digits;
+  return [0, 2, 4].map((at) => parseInt(full.slice(at, at + 2), 16));
+};
+
+const luminance = (rgb: number[]): number => {
+  const [red, green, blue] = rgb.map((value) => {
+    const scaled = value / 255;
+    return scaled <= 0.03928 ? scaled / 12.92 : ((scaled + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+};
+
+const contrast = (one: number[], other: number[]): number => {
+  const [high, low] = [luminance(one), luminance(other)].sort((first, second) => second - first);
+  return (high + 0.05) / (low + 0.05);
+};
+
+/** `color-mix(in srgb, …)` interpolates in gamma-encoded sRGB, so the share is taken on the
+ *  channels as written and not on their linear light. */
+const held = (ink: number[], ground: number[], share: number): number[] =>
+  ink.map((value, at) => value * share + ground[at] * (1 - share));
+
+const paletteStep = (css: string, name: string) => {
+  const found = new RegExp(`--${name}:light-dark\\((#[0-9a-f]{3,6}),(#[0-9a-f]{3,6})\\)`).exec(css);
+  if (!found) throw new Error(`the sheet declares no --${name} across the two schemes`);
+  return { light: channels(found[1]), dark: channels(found[2]) };
+};
+
+const GROUNDS = { raised: "bkgd-000", surface: "bkgd-100", fill: "bkgd-200" };
+
+const EDGE_HOLD = /--color-edge:color-mix\(insrgb,var\(--([\w-]+)\)(\d+)%,var\(--([\w-]+)\)\)/;
+
+/** WCAG 1.4.11 wants 3:1 on a boundary that identifies a component, and one token draws every
+ *  hairline here. `color-mix` leaves no hex in the sheet, so the ratio is computed off the steps. */
+test("a hairline clears 3:1 against every ground it is drawn on, in both schemes", () => {
+  const css = packedStyles();
+  const mix = EDGE_HOLD.exec(css);
+  if (!mix) throw new Error("--color-edge is not a hold between two palette steps");
+  const [, ink, share, ground] = mix;
+  const measured = Object.fromEntries(
+    SCHEMES.map((scheme) => [
+      scheme,
+      held(
+        paletteStep(css, ink)[scheme],
+        paletteStep(css, ground)[scheme],
+        Number(share) / 100,
+      ),
+    ]),
+  );
+  const short = SCHEMES.flatMap((scheme) =>
+    Object.entries(GROUNDS)
+      .map(([name, step]) => ({
+        pair: `${scheme} edge / ${name}`,
+        ratio: contrast(measured[scheme], paletteStep(css, step)[scheme]),
+      }))
+      .filter((found) => found.ratio < 3)
+      .map((found) => `${found.pair} ${found.ratio.toFixed(2)}:1`),
+  );
+  expect(short).toEqual([]);
 });
 
 test("color-scheme carries the scheme, and the appearance class pins it", () => {
@@ -312,7 +376,7 @@ test("every mark the portal claims is one the built sheet can draw", () => {
 
 test("the reading plane's tokens survive into the built sheet", () => {
   const css = packedStyles();
-  expect(css).toContain("--leading-reading:1.65");
+  expect(css).toContain("--leading-reading:1.6");
   expect(css).toContain("--shadow-raised:");
   expect(css).toContain("box-shadow:var(--shadow-raised)");
   expect(css).toContain("--color-link:color-mix(insrgb,var(--accent-primary)70%,var(--text-primary))");
@@ -461,13 +525,12 @@ test("replies read as a document and member bubbles stay bubbles", async () => {
   expect(agentSaid.className).toContain("leading-reading");
   const agentSide = agentSaid.closest("[data-role=agent]")!;
   expect(agentSide.className).toContain("w-full");
-  expect(agentSide.className).not.toContain("bg-said");
+  expect(agentSide.className).toContain("*:data-[slot=bubble-content]:border-0");
   expect(agentSide.className).not.toContain("animate-appear");
   const mineSaid = screen.getByText("mine").closest("[data-slot=bubble-content]")!;
   expect(mineSaid.closest("[data-role=me]")!.className).toContain("self-end");
-  expect(mineSaid.closest("[data-role=me]")!.className).toContain(
-    "*:data-[slot=bubble-content]:bg-said",
-  );
+  expect(mineSaid.className).toContain("bg-fill");
+  expect(mineSaid.className).toContain("border-edge");
   for (const said of [agentSaid, mineSaid]) {
     expect(said.className).toContain("wrap-anywhere");
     expect(said.className).toContain("max-narrow:text-subtitle");

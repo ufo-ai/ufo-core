@@ -21,7 +21,6 @@ import type { Transcript } from "@/lib/types";
 
 const REATTACH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 const MALFORMED_REPLY = "Malformed reply — try again.";
-const CONNECTION_LOST = "Connection lost — reload to see the reply.";
 const MODEL_HEADER = "x-ufo-model";
 const CLICK_HEADER = "x-ufo-click";
 const CLICK_KIND_HEADER = "x-ufo-click-kind";
@@ -188,7 +187,7 @@ function attach(chatKey: string, turnId: string, reattach: boolean, agentModel: 
         ...state,
         live: state.live === null ? null : lost(state.live),
       }));
-      close(null, { role: "error", text: CONNECTION_LOST });
+      close(null);
       return;
     }
     REATTACHES.set(chatKey, attempts);

@@ -6,6 +6,7 @@ import type {
   TerminalFrame,
   TurnRecord,
 } from "@/lib/contract";
+import type { TurnEnding } from "@/components/ui/turn-activity";
 import { fault } from "@/lib/rum";
 import type {
   ChatApp,
@@ -51,8 +52,6 @@ const BARE_BREAK = /^<br\s*\/?>$/i;
 export const RESUMED_NOTE = "Resumed after a restart";
 export const RESEARCHING = "Researching…";
 export const RECONNECTING = "Reconnecting…";
-const CANCELLED = "cancelled";
-const STOPPED = "Stopped.";
 const AUTO_MODEL = "auto";
 const DONE = "done";
 const STATUSES: readonly TerminalFrame["status"][] = ["done", "failed", "cancelled"];
@@ -219,6 +218,7 @@ export function liveTurn(id: string | null = null, model = ""): LiveTurn {
   };
 }
 
+
 /** What the current step has read, each place once: a frame naming a page the step already drew
  *  adds nothing. */
 export function consulted(held: SourceRef[], items: SourceRef[]): SourceRef[] {
@@ -230,13 +230,6 @@ export function consulted(held: SourceRef[], items: SourceRef[]): SourceRef[] {
     return true;
   });
   return fresh.length ? held.concat(fresh) : held;
-}
-
-export function latestActivity(events: ActivityEvent[], runs: SubagentRun[]): string {
-  const run = runs.at(-1);
-  if (run) return latestActivity(run.events, run.subagents) || "Subagent · " + run.profile;
-  const event = events.at(-1);
-  return event ? event.text || "Completed a step." : "";
 }
 
 function holdsRun(runs: SubagentRun[], turnId: string): boolean {
@@ -477,14 +470,32 @@ function closedSegments(record: LiveTurn): Message[][] {
     });
 }
 
+/** How the turn ended, wherever it ended in anything but a plain answer. The frame's `error_class`
+ *  is a Python exception name, so the verdict is drawn from the status and never from the record. */
+export function endingOf(end: TurnEnd | null): TurnEnding | null {
+  if (end === null) return null;
+  switch (end.kind) {
+    case "lost":
+      return { kind: "lost" };
+    case "parked":
+      return { kind: "parked", message: end.message };
+    case "terminal":
+      switch (end.frame.status) {
+        case "cancelled":
+          return { kind: "cancelled" };
+        case "failed":
+          return { kind: "failed" };
+        case "done":
+          return end.frame.incomplete_reason ? { kind: "incomplete" } : null;
+      }
+  }
+}
+
+/** A terminal that did not finish still carries the words the model wrote; they close the turn's
+ *  answer, and how it ended rides `endingOf` instead. */
 function fallback(end: TurnEnd | null): string | null {
-  if (end === null || end.kind === "lost") return null;
-  if (end.kind === "parked") return end.message;
-  const frame = end.frame;
-  if (frame.status === DONE) return null;
-  if (frame.text) return frame.text;
-  if (frame.status === CANCELLED) return STOPPED;
-  return "(" + frame.status + (frame.error_class ? ": " + frame.error_class : "") + ")";
+  if (end === null || end.kind !== "terminal" || end.frame.status === DONE) return null;
+  return end.frame.text || null;
 }
 
 function doneFrame(end: TurnEnd | null): TerminalFrame | null {
@@ -502,6 +513,7 @@ function lastSegment(record: LiveTurn): { replies: Message[]; answer: Message | 
     .map((step) => step.text)
     .join("\n\n");
   const closer = fallback(record.end);
+  const ended = endingOf(record.end);
   const text =
     stated ?? (closer === null ? streamed : streamed ? streamed + "\n" + closer : closer);
   const events = eventsOf(segment, (step) => stated !== null && step !== closing);
@@ -517,6 +529,7 @@ function lastSegment(record: LiveTurn): { replies: Message[]; answer: Message | 
         };
   const empty =
     !text &&
+    ended === null &&
     record.connect === null &&
     !record.runs.length &&
     !record.files.length &&
@@ -530,6 +543,7 @@ function lastSegment(record: LiveTurn): { replies: Message[]; answer: Message | 
         ...(record.id !== null ? { turn: record.id } : {}),
         ...(done !== null && record.end?.kind === "terminal" ? { at: record.end.at } : {}),
         ...(summary ? { summary } : {}),
+        ...(ended ? { ended } : {}),
         ...(record.connect ? { connect: record.connect } : {}),
         ...(events.length ? { events } : {}),
         ...(record.runs.length ? { subagents: record.runs } : {}),
@@ -566,14 +580,19 @@ export type Bubble = Message & {
   queued?: boolean;
 };
 
+export type StepLine = { label: string; sources: SourceRef[] };
+
 export type LiveRow = {
   kind: "live";
   key: string;
   record: LiveTurn;
-  /** The step line's words, before the runs the turn waits on are counted over it. */
+  /** The words on the step line: the step the turn is on. */
   working: string | null;
-  sources: SourceRef[];
-  waiting: SubagentRun[];
+  /** Every step the segment has closed, each with what it read. The one the turn is on is the
+   *  working line instead, and joins these when it closes. */
+  steps: StepLine[];
+  /** What the step the turn is on has read so far. */
+  reading: SourceRef[];
   body: string;
   /** The steps of the current segment the row draws nothing of. */
   folded: Step[];
@@ -607,7 +626,7 @@ function taken(message: Bubble): Bubble {
 }
 
 /** The live row's facts. The step line is the segment's last labelled step, or the note a resume
- *  left, or the opening word while nothing has streamed; the tiles are the open step's alone. */
+ *  left, or the opening word while nothing has streamed. */
 function liveRow(record: LiveTurn, key: string): LiveRow {
   const segment = segments(record.steps).at(-1) ?? [];
   const passages = texts(segment);
@@ -620,13 +639,20 @@ function liveRow(record: LiveTurn, key: string): LiveRow {
   const open = last?.kind === "tool" && last.open ? last : null;
   const working = record.reconnecting ? RECONNECTING : label ?? (body ? null : RESEARCHING);
   const drawn = new Set<Step>([...passages, ...(shown ? [shown] : []), ...(open ? [open] : [])]);
+  /* A prefetch's pages land before any label, so a step with no words of its own still stands for
+     what it read. */
+  const steps = segment.flatMap((step): StepLine[] =>
+    step === shown || step.kind !== "tool" || (step.label === null && !step.sources.length)
+      ? []
+      : [{ label: step.label ?? "", sources: step.sources }],
+  );
   return {
     kind: "live",
     key,
     record,
     working,
-    sources: open?.sources ?? [],
-    waiting: record.runs.filter((run) => run.running === true),
+    steps,
+    reading: (shown?.kind === "tool" ? shown.sources : undefined) ?? open?.sources ?? [],
     body,
     folded: segment.filter((step) => step.kind !== "reply" && !drawn.has(step)),
   };

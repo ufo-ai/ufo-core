@@ -20,6 +20,7 @@ export const buttonVariants = cva(
       variant: {
         send: "bg-ink text-surface font-medium px-3xl py-md border border-transparent hover:opacity-(--opacity-muted-soft)",
         outline: "border border-edge bg-transparent text-ink px-lg py-xs hover:bg-fill",
+        framed: "border border-edge bg-card text-ink px-lg py-xs hover:bg-fill",
         row: "border border-transparent bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill",
         quiet: cn(
           "border border-transparent bg-transparent text-inherit px-lg py-xs",
@@ -48,7 +49,8 @@ export const buttonVariants = cva(
           "h-(--size-control) whitespace-nowrap rounded-full px-lg py-0 text-label",
           "[&_svg]:size-(--size-glyph)",
         ),
-        chip: "gap-sm rounded-full px-md text-label",
+        reading: "min-h-(--size-control) rounded-full px-2xl py-2xs text-body",
+        chip: "h-(--size-control) gap-sm rounded-full px-md text-label",
         icon: "size-(--size-control) rounded-full p-0 [&_svg]:size-(--size-glyph)",
         glyph: "size-(--size-glyph) rounded-control p-0 [&_svg]:size-(--size-glyph)",
       },
@@ -70,6 +72,13 @@ export type ButtonProps = ComponentProps<"button"> &
  *  bakes, so the way out stands the same size as the act it answers — and `size="chip"` is the
  *  pill an act inside the composer takes: a bar's corner at a narrower inset, so the model the
  *  chat runs on sits in the card rather than reading as a control of the page.
+ *
+ *  `size="reading"` is a bar's pill set in the reading face and free to grow: an act a member
+ *  reads as part of a turn rather than as chrome, so it takes the prose measure beside it and wraps
+ *  onto a second line instead of holding one height.
+ *
+ *  `variant="framed"` is `outline` on the card ground: an act standing on the page rather than
+ *  inside a card needs the ground as well as the edge, or it reads as a hole cut in the page.
  *
  *  `variant="corner"` is the act that stands on the thing it acts on: the card ground, the edge and
  *  the corner the thumbnail's own badge takes, so dropping a picked file reads above the picture

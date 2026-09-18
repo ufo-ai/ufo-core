@@ -1,23 +1,31 @@
 import { useState } from "react";
 
+import { IconChevronRight } from "@tabler/icons-react";
+
 import {
-  Attachment,
-  AttachmentBadge,
-  AttachmentContent,
-  AttachmentDescription,
   AttachmentGroup,
   AttachmentThumbnail,
-  AttachmentTitle,
+  FileMark,
   PickedThumbnail,
-  attachmentBadgeFor,
 } from "@/components/ui/attachment";
+
+import { Card } from "@/components/ui/card";
+import {
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemGroup,
+  ItemMedia,
+  ItemPress,
+  ItemTitle,
+  MarkTile,
+} from "@/components/ui/item";
 import { cn } from "@/lib/cn";
 import { formatSize } from "@/lib/size";
 import type { ChatFile } from "@/lib/types";
 
 export type Opened = { files: ChatFile[]; at: number };
-
-const TAP_FLOOR = "max-narrow:inline-flex max-narrow:min-h-(--size-control) max-narrow:items-center";
 
 export function TurnFiles({
   files,
@@ -26,28 +34,25 @@ export function TurnFiles({
   files: ChatFile[];
   onOpen: (opened: Opened) => void;
 }) {
-  const shared = files.filter((file) => file.role !== "details");
-  const carried = files.filter((file) => file.role === "details");
-  const images = shared.filter(
-    (file) => file.media_type.startsWith("image/") && file.preview_url !== null,
+  const images = files.filter(
+    (file) => file.role !== "details" && file.media_type.startsWith("image/") && file.preview_url !== null,
   );
-  const documents = shared.filter(
-    (file) => !file.media_type.startsWith("image/") || file.preview_url === null,
-  );
+  /* A file the answer linked is named by the words that linked it, and stands first: the reply
+     speaks of it, so it is what the member looks for. */
+  const documents = [
+    ...files.filter((file) => file.role === "details"),
+    ...files.filter(
+      (file) =>
+        file.role !== "details" && (!file.media_type.startsWith("image/") || file.preview_url === null),
+    ),
+  ];
   return (
     <>
-      {carried.map((file, index) => (
-        <CarriedReport
-          key={file.filename + String(index)}
-          file={file}
-          onOpen={() => onOpen({ files: [file], at: 0 })}
-        />
-      ))}
       {images.length === 1 ? (
         <FilePicture file={images[0]} onOpen={() => onOpen({ files: images, at: 0 })} />
       ) : null}
       {images.length > 1 ? (
-        <AttachmentGroup className="mt-2xs items-start">
+        <AttachmentGroup className="mt-sm items-start">
           {images.map((file, index) => (
             <FilePicture
               key={file.filename + String(index)}
@@ -59,16 +64,13 @@ export function TurnFiles({
         </AttachmentGroup>
       ) : null}
       {documents.length ? (
-        <div
-          data-slot="attachment-grid"
-          className="mt-2xs grid grid-cols-2 items-start gap-lg max-narrow:grid-cols-1"
-        >
+        <div className="mt-sm flex max-w-said flex-col gap-sm">
           {documents.map((file, index) => (
-            <FileCard
-              key={file.filename + String(index)}
-              file={file}
-              onOpen={() => onOpen({ files: [file], at: 0 })}
-            />
+            <Card key={file.filename + String(index)} rows>
+              <ItemGroup>
+                <FileRow file={file} onOpen={() => onOpen({ files: [file], at: 0 })} />
+              </ItemGroup>
+            </Card>
           ))}
         </div>
       ) : null}
@@ -76,58 +78,43 @@ export function TurnFiles({
   );
 }
 
-export function CarriedReport({ file, onOpen }: { file: ChatFile; onOpen: () => void }) {
-  if (!file.url) {
-    return <span className="mt-2xs font-mono text-small text-ink-soft">{file.filename}</span>;
+function FileRow({ file, onOpen }: { file: ChatFile; onOpen: () => void }) {
+  const inside = (
+    <>
+      <ItemMedia>
+        <MarkTile compact>
+          <FileMark filename={file.filename} />
+        </MarkTile>
+      </ItemMedia>
+      <ItemContent>
+        <ItemTitle>{file.subject || file.filename}</ItemTitle>
+        <ItemDescription>{describe(file)}</ItemDescription>
+      </ItemContent>
+    </>
+  );
+  /* `_file_payload` mints both links off the deploy's artifact secret and public base URL, so a
+     deploy holding neither names every file it sends without an address of any kind. */
+  if (file.url === null && file.preview_url === null) {
+    return <Item size="row">{inside}</Item>;
   }
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      title={file.filename}
-      className={cn(
-        "mt-2xs cursor-pointer self-start border-0 bg-transparent p-0 text-left text-link underline",
-        TAP_FLOOR,
-      )}
-    >
-      {file.subject || "Open detailed report"}
-    </button>
+    <Item size="flush">
+      <ItemPress onPress={onOpen}>
+        {inside}
+        <ItemActions>
+          <IconChevronRight aria-hidden className="size-icon shrink-0 text-ink-soft" />
+        </ItemActions>
+      </ItemPress>
+    </Item>
   );
 }
 
-export function FileCard({ file, onOpen }: { file: ChatFile; onOpen: () => void }) {
-  const thumbnail =
-    file.preview_url === null ? null : (
-      <AttachmentThumbnail filename={file.filename} previewUrl={file.preview_url} />
-    );
-  return (
-    <Attachment size="sm" className={cn("w-full min-w-0", thumbnail && "flex-nowrap")}>
-      {thumbnail === null ? null : (
-        <button
-          type="button"
-          onClick={onOpen}
-          aria-label={`Open ${file.filename}`}
-          className="shrink-0 cursor-pointer border-0 bg-transparent p-0"
-        >
-          {thumbnail}
-        </button>
-      )}
-      <AttachmentContent>
-        <AttachmentTitle>
-          <button
-            type="button"
-            onClick={onOpen}
-            className={cn("cursor-pointer border-0 bg-transparent p-0 text-inherit", TAP_FLOOR)}
-          >
-            {file.filename}
-          </button>
-        </AttachmentTitle>
-        {file.size_bytes === undefined ? null : (
-          <AttachmentDescription>{formatSize(file.size_bytes)}</AttachmentDescription>
-        )}
-      </AttachmentContent>
-    </Attachment>
-  );
+/** What stands under a document's name: the file it is where the answer named it something else,
+ *  and its weight where the wire carried one. */
+function describe(file: ChatFile): string {
+  const size = file.size_bytes === undefined ? null : formatSize(file.size_bytes);
+  const named = file.subject ? file.filename : null;
+  return [named, size].filter(Boolean).join(" · ");
 }
 
 export function AttachedFiles({
@@ -169,27 +156,21 @@ export function FilePicture({
   grouped?: boolean;
 }) {
   const [failed, setFailed] = useState<string | null>(null);
-  const badge = attachmentBadgeFor(file.filename);
   const className = cn(
     "w-fit",
-    grouped ? "max-w-full shrink-0 snap-start" : "mt-2xs",
+    grouped ? "max-w-full shrink-0 snap-start" : "mt-sm",
   );
   const drawn =
     failed === file.preview_url ? (
       <AttachmentThumbnail filename={file.filename} previewUrl={null} />
     ) : (
-      <span className="relative block w-fit">
-        <img
-          loading="lazy"
-          alt={file.filename}
-          src={file.preview_url ?? undefined}
-          onError={() => setFailed(file.preview_url)}
-          className="max-h-(--media-card) max-w-full rounded-panel border border-edge object-contain"
-        />
-        {badge === null ? null : (
-          <AttachmentBadge className="absolute bottom-0 left-0 m-sm">{badge}</AttachmentBadge>
-        )}
-      </span>
+      <img
+        loading="lazy"
+        alt={file.filename}
+        src={file.preview_url ?? undefined}
+        onError={() => setFailed(file.preview_url)}
+        className="max-h-(--media-card) max-w-full rounded-panel border border-edge object-contain"
+      />
     );
   return (
     <button

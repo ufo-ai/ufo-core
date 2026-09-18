@@ -23,6 +23,7 @@ import { FileSheet } from "@/kernel/artifact";
 import { Lightbox } from "@/kernel/lightbox";
 import { AgentIcon } from "@/lib/agentIcon";
 import { BrandMark } from "@/lib/brandMark";
+import { cn } from "@/lib/cn";
 import { FaceCircle, photoAddress } from "@/lib/memberFace";
 import type { EarlierMessages } from "@/lib/earlier";
 import { Linked, Markdown, StreamingBody } from "@/lib/markdown";
@@ -30,6 +31,7 @@ import { fullMoment, stampMoment } from "@/lib/moments";
 import { turnMeta } from "@/lib/turnMeta";
 import {
   answerOf,
+  endingOf,
   layout,
   type Bubble as Spoken,
   type LiveTurn,
@@ -65,12 +67,14 @@ export function TranscriptPane({
   children: ReactNode;
 }) {
   return (
-    <MessageScroller className={className}>
-      <MessageScrollerViewport data-testid="log" animate={animate}>
-        {children}
-      </MessageScrollerViewport>
+    <>
+      <MessageScroller className={className}>
+        <MessageScrollerViewport data-testid="log" animate={animate}>
+          {children}
+        </MessageScrollerViewport>
+      </MessageScroller>
       <MessageScrollerButton />
-    </MessageScroller>
+    </>
   );
 }
 
@@ -97,7 +101,8 @@ function spoken(message: Spoken) {
 }
 
 const UFO_MARK = "ufo";
-const SENT_BY_UFO = "Sent by UFO";
+const UFO_NAME = "UFO";
+const SENT_BY_UFO = "Sent by " + UFO_NAME;
 
 /** The member moving, in every way a browser reports it. A scroll is not among them: the mark
  *  scrolls the transcript itself, and a mark that cleared on its own scroll would never be seen. */
@@ -185,10 +190,30 @@ function earlierKey(earlier: EarlierMessages | undefined, turn: string): string 
   return reply ?? woke;
 }
 
-/** The scroller finds the row a send added by counting the content's children and reads nothing
- *  past them, so what draws under the thread stands first among them and is laid out last. */
-function Under({ children }: { children: ReactNode }) {
-  return <div className="order-last mt-6xl flex flex-col gap-6xl empty:hidden">{children}</div>;
+/** Where a message falls in the run of words one voice said without interruption: the run opens
+ *  with a name and closes under a face, and what lies between carries neither. */
+type Run = { first: boolean; last: boolean };
+
+/** What tells one voice from another. A colleague is told apart by the address their circle is
+ *  already coloured from, because a channel names two people the same often enough to matter. */
+function voiceOf(message: Spoken): string {
+  if (message.role === "error") return "error";
+  if (message.role !== "user") return "agent";
+  if (!message.speaker) return "me";
+  return "member:" + (message.speaker.email || message.speaker.name);
+}
+
+function runsOf(voices: string[]): Run[] {
+  return voices.map((voice, at) => ({
+    first: voices[at - 1] !== voice,
+    last: voices[at + 1] !== voice,
+  }));
+}
+
+/** What draws under the thread stands after the rows and beside them: the scroller finds the row a
+ *  send added by counting the content's children, and reads nothing past the last of them. */
+function Under({ className, children }: { className?: string; children: ReactNode }) {
+  return <div className={cn(className, "flex flex-col gap-6xl empty:hidden")}>{children}</div>;
 }
 
 export function MessageLog({
@@ -224,17 +249,45 @@ export function MessageLog({
     setOpened({ files: [file], at: 0 });
   }, [report, messages, live]);
   const rows = layout(messages, live);
+  const held = (earlier?.pages ?? []).flatMap((page) =>
+    page.messages.map((said, at) => ({ said, key: "h" + page.cursor + ":" + at })),
+  );
+  const voices = [
+    ...held.map(({ said }) => voiceOf(said)),
+    ...rows.map((row) => (row.kind === "live" ? "agent" : voiceOf(row.message))),
+  ];
+  const allRuns = runsOf(voices);
+  const heldRuns = allRuns.slice(0, held.length);
+  const runs = allRuns.slice(held.length);
+  const named = [...held.map(({ said }) => said), ...messages].some((message) => message.speaker);
+  const receipt =
+    rows.reduce<string | null>(
+      (found, row) => (row.kind === "said" && voiceOf(row.message) === "me" ? row.key : found),
+      null,
+    ) ??
+    held.reduce<string | null>(
+      (found, { said, key }) => (voiceOf(said) === "me" ? key : found),
+      null,
+    );
   const still = useReducedMotion();
   const spoke = markedRow(rows, focus);
   const { letting, markedKey, land } = useMarkedTurn(
     focus,
     focus === null ? null : spoke === null ? earlierKey(earlier, focus) : spoke,
   );
-  const bubble = (message: Spoken, key: string, last = false) => {
+  const bubble = (
+    message: Spoken,
+    key: string,
+    stamped: boolean,
+    closes: boolean,
+    run: Run,
+    under?: ReactNode,
+  ) => {
     if (message.role === "error")
       return (
         <MessageScrollerItem key={key} messageId={key}>
           <Meta>{message.text}</Meta>
+          {under}
         </MessageScrollerItem>
       );
     const who: Who =
@@ -247,7 +300,7 @@ export function MessageLog({
         ? message.summary
           ? turnMeta(message.summary, message.at)
           : []
-        : stamp
+        : stamped && stamp
           ? [stamp]
           : [];
     const standing = key === markedKey;
@@ -255,6 +308,7 @@ export function MessageLog({
       <MessageScrollerItem
         key={key}
         messageId={key}
+        className={run.first ? undefined : "-mt-xl"}
         scrollAnchor={mine}
         ref={standing ? land : undefined}
         data-highlight={standing || undefined}
@@ -263,9 +317,26 @@ export function MessageLog({
         mark={standing ? (letting ? "letting-go" : "held") : undefined}
         throb={standing && !letting && !still}
       >
-        <Speech mine={mine} at={message.at} speaker={who === "member" ? message.speaker : undefined}>
-          {message.subagents?.some((run) => run.running) ? (
-            <TurnActivity working={null} runs={message.subagents} />
+        <Speech
+          mine={mine}
+          at={message.at}
+          speaker={who === "member" ? message.speaker : undefined}
+          name={named && who === "agent" ? UFO_NAME : undefined}
+          run={run}
+        >
+          {message.events?.length || message.subagents?.length || message.ended ? (
+            <TurnActivity
+              working={null}
+              runs={message.subagents ?? []}
+              ended={message.ended}
+              /* A `Sources` frame is live only — `core/src/ufo/runtime/hub.py` keeps the reply's
+                 citations as the record — so a step read back names nothing it read. */
+              steps={(message.events ?? [])
+                .filter((event) => event.text)
+                .map((event) => ({ label: event.text, sources: [] }))}
+              took={message.summary?.duration_ms}
+              settled
+            />
           ) : null}
           {message.role === "user" && message.fired ? (
             <MessageHeader className="gap-xs">
@@ -281,8 +352,12 @@ export function MessageLog({
             />
           ) : null}
           {(message.role === "user" && !message.text && !message.asked) ||
-          answer?.kind === "silence" ? null : (
-            <Said who={who} speaker={who === "member" ? message.speaker : undefined}>
+          (answer !== null && answer.kind !== "words") ? null : (
+            <Said
+              who={who}
+              speaker={who === "member" ? message.speaker : undefined}
+              facing={run.last}
+            >
               {message.role === "user" && message.asked ? (
                 <div className="text-small text-ink-soft">{message.asked}</div>
               ) : null}
@@ -307,9 +382,10 @@ export function MessageLog({
             <TurnApps apps={message.apps} />
           )}
           {message.connect ? <ConnectLink connect={message.connect} /> : null}
+          {message.question && question ? question(message.question) : null}
           {meta.length ? (
             <Meta
-              last={last}
+              last={closes}
               mine={mine}
               model={who === "agent" ? message.summary?.model : null}
               copy={
@@ -325,35 +401,40 @@ export function MessageLog({
               ))}
             </Meta>
           ) : null}
-          {message.question && question ? question(message.question) : null}
         </Speech>
+        {under}
       </MessageScrollerItem>
     );
   };
   return (
     <>
-      <MessageScrollerContent
-        className={className}
-        spacerClassName="order-last"
-        aria-busy={live !== null}
-      >
-        {rows.length ? <Under>{children}</Under> : null}
+      <MessageScrollerContent className={className} aria-busy={live !== null}>
         {earlier &&
         (earlier.pages.length > 0 || earlier.more || earlier.loading || earlier.failed) ? (
           <EarlierRow earlier={earlier} />
         ) : null}
-        {earlier?.pages.flatMap((page) =>
-          page.messages.map((said, at) => bubble(said, "h" + page.cursor + ":" + at)),
-        )}
-        {rows.map((row, index) =>
-          row.kind === "live" ? (
+        {held.map(({ said, key }, at) => bubble(said, key, key === receipt, false, heldRuns[at]))}
+        {rows.map((row, index) => {
+          const closes = index === rows.length - 1;
+          return row.kind === "live" ? (
             <MessageScrollerItem
               key={row.key}
               messageId={row.key}
+              className={runs[index].first ? undefined : "-mt-xl"}
               data-folded={row.folded.length || undefined}
             >
-              <Speech mine={false}>
-                <TurnActivity working={row.working} runs={row.waiting} sources={row.sources} />
+              <Speech
+                mine={false}
+                name={named ? UFO_NAME : undefined}
+                run={runs[index]}
+              >
+                <TurnActivity
+                  working={row.working}
+                  runs={row.record.runs}
+                  steps={row.steps}
+                  reading={row.reading}
+                  ended={endingOf(row.record.end) ?? undefined}
+                />
                 <Said who="agent" entering>
                   <StreamingBody text={row.body} />
                 </Said>
@@ -365,11 +446,12 @@ export function MessageLog({
               </Speech>
             </MessageScrollerItem>
           ) : (
-            bubble(row.message, row.key, index === rows.length - 1)
-          ),
-        )}
+            bubble(row.message, row.key, row.key === receipt, closes, runs[index])
+          );
+        })}
         {rows.length ? null : children}
       </MessageScrollerContent>
+      {rows.length ? <Under className={className}>{children}</Under> : null}
       {opened ? (
         <OpenedFile
           opened={opened}
@@ -381,44 +463,52 @@ export function MessageLog({
   );
 }
 
-/** The moment a message landed reaches the member under the pointer, never as a line of its own:
- *  a transcript reads as words rather than as a log. */
+/** The moment a message landed reaches the member under the pointer, so a transcript reads as words
+ *  rather than as a log; only the newest words they sent carry it as a line. */
 function Speech({
   mine,
   at,
   speaker,
+  name,
+  run,
   children,
 }: {
   mine: boolean;
   at?: string;
   speaker?: Speaker;
+  name?: string;
+  run: Run;
   children: ReactNode;
 }) {
-  const content = <MessageContent title={at ? fullMoment(at) : undefined}>{children}</MessageContent>;
+  const content = (
+    <MessageContent title={at ? fullMoment(at) : undefined}>
+      {name && run.first ? <BubbleHeader name={name} /> : null}
+      {children}
+    </MessageContent>
+  );
   if (!speaker) return <Message align={mine ? "end" : "start"}>{content}</Message>;
   return (
     <Message align="start">
-      <Attributed speaker={speaker}>{content}</Attributed>
+      <Attributed name={run.first ? speaker.name : undefined}>{content}</Attributed>
     </Message>
   );
 }
 
 /** The block reserves this as padding and the face is placed into it from the bubble, so the gutter
  *  and what hangs in it read off one expression. */
-const FACE_GUTTER = "calc(var(--size-control) + var(--spacing-sm))";
+const FACE_GUTTER = "calc(var(--size-avatar) + var(--spacing-sm))";
 
-/** The face answers to the bubble, not to this block: the moment line reserves a row under the
- *  bubble whether or not it shows, and a face centred on all of that sits visibly low. */
-function Attributed({ speaker, children }: { speaker: Speaker; children: ReactNode }) {
+/** A run's later words carry the gutter without the name, so they stack under the one it opened
+ *  with. */
+function Attributed({ name, children }: { name?: string; children: ReactNode }) {
   return (
     <div className="flex w-full min-w-0 flex-col gap-2xs" style={{ paddingInlineStart: FACE_GUTTER }}>
-      <BubbleHeader speaker={speaker} />
+      {name ? <BubbleHeader name={name} /> : null}
       {children}
     </div>
   );
 }
 
-/** `Bubble` is the positioned box, so the face centres on the bubble's own height. */
 function SpeakerFace({ speaker }: { speaker: Speaker }) {
   return (
     <FaceCircle
@@ -426,7 +516,7 @@ function SpeakerFace({ speaker }: { speaker: Speaker }) {
       photo={photoAddress(speaker.photo_url)}
       tint={speaker.email || speaker.name}
       title={speaker.name}
-      className="absolute top-1/2 size-(--size-control) -translate-y-1/2"
+      className="absolute bottom-0 size-(--size-avatar)"
       style={{ insetInlineStart: `calc(-1 * ${FACE_GUTTER})` }}
     />
   );
@@ -439,11 +529,13 @@ type Who = "me" | "member" | "agent";
 function Said({
   who,
   speaker,
+  facing = true,
   entering = false,
   children,
 }: {
   who: Who;
   speaker?: Speaker;
+  facing?: boolean;
   entering?: boolean;
   children: ReactNode;
 }) {
@@ -453,9 +545,10 @@ function Said({
       variant={who === "agent" ? "ghost" : mine ? "said" : "default"}
       entering={entering}
       align={mine ? "end" : "start"}
+      tail={facing}
       data-role={who}
     >
-      {speaker ? <SpeakerFace speaker={speaker} /> : null}
+      {speaker && facing ? <SpeakerFace speaker={speaker} /> : null}
       <BubbleContent>{children}</BubbleContent>
     </Bubble>
   );

@@ -5,12 +5,13 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { wakeAppStatus } from "@/lib/appStatusStore";
 import { resetChatStore } from "@/lib/chatStore";
-import { liveTurn } from "@/lib/turnRecord";
+import { liveTurn, type Bubble } from "@/lib/turnRecord";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 import { ADMIN_DISCLOSURE } from "@/lib/audience";
 import { resetStreams } from "@/lib/turnStream";
 import type { EarlierMessages } from "@/lib/earlier";
 import { automationId } from "@/lib/automationLane";
+import { stampMoment } from "@/lib/moments";
 import {
   automationsHash,
   chatHash,
@@ -18,10 +19,15 @@ import {
   newChatHash,
   workspaceHash,
 } from "@/lib/route";
+import { Bubble as SpeechBubble, BubbleContent } from "@/components/ui/bubble";
+import {
+  MessageScrollerContent,
+  MessageScrollerItem,
+} from "@/components/ui/message-scroller";
 import { Chat } from "@/views/Chat";
 import { ConversationTranscript } from "@/views/Conversations";
 
-import { AGENT, AGENT_ID, ARRIVAL_ID, atPhoneWidth, audienceMark, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationDetail, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, ARRIVAL_ID, atPhoneWidth, audienceMark, CHAT_ROW, chatsOnWire, conversationDetail, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "#/c/" + CONVO_ID;
@@ -48,6 +54,9 @@ const transcript = (payload: unknown = { messages: [] }) => ({
 function open() {
   return render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 }
+
+/** The one line a running turn draws, and the step it currently states. */
+const stepLine = () => document.querySelector<HTMLElement>("span.shimmer");
 
 function waiting(text: string): boolean {
   return screen.getByText(text).classList.contains("italic");
@@ -104,6 +113,11 @@ async function sendingMidTurn(chat: Route): Promise<void> {
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("and again")).toBeTruthy();
 }
+
+/** The verdicts `TurnActivity` draws, spelled as a member reads them. */
+const FAILED_VERDICT = "The turn stopped before it finished. Send the message again.";
+const STOPPED_VERDICT = "Stopped.";
+const BUDGET_VERDICT = "The turn hit its step limit and answered with what it had. Ask for the rest.";
 
 const SPOKEN = [
   { role: "user", text: "What did Acme say?" },
@@ -405,8 +419,36 @@ test("a settled reply states what it spent, with no stream to read it from", asy
   const meta = screen.getByText("12 tok").closest("[data-slot=marker]")!;
   expect(within(meta as HTMLElement).getByText("$2.00")).toBeTruthy();
   expect(meta.querySelector('[style*="--brand-openai"]')).toBeTruthy();
-  expect(screen.queryByText("Reading the diff.")).toBeNull();
+  expect(screen.getByText("Reading the diff.")).toBeTruthy();
   expect(StreamFake.opened.length).toBe(0);
+});
+
+test("a settled reply states how long the reasoning it folds away took", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "Review PR 1268." },
+        {
+          role: "assistant",
+          text: "Reviewed.",
+          events: [
+            { kind: "activity", text: "Reading the diff." },
+            { kind: "activity", text: "Running the tests." },
+          ],
+          summary: { tokens: 12, cost_micro_usd: 2_000_000, duration_ms: 63_000 },
+        },
+      ],
+    }),
+  );
+  open();
+
+  const caret = await screen.findByRole("button", { name: "Completed reasoning in 63s" });
+  expect(screen.queryByText("Reading the diff.")).toBeNull();
+
+  await userEvent.click(caret);
+
+  expect(screen.getByText("Reading the diff.")).toBeTruthy();
+  expect(screen.getByText("Running the tests.")).toBeTruthy();
 });
 
 test("a settled reply names no model where the agent runs on the deploy's own choice", async () => {
@@ -455,7 +497,7 @@ test("the one control carries the act the member has, and stops the turn once", 
   expect(stops()).toHaveLength(1);
 });
 
-test("a reloaded conversation draws the reply alone, with no line for the steps behind it", async () => {
+test("a reloaded conversation folds the steps behind its reply, and states no duration for them", async () => {
   wire(
     transcript({
       messages: [
@@ -474,6 +516,7 @@ test("a reloaded conversation draws the reply alone, with no line for the steps 
   open();
 
   expect(await screen.findByText(saying("The tests pass."))).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Completed reasoning" })).toBeTruthy();
   expect(screen.queryByText("Running the focused tests.")).toBeNull();
   expect(screen.queryByText("Loading coding guidance.")).toBeNull();
   expect(document.querySelector("[data-slot=decode-text]")).toBeNull();
@@ -500,18 +543,17 @@ test("a bubble another member spoke names them and draws their face", async () =
   expect(screen.queryByText(/peer@example\.com/)).toBeNull();
   const face = named!.querySelector("[data-slot=avatar]")!;
   expect(face).not.toBeNull();
-  expect(face.className).toContain("size-(--size-control)");
-  // The face hangs off the bubble's own box, so it centres on the bubble however tall the message
-  // grows and whatever reserves a row beneath it.
+  expect(face.className).toContain("size-(--size-avatar)");
+  // The face hangs off the bubble's own box, so it stands on the foot of the words however tall
+  // the message grows and whatever reserves a row beneath it.
   expect(face.closest("[data-slot=bubble]")).not.toBeNull();
   expect(face.closest("[data-slot=message-header]")).toBeNull();
-  expect(face.className).toContain("top-1/2");
-  expect(face.className).toContain("-translate-y-1/2");
+  expect(face.className).toContain("bottom-0");
   const own = screen.getByText("thanks").closest("[data-slot=message]");
   expect(own && within(own as HTMLElement).queryByText("Sam Frost")).toBeNull();
 });
 
-test("a colleague's words stand left on the neutral fill, the viewer's own right on the accent", async () => {
+test("a colleague's words stand left and the viewer's own right, each turning its own corner", async () => {
   wire(
     transcript({
       messages: [
@@ -527,14 +569,21 @@ test("a colleague's words stand left on the neutral fill, the viewer's own right
   expect(theirs).not.toBeNull();
   expect(theirs.getAttribute("data-align")).toBe("start");
   expect(theirs.getAttribute("data-variant")).toBe("default");
-  expect(theirs.className).not.toContain("bg-said");
   expect(theirs.closest("[data-slot=message]")!.getAttribute("data-align")).toBe("start");
 
   const own = screen.getByText("thanks").closest("[data-role=me]")!;
   expect(own.getAttribute("data-align")).toBe("end");
   expect(own.getAttribute("data-variant")).toBe("said");
-  expect(own.className).toContain("*:data-[slot=bubble-content]:bg-said");
+  expect(own.getAttribute("data-tail")).toBe("true");
+  expect(theirs.getAttribute("data-tail")).toBe("true");
   expect(own.closest("[data-slot=message]")!.getAttribute("data-align")).toBe("end");
+
+  const ground = (bubble: Element) =>
+    bubble.querySelector("[data-slot=bubble-content]")!.className;
+  expect(ground(own)).toContain("bg-fill");
+  expect(ground(own)).toContain("border-edge");
+  expect(ground(theirs)).toContain("bg-fill");
+  expect(ground(theirs)).toContain("border-edge");
 
   const agent = screen.getByText("Drafted.").closest("[data-role=agent]")!;
   expect(agent.getAttribute("data-align")).toBe("start");
@@ -638,17 +687,16 @@ test("the working line is not taken down when the turn's first step lands", asyn
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   const opening = await screen.findByText("Researching…");
-  const waiting = opening.closest("[data-slot=marker]")!;
-  expect(waiting.querySelector("[data-slot=marker-content]")!.classList).toContain("shimmer");
+  const waiting = opening.closest("span.shimmer")!;
   const decoded = waiting.querySelector("[data-slot=decode-text]")!;
   expect(decoded.querySelectorAll("[data-slot=decode-cell]").length).toBeGreaterThan(0);
 
   StreamFake.last().emit("activity", { text: "Reviewing the pull request." });
   expect(await screen.findByText("Reviewing the pull request.")).toBe(opening);
-  expect(opening.closest("[data-slot=marker]")).toBe(waiting);
+  expect(opening.closest("span.shimmer")).toBe(waiting);
 });
 
-test("a running turn draws its latest step alone, and takes the line down when it settles", async () => {
+test("a running turn keeps the steps it closed and folds them all when it settles", async () => {
   wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }));
   open();
 
@@ -657,8 +705,8 @@ test("a running turn draws its latest step alone, and takes the line down when i
   StreamFake.last().emit("activity", { text: "Loading coding guidance." });
 
   expect(await screen.findByText("Loading coding guidance.")).toBeTruthy();
-  expect(screen.queryByText("Reviewing the pull request.")).toBeNull();
-  expect(document.querySelector("[data-slot=marker] [data-slot=decode-text]")).toBeTruthy();
+  expect(screen.getByText("Reviewing the pull request.").closest("span.shimmer")).toBeNull();
+  expect(document.querySelector("span.shimmer [data-slot=decode-text]")).toBeTruthy();
 
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -668,11 +716,17 @@ test("a running turn draws its latest step alone, and takes the line down when i
     cost_micro_usd: 1_000_000,
   });
   expect(await screen.findByText("Reviewed it.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Completed reasoning/ })).toBeTruthy();
   expect(screen.queryByText("Loading coding guidance.")).toBeNull();
-  expect(document.querySelector("[data-slot=marker] [data-slot=decode-text]")).toBeNull();
+  expect(document.querySelector("span.shimmer [data-slot=decode-text]")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Completed reasoning" }));
+
+  expect(screen.getByText("Reviewing the pull request.")).toBeTruthy();
+  expect(screen.getByText("Loading coding guidance.")).toBeTruthy();
 });
 
-test("a settled reply draws no row for the run that fed it", async () => {
+test("a settled reply holds the run that fed it behind its reasoning, and never its output", async () => {
   const conversationId = "66666666-6666-4666-8666-666666666666";
   wire(transcript({ messages: [{ role: "user", text: "Research it." }], turn: TURN_ID }));
   open();
@@ -696,10 +750,15 @@ test("a settled reply draws no row for the run that fed it", async () => {
   expect(await screen.findByText(saying("It shipped Tuesday."))).toBeTruthy();
   expect(screen.queryByText("Subagent · general_purpose")).toBeNull();
   expect(screen.queryByText("Fetching the page.")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Completed reasoning" }));
+
+  expect(screen.getByText("Subagent · general_purpose")).toBeTruthy();
+  expect(screen.getByText("Fetching the page.")).toBeTruthy();
   expect(screen.queryByText("The release shipped on Tuesday.")).toBeNull();
 });
 
-test("a live run puts the wait on the working line, and gives the line back when it ends", async () => {
+test("a run names itself under the turn's step, and its own steps under that", async () => {
   const conversationId = "66666666-6666-4666-8666-666666666666";
   const childTurn = "88888888-8888-4888-8888-888888888888";
   const frame = {
@@ -717,22 +776,21 @@ test("a live run puts the wait on the working line, and gives the line back when
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("activity", { text: "Handing the research off." });
   StreamFake.last().emit("subagent_activity", frame);
-  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
-  expect(screen.queryByText("Handing the research off.")).toBeNull();
-  expect(screen.getByText("UK sports news")).toBeTruthy();
+  expect(await screen.findByText("UK sports news")).toBeTruthy();
+  expect(stepLine()!.textContent).toContain("Handing the research off.");
 
   StreamFake.last().emit("subagent_activity", {
     ...frame,
     activity: "Searching for latest MLS news.",
   });
   expect(await screen.findByText("Searching for latest MLS news.")).toBeTruthy();
-  expect(screen.getByText("Awaiting 1 subagent")).toBeTruthy();
-  expect(screen.queryByText("UK sports news")).toBeNull();
+  expect(screen.getByText("UK sports news")).toBeTruthy();
 
   StreamFake.last().emit("subagent_activity", { ...frame, status: "done" });
-  await waitFor(() => expect(screen.queryByText("Awaiting 1 subagent")).toBeNull());
-  expect(screen.queryByText("Searching for latest MLS news.")).toBeNull();
-  expect(screen.getByText("Handing the research off.")).toBeTruthy();
+
+  expect(screen.getByText("UK sports news")).toBeTruthy();
+  expect(screen.getByText("Searching for latest MLS news.")).toBeTruthy();
+  expect(stepLine()!.textContent).toContain("Handing the research off.");
 });
 
 const FIRST_RUN = {
@@ -752,7 +810,7 @@ const SECOND_RUN = {
   name: "Issues",
 };
 
-test("each subagent the turn waits on states what it is doing, under the count", async () => {
+test("each subagent stands on a line of its own, with the step it is on under it", async () => {
   wire(transcript({ messages: [{ role: "user", text: "File it." }], turn: TURN_ID }));
   open();
 
@@ -760,14 +818,15 @@ test("each subagent the turn waits on states what it is doing, under the count",
   StreamFake.last().emit("subagent_activity", { ...FIRST_RUN, activity: "Looking up info" });
   StreamFake.last().emit("subagent_activity", { ...SECOND_RUN, activity: "Naming the new issue" });
 
-  expect(await screen.findByText("Awaiting 2 subagents")).toBeTruthy();
+  expect(await screen.findByText("Lookup")).toBeTruthy();
   expect(screen.getByText("Looking up info")).toBeTruthy();
+  expect(screen.getByText("Issues")).toBeTruthy();
   expect(screen.getByText("Naming the new issue")).toBeTruthy();
 
   StreamFake.last().emit("subagent_activity", { ...FIRST_RUN, status: "done" });
 
-  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
-  expect(screen.queryByText("Looking up info")).toBeNull();
+  expect(await screen.findByText("Lookup")).toBeTruthy();
+  expect(screen.getByText("Looking up info")).toBeTruthy();
   expect(screen.getByText("Naming the new issue")).toBeTruthy();
 });
 
@@ -777,7 +836,7 @@ test("a conversation reloaded mid-run draws the waiting runs the replayed frames
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("subagent_activity", { ...FIRST_RUN, activity: "Looking up info" });
-  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+  expect(await screen.findByText("Looking up info")).toBeTruthy();
 
   cleanup();
   resetStreams();
@@ -787,7 +846,7 @@ test("a conversation reloaded mid-run draws the waiting runs the replayed frames
   await waitFor(() => expect(StreamFake.opened.length).toBe(2));
   StreamFake.last().emit("subagent_activity", { ...FIRST_RUN, activity: "Looking up info" });
 
-  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+  expect(await screen.findByText("Lookup")).toBeTruthy();
   expect(screen.getAllByText("Looking up info")).toHaveLength(1);
 });
 
@@ -800,7 +859,7 @@ const LOOKUP_NODE = {
   subagents: [],
 };
 
-test("the wait stands through a message sent mid-run and the answer that message gets", async () => {
+test("a run stands through a message sent mid-run, and folds into the answer it gets", async () => {
   wire({
     ...transcript({ messages: [{ role: "user", text: "Research it." }], turn: TURN_ID }),
     "/chat": () => json({ ...FOLDED, arrival_id: ARRIVAL_ID }),
@@ -809,7 +868,7 @@ test("the wait stands through a message sent mid-run and the answer that message
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("subagent_activity", FIRST_RUN);
-  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+  expect(await screen.findByText("Lookup")).toBeTruthy();
 
   await userEvent.type(screen.getByLabelText("Ask UFO"), "and the tags?");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -825,53 +884,14 @@ test("the wait stands through a message sent mid-run and the answer that message
   });
 
   expect(await screen.findByText("Tagged v2; the lookup runs on.")).toBeTruthy();
-  expect(screen.getByText("Awaiting 1 subagent")).toBeTruthy();
+  expect(screen.queryByText("Lookup")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Completed reasoning" }));
+
   expect(screen.getByText("Lookup")).toBeTruthy();
 });
 
-test("the wait goes when the read says the run the turn left going has ended", async () => {
-  let serves = 0;
-  const answer = "Tagged v2; the lookup runs on.";
-  wire({
-    ...transcript(),
-    "/transcript": () => {
-      serves += 1;
-      return json(
-        serves === 1
-          ? { messages: [{ role: "user", text: "Research it." }], turn: TURN_ID }
-          : {
-              messages: [
-                {
-                  role: "assistant",
-                  text: answer,
-                  subagents: [{ ...LOOKUP_NODE, running: false }],
-                },
-              ],
-            },
-      );
-    },
-  });
-  open();
-
-  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  StreamFake.last().emit("subagent_activity", { ...FIRST_RUN, activity: "Looking up info" });
-  StreamFake.last().emit("subagent", { ...LOOKUP_NODE, running: true });
-  StreamFake.last().emit("terminal", {
-    status: "done",
-    text: answer,
-    model: "opus",
-    tokens: 9,
-    cost_micro_usd: 1_000_000,
-  });
-  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
-
-  window.dispatchEvent(new Event("focus"));
-
-  await waitFor(() => expect(screen.queryByText("Awaiting 1 subagent")).toBeNull());
-  expect(screen.getByText(answer)).toBeTruthy();
-});
-
-test("the wait states itself on the turn whose run is going, not on the newest one", () => {
+test("a turn's reasoning stands on the reply that did it, not on the newest one", () => {
   render(
     <TranscriptScroll>
       <MessageLog
@@ -890,8 +910,8 @@ test("the wait states itself on the turn whose run is going, not on the newest o
     </TranscriptScroll>,
   );
 
-  expect(screen.getAllByText("Awaiting 1 subagent")).toHaveLength(1);
-  expect(order("Awaiting 1 subagent", "And the tags?")).toBe(true);
+  expect(screen.getAllByRole("button", { name: "Completed reasoning" })).toHaveLength(1);
+  expect(order("Completed reasoning", "And the tags?")).toBe(true);
   expect(order("Tagged v2.", "Researching…")).toBe(true);
 });
 
@@ -1024,7 +1044,7 @@ test("a reply the turn delivered before the fold stands ahead of the message it 
   expect(log.indexOf("1+1=")).toBeGreaterThan(log.indexOf("Ducks glide at dusk."));
 });
 
-test("working narration is not a reply: a drain clears it rather than settling it", async () => {
+test("working narration is not a reply: a drain settles it as the round's reasoning", async () => {
   wire({
     ...transcript({ messages: [{ role: "user", text: "write a poem" }], turn: TURN_ID }),
     "/chat": () => json({ ...FOLDED, arrival_id: ARRIVAL_ID }),
@@ -1046,7 +1066,8 @@ test("working narration is not a reply: a drain clears it rather than settling i
   });
 
   await screen.findByText("2");
-  expect(screen.queryByText(saying("Thinking about ducks."))).toBeNull();
+  const narration = screen.getByText(saying("Thinking about ducks."));
+  expect(narration.closest("[data-slot=bubble-content]")).toBeNull();
 });
 
 test("a drain that beats the response leaves the reply above the message", async () => {
@@ -1161,7 +1182,7 @@ test("a wait states nothing once the turn it was waiting on has ended", async ()
 
   StreamFake.last().emit("terminal", { status: "failed", error_class: "ProviderTimeout" });
 
-  expect(await screen.findByText("(failed: ProviderTimeout)")).toBeTruthy();
+  expect(await screen.findByText(FAILED_VERDICT)).toBeTruthy();
   await waitFor(() => expect(waiting("and again")).toBe(false));
 });
 
@@ -1797,7 +1818,8 @@ test("Shift+Enter opens a line in the message and Enter sends the whole of it", 
   await userEvent.type(box, "{Enter}");
   await waitFor(() => expect(posted).toEqual(["first\nsecond"]));
   expect(box.value).toBe("");
-  expect(screen.getByText("first second").className).toContain("whitespace-pre-wrap");
+  const said = screen.getByText("first second").closest("[data-slot=bubble]")!;
+  expect(said.className).toContain("*:data-[slot=bubble-content]:whitespace-pre-wrap");
 });
 
 test("the message box is as tall as the message and stops growing at the fold", async () => {
@@ -2220,7 +2242,7 @@ test("a settled turn names each shared file once, with its size", async () => {
   });
 
   expect(await screen.findByText(saying("Here it is."))).toBeTruthy();
-  const files = screen.getAllByRole("button", { name: "report.csv" });
+  const files = screen.getAllByRole("button", { name: /report\.csv/ });
   expect(files).toHaveLength(1);
   expect(screen.getByText("2 kB")).toBeTruthy();
 
@@ -2231,7 +2253,7 @@ test("a settled turn names each shared file once, with its size", async () => {
   );
 });
 
-test("a turn puts shared images in one carousel before its document grid", async () => {
+test("a turn puts shared images in one carousel above the cards its documents stand on", async () => {
   wire(
     transcript({
       messages: [
@@ -2285,26 +2307,22 @@ test("a turn puts shared images in one carousel before its document grid", async
     "[data-slot=message]",
   ) as HTMLElement;
   const carousel = reply.querySelector('[data-slot="attachment-group"]') as HTMLElement;
-  const documents = reply.querySelector('[data-slot="attachment-grid"]') as HTMLElement;
+  const documents = carousel.nextElementSibling as HTMLElement;
   const portrait = within(carousel).getByRole("img", { name: "portrait.jpg" });
   const chart = within(carousel).getByRole("img", { name: "chart.png" });
-  const reportPreview = within(documents).getByRole("img", { name: "report.pdf" });
-  const report = within(documents).getByRole("button", { name: "report.pdf" });
-  const scan = within(documents).getByRole("button", { name: "scan.bmp" });
-  const notes = within(documents).getByRole("button", { name: "notes.md" });
+  const report = within(documents).getByRole("button", { name: /report\.pdf/ });
+  const scan = within(documents).getByRole("button", { name: /scan\.bmp/ });
+  const notes = within(documents).getByRole("button", { name: /notes\.md/ });
   expect(carousel.children).toHaveLength(2);
   expect(carousel.children[0].contains(portrait)).toBe(true);
   expect(carousel.children[1].contains(chart)).toBe(true);
-  expect(documents.children).toHaveLength(3);
-  expect(documents.children[0].contains(reportPreview)).toBe(true);
+  expect(documents.querySelectorAll("[data-slot=card]")).toHaveLength(3);
   expect(documents.children[0].contains(report)).toBe(true);
   expect(documents.children[1].contains(scan)).toBe(true);
   expect(documents.children[2].contains(notes)).toBe(true);
-  expect(reportPreview.className).toContain("top-0");
-  expect(reportPreview.className).toContain("h-auto w-full");
-  expect(reportPreview.className).not.toContain("object-cover");
-  expect(portrait.className).not.toContain("top-0");
-  expect(carousel.nextElementSibling).toBe(documents);
+  expect(within(documents).queryByRole("img")).toBeNull();
+  expect(report.querySelector("[data-slot=mark] .tabler-icon-file-type-pdf")).toBeTruthy();
+  expect(report.querySelector(".tabler-icon-chevron-right")).toBeTruthy();
 });
 
 test("a file the running turn shares stands under the log before the turn ends", async () => {
@@ -2328,7 +2346,7 @@ test("a file the running turn shares stands under the log before the turn ends",
     ],
   });
 
-  expect(await screen.findByRole("button", { name: "report.csv" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: /report\.csv/ })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
 
   StreamFake.last().emit("terminal", {
@@ -2338,7 +2356,7 @@ test("a file the running turn shares stands under the log before the turn ends",
     cost_micro_usd: 1_000_000,
   });
   await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeTruthy());
-  expect(screen.getAllByRole("button", { name: "report.csv" })).toHaveLength(1);
+  expect(screen.getAllByRole("button", { name: /report\.csv/ })).toHaveLength(1);
 });
 
 test("a file stays on the reply that shared it when a follow-up opens the next turn", async () => {
@@ -2387,7 +2405,7 @@ test("a file stays on the reply that shared it when a follow-up opens the next t
     tokens: 9,
     cost_micro_usd: 1_000_000,
   });
-  expect(await screen.findByRole("button", { name: "report.csv" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: /report\.csv/ })).toBeTruthy();
   expect(screen.getByRole("img", { name: "portrait.jpg" })).toBeTruthy();
 
   await userEvent.type(screen.getByLabelText("Ask UFO"), "and another");
@@ -2395,16 +2413,16 @@ test("a file stays on the reply that shared it when a follow-up opens the next t
 
   expect(await screen.findByText(saying("and another"))).toBeTruthy();
   const reply = screen.getByText(saying("Here it is.")).closest("[data-slot=message]") as HTMLElement;
-  expect(within(reply).getByRole("button", { name: "report.csv" })).toBeTruthy();
+  expect(within(reply).getByRole("button", { name: /report\.csv/ })).toBeTruthy();
   expect(within(reply).getByRole("img", { name: "portrait.jpg" })).toBeTruthy();
 
   land({ turn_id: "turn-2", conversation_id: CONVO_ID, title: "hello" });
   await waitFor(() => expect(StreamFake.opened.length).toBe(2));
-  expect(screen.getAllByRole("button", { name: "report.csv" })).toHaveLength(1);
+  expect(screen.getAllByRole("button", { name: /report\.csv/ })).toHaveLength(1);
   expect(screen.getAllByRole("img", { name: "portrait.jpg" })).toHaveLength(1);
 });
 
-test("a write-up the reply carried opens as the detailed report above the attachments", async () => {
+test("a write-up the reply carried is a document row titled by its subject, standing first", async () => {
   wire(
     transcript({
       messages: [
@@ -2444,13 +2462,12 @@ test("a write-up the reply carried opens as the detailed report above the attach
   open();
 
   expect(await screen.findByText(saying("Move the event-driven jobs onto a queue."))).toBeTruthy();
-  const opener = screen.getByRole("button", { name: "Open detailed report" });
-  const captioned = screen.getByRole("button", { name: "Open the cost table" });
-  const card = screen.getByRole("button", { name: "report.csv" });
+  const opener = screen.getByRole("button", { name: /nightly-runner-queue\.md/ });
+  const captioned = screen.getByRole("button", { name: /Open the cost table/ });
+  const card = screen.getByRole("button", { name: /report\.csv/ });
   expect(opener.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(captioned.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "nightly-runner-queue.md" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "queue-costs.md" })).toBeNull();
+  expect(captioned.textContent).toContain("queue-costs.md · 512 B");
 
   await userEvent.click(opener);
   const sheet = await screen.findByRole("dialog", { name: "nightly-runner-queue.md" });
@@ -2528,7 +2545,7 @@ test("a reloaded conversation draws files on the earlier reply that shared them"
     "[data-slot=message]",
   ) as HTMLElement;
   expect(reply.contains(picture)).toBe(true);
-  expect(within(reply).getByRole("button", { name: "report.csv" })).toBeTruthy();
+  expect(within(reply).getByRole("button", { name: /report\.csv/ })).toBeTruthy();
   const rows = screen.getByTestId("log").querySelectorAll("[data-slot=message-scroller-item]");
   expect(rows[rows.length - 1].textContent).toBe("Anything else?");
 });
@@ -2560,7 +2577,7 @@ test("an application the turn created stands on the reply that made it, and open
   ) as HTMLElement;
   const card = within(reply).getByRole("link", { name: /Second/ });
   expect(card.getAttribute("href")).toBe("#/agents/" + SECOND_ID);
-  expect(card.textContent).toContain("claude-sonnet-5");
+  expect(card.textContent).toContain("Sonnet 5");
 
   await userEvent.click(card);
   expect(location.hash).toBe("#/agents/" + SECOND_ID);
@@ -2656,7 +2673,7 @@ test("an image the turn shares stands inline in the answer and opens the artifac
   const picture = await screen.findByRole("img", { name: "portrait.jpg" });
   expect(picture.getAttribute("src")).toBe("https://web/artifacts/preview/portrait.jpg?token=signed");
   expect(screen.queryByRole("link", { name: "portrait.jpg" })).toBeNull();
-  expect(screen.getByRole("button", { name: "report.csv" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /report\.csv/ })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "portrait.jpg" }));
   expect(location.hash).toBe("#/c/" + CONVO_ID);
@@ -2726,12 +2743,12 @@ test("every file the turn shares opens in the attachment sheet instead of downlo
     cost_micro_usd: 1_000_000,
   });
 
-  expect(await screen.findByRole("button", { name: "notes.md" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: /notes\.md/ })).toBeTruthy();
   expect(screen.queryByRole("link", { name: "notes.md" })).toBeNull();
-  expect(screen.getByRole("button", { name: "report.csv" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /report\.csv/ })).toBeTruthy();
   expect(screen.queryByRole("link", { name: "report.csv" })).toBeNull();
 
-  await userEvent.click(screen.getByRole("button", { name: "notes.md" }));
+  await userEvent.click(screen.getByRole("button", { name: /notes\.md/ }));
   expect(location.hash).toBe("#/c/" + CONVO_ID);
   const sheet = await screen.findByRole("dialog", { name: "notes.md" });
   expect(await within(sheet).findByRole("heading", { name: "Notes" })).toBeTruthy();
@@ -2761,7 +2778,7 @@ test("every file the turn shares opens in the attachment sheet instead of downlo
       ]}
     />,
   );
-  expect(screen.getByRole("button", { name: "notes.md" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /notes\.md/ })).toBeTruthy();
   expect(screen.queryByRole("link", { name: "notes.md" })).toBeNull();
 });
 
@@ -2780,11 +2797,11 @@ test("a credential handoff stores a value and drops the prompt it answered", asy
   open();
 
   expect(await screen.findByText("notion authenticates with this value.")).toBeTruthy();
-  await userEvent.type(screen.getByPlaceholderText("notion_token"), "secret");
-  await userEvent.click(screen.getByRole("button", { name: "Store" }));
+  await userEvent.type(screen.getByLabelText("Notion token"), "secret");
+  await userEvent.click(screen.getByRole("button", { name: "Set credential" }));
 
-  expect(await screen.findByText("Stored notion_token.")).toBeTruthy();
-  expect(screen.queryByPlaceholderText("notion_token")).toBeNull();
+  expect(await screen.findByText("Stored.")).toBeTruthy();
+  expect(screen.queryByLabelText("Notion token")).toBeNull();
 });
 
 test("a credential handoff stores one server token against its own slot", async () => {
@@ -2808,10 +2825,10 @@ test("a credential handoff stores one server token against its own slot", async 
   expect(
     await screen.findByText("Paste the token for the vercel MCP server."),
   ).toBeTruthy();
-  await userEvent.type(screen.getByPlaceholderText("mcp_server_vercel"), "vercel-token");
-  await userEvent.click(screen.getByRole("button", { name: "Store" }));
+  await userEvent.type(screen.getByLabelText("Access token"), "vercel-token");
+  await userEvent.click(screen.getByRole("button", { name: "Set credential" }));
 
-  expect(await screen.findByText("Stored mcp_server_vercel.")).toBeTruthy();
+  expect(await screen.findByText("Stored.")).toBeTruthy();
   expect(submitted.current?.get("sealed")).toBe("sealed-token");
   expect(submitted.current?.get("slot")).toBe("mcp_server_vercel");
   expect(submitted.current?.get("value")).toBe("vercel-token");
@@ -2912,13 +2929,14 @@ test("a conversation that never compacted asks for no pages", async () => {
   expect(calls.filter((url) => url.includes("/transcript?cursor="))).toEqual([]);
 });
 
-test("a message states when it landed on its meta line, and in full under the pointer", () => {
+test("the newest message states when it landed, and every message states it under the pointer", () => {
   render(
     <TranscriptScroll>
       <MessageLog
         messages={[
-          { role: "user", text: "what time", at: "2026-08-01T09:05:00Z" },
+          { role: "user", text: "asked first", at: "2026-08-01T09:05:00Z" },
           { role: "assistant", text: "just gone nine" },
+          { role: "user", text: "what time", at: "2026-08-01T09:05:00Z" },
         ]}
       />
     </TranscriptScroll>,
@@ -2932,35 +2950,157 @@ test("a message states when it landed on its meta line, and in full under the po
   expect(stamped.querySelector("[data-slot=message-content]")?.getAttribute("title")).toBe(
     "Aug 1 2026 at 2:35 PM GMT+5:30",
   );
+  const earlier = screen.getByText("asked first").closest("[data-slot=message-scroller-item]")!;
+  expect(earlier.querySelector("[data-slot=marker]")).toBeNull();
+  expect(earlier.querySelector("[data-slot=message-content]")?.getAttribute("title")).toBe(
+    "Aug 1 2026 at 2:35 PM GMT+5:30",
+  );
   const bare = screen.getByText("just gone nine").closest("[data-slot=message-scroller-item]")!;
   expect(bare.querySelector("[data-slot=marker]")).toBeNull();
   expect(bare.querySelector("[data-slot=message-content]")?.getAttribute("title")).toBeNull();
+});
+
+const held = (cursor: string, messages: Bubble[]): EarlierMessages => ({
+  pages: [{ cursor, messages }],
+  more: false,
+  loading: false,
+  failed: false,
+  load: vi.fn(),
+});
+
+const itemOf = (text: string) =>
+  screen.getByText(text).closest("[data-slot=message-scroller-item]") as HTMLElement;
+
+test("words one voice said in a row stack under one name, with the face on the last of them", () => {
+  render(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[
+          { role: "user", text: "one", speaker: { name: "Sam Frost" } },
+          { role: "user", text: "two", speaker: { name: "Sam Frost" } },
+          { role: "user", text: "three", speaker: { name: "Rae Whitlock" } },
+        ]}
+      />
+    </TranscriptScroll>,
+  );
+
+  expect(itemOf("one").className).not.toContain("-mt-xl");
+  expect(itemOf("two").className).toContain("-mt-xl");
+  expect(itemOf("three").className).not.toContain("-mt-xl");
+
+  expect(within(itemOf("one")).queryByText("Sam Frost")).toBeTruthy();
+  expect(within(itemOf("two")).queryByText("Sam Frost")).toBeNull();
+  expect(within(itemOf("three")).queryByText("Rae Whitlock")).toBeTruthy();
+
+  expect(itemOf("one").querySelector("[data-slot=avatar]")).toBeNull();
+  expect(itemOf("two").querySelector("[data-slot=avatar]")).toBeTruthy();
+
+  const tail = (text: string) =>
+    itemOf(text).querySelector("[data-slot=bubble]")!.getAttribute("data-tail");
+  expect(tail("one")).toBeNull();
+  expect(tail("two")).toBe("true");
+  expect(tail("three")).toBe("true");
+});
+
+test("a run carries on across the page a transcript loaded above it", () => {
+  render(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[{ role: "user", text: "and another", speaker: { name: "Sam Frost" } }]}
+        earlier={held("page-1", [{ role: "user", text: "one thing", speaker: { name: "Sam Frost" } }])}
+      />
+    </TranscriptScroll>,
+  );
+
+  expect(within(itemOf("one thing")).queryByText("Sam Frost")).toBeTruthy();
+  expect(itemOf("and another").className).toContain("-mt-xl");
+  expect(within(itemOf("and another")).queryByText("Sam Frost")).toBeNull();
+});
+
+test("the agent is named where somebody else speaks, and nowhere else", () => {
+  const { unmount } = render(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[
+          { role: "user", text: "ask", speaker: { name: "Sam Frost" } },
+          { role: "assistant", text: "reply" },
+        ]}
+      />
+    </TranscriptScroll>,
+  );
+  expect(screen.getByText("UFO")).toBeTruthy();
+  unmount();
+
+  render(
+    <TranscriptScroll>
+      <MessageLog messages={[{ role: "user", text: "ask" }, { role: "assistant", text: "reply" }]} />
+    </TranscriptScroll>,
+  );
+  expect(screen.queryByText("UFO")).toBeNull();
+});
+
+test("the agent's name and words start at the column edge, where no face hangs beside them", () => {
+  render(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[
+          { role: "user", text: "ask", speaker: { name: "Sam Frost" } },
+          { role: "assistant", text: "reply" },
+        ]}
+      />
+    </TranscriptScroll>,
+  );
+
+  const said = itemOf("reply");
+  expect(within(said).getByText("UFO").closest("[data-slot=message-content]")).toBeTruthy();
+  expect([...said.querySelectorAll<HTMLElement>("*")].some((node) => node.style.paddingInlineStart)).toBe(
+    false,
+  );
+
+  const spoken = itemOf("ask");
+  expect(
+    [...spoken.querySelectorAll<HTMLElement>("*")].some((node) => node.style.paddingInlineStart),
+  ).toBe(true);
+});
+
+test("a colleague speaking only above the fold still names the agent", () => {
+  render(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[{ role: "assistant", text: "reply" }]}
+        earlier={held("page-1", [{ role: "user", text: "ask", speaker: { name: "Sam Frost" } }])}
+      />
+    </TranscriptScroll>,
+  );
+  expect(screen.getByText("UFO")).toBeTruthy();
+});
+
+test("the receipt falls to the newest words the member sent, wherever the transcript holds them", () => {
+  render(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[{ role: "assistant", text: "reply" }]}
+        earlier={held("page-1", [
+          { role: "user", text: "older", at: "2026-08-01T09:05:00Z" },
+          { role: "user", text: "newer", at: "2026-08-01T09:06:00Z" },
+        ])}
+      />
+    </TranscriptScroll>,
+  );
+
+  const line = (text: string) =>
+    screen.getByText(text).closest("[data-slot=message-scroller-item]")!.querySelector("[data-slot=marker]");
+  expect(line("older")).toBeNull();
+  expect(line("newer")!.textContent).toBe("Aug 1, 2:36 PM");
 });
 
 test("a stamp from another day names the day, and one from another year names that too", () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   vi.setSystemTime(new Date("2026-08-01T09:05:00Z"));
   try {
-    render(
-      <TranscriptScroll>
-        <MessageLog
-          messages={[
-            { role: "user", text: "today", at: "2026-08-01T05:32:00Z" },
-            { role: "user", text: "earlier this year", at: "2026-08-30T05:32:00Z" },
-            { role: "user", text: "last year", at: "2025-08-30T05:32:00Z" },
-          ]}
-        />
-      </TranscriptScroll>,
-    );
-
-    const line = (text: string) =>
-      screen
-        .getByText(text)
-        .closest("[data-slot=message-scroller-item]")!
-        .querySelector("[data-slot=marker]")!.textContent;
-    expect(line("today")).toBe("11:02 AM");
-    expect(line("earlier this year")).toBe("Aug 30, 11:02 AM");
-    expect(line("last year")).toBe("Aug 30 2025, 11:02 AM");
+    expect(stampMoment("2026-08-01T05:32:00Z")).toBe("11:02 AM");
+    expect(stampMoment("2026-08-30T05:32:00Z")).toBe("Aug 30, 11:02 AM");
+    expect(stampMoment("2025-08-30T05:32:00Z")).toBe("Aug 30 2025, 11:02 AM");
   } finally {
     vi.useRealTimers();
   }
@@ -3064,6 +3204,97 @@ test("the live chat scrolls its own pane and a transcript read back scrolls with
   expect(screen.queryByTestId("log")).toBeNull();
   expect(document.querySelector("[data-slot=message-scroller]")).toBeNull();
   expect(screen.queryByRole("button", { name: "Jump to bottom" })).toBeNull();
+});
+
+async function streams(said: string): Promise<void> {
+  wire({
+    ...transcript(),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
+  });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.type(screen.getByLabelText("Ask UFO"), said);
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+}
+
+test("a failed turn states what to do next, and never the exception class behind it", async () => {
+  await streams("summarise the queue");
+  StreamFake.last().emit("message", { text: "The queue holds 312 threads." });
+  StreamFake.last().emit("terminal", { status: "failed", error_class: "ProviderTimeout" });
+
+  expect(await screen.findByText(FAILED_VERDICT)).toBeTruthy();
+  expect(screen.getByText(saying("The queue holds 312 threads."))).toBeTruthy();
+  expect(screen.getByRole("log").textContent).not.toContain("ProviderTimeout");
+  expect(screen.getByRole("log").textContent).not.toContain("(failed");
+});
+
+test("a stopped turn says so over the words it had written", async () => {
+  await streams("read every file");
+  StreamFake.last().emit("message", { text: "Forty-one files are named." });
+  StreamFake.last().emit("terminal", { status: "cancelled" });
+
+  const verdict = await screen.findByText(STOPPED_VERDICT);
+  const words = screen.getByText(saying("Forty-one files are named."));
+  expect(verdict.compareDocumentPosition(words) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+test("a parked turn states the engine's own sentence, word for word", async () => {
+  await streams("grant the finance team access");
+  StreamFake.last().emit("parked", { message: "Waiting for an admin to approve the grant." });
+
+  expect(await screen.findByText("Waiting for an admin to approve the grant.")).toBeTruthy();
+  expect(screen.getByRole("log").textContent).not.toContain("(parked");
+});
+
+test("a turn that ran out of rounds says so and keeps the answer it reached", async () => {
+  await streams("walk the release branch");
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    text: "Eleven commits so far.",
+    incomplete_reason: "round_budget",
+  });
+
+  expect(await screen.findByText(BUDGET_VERDICT)).toBeTruthy();
+  expect(screen.getByText(saying("Eleven commits so far."))).toBeTruthy();
+});
+
+test("the jump control stands under the transcript, never over the rows it would be pressed on", async () => {
+  wire({ ...transcript({ messages: SPOKEN }), ...OFFERED });
+  open();
+  await screen.findByTestId("follow-ups");
+
+  const jump = screen.getByRole("button", { name: "Jump to bottom" });
+  expect(screen.getByTestId("log").contains(jump)).toBe(false);
+  expect(jump.className).toContain("size-(--size-touch)");
+
+  const lane = jump.parentElement!;
+  expect(lane.className).toContain("h-0");
+  expect(lane.className).toContain("has-[[data-active=true]]:h-(--size-touch)");
+});
+
+test("the rows under a thread are read after it, and stand outside the rows the scroller counts", async () => {
+  wire({ ...transcript({ messages: SPOKEN }), ...OFFERED });
+  open();
+  const rows = await screen.findByTestId("follow-ups");
+  const reply = screen.getByText(saying("They asked for the revised terms."));
+  const content = document.querySelector("[data-slot=message-scroller-content]")!;
+
+  expect(reply.compareDocumentPosition(rows) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(content.contains(rows)).toBe(false);
+  expect(content.querySelector(".order-last")).toBeNull();
+});
+
+test("copying a message is aimed at a touch target rather than at the glyph it draws", () => {
+  render(
+    <TranscriptScroll>
+      <MessageLog messages={[{ role: "user", text: "what time", at: "2026-08-01T09:05:00Z" }]} />
+    </TranscriptScroll>,
+  );
+
+  const copy = screen.getByLabelText("Copy message");
+  expect(copy.className).toContain("before:size-(--size-touch)");
+  expect(copy.className).toContain("before:absolute");
 });
 
 /** jsdom lays nothing out, so the pane is stated here; a browser clamps the foot to what is left under
@@ -3172,18 +3403,18 @@ test("a row landing under a handoff leaves the half-typed secret where the membe
   });
   open();
 
-  const field = await screen.findByPlaceholderText("notion_token");
+  const field = await screen.findByLabelText("Notion token");
   await userEvent.type(field, "half-typed");
 
   await userEvent.type(screen.getByLabelText("Ask UFO"), "and again");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("and again")).toBeTruthy();
 
-  expect(screen.getByPlaceholderText("notion_token")).toBe(field);
+  expect(screen.getByLabelText("Notion token")).toBe(field);
   expect((field as HTMLInputElement).value).toBe("half-typed");
 });
 
-test("a dropped file is named on the composer, comes off it, and rides the message", async () => {
+test("a dropped file stands on the composer, comes off it, and rides the message", async () => {
   const { handler } = wire({
     ...transcript(),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
@@ -3199,10 +3430,10 @@ test("a dropped file is named on the composer, comes off it, and rides the messa
 
   drop("notes.txt");
   drop("second.txt");
-  expect(screen.getByText("notes.txt")).toBeTruthy();
+  expect(screen.getByTitle("notes.txt")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Remove notes.txt" }));
-  expect(screen.queryByText("notes.txt")).toBeNull();
-  expect(screen.getByText("second.txt")).toBeTruthy();
+  expect(screen.queryByTitle("notes.txt")).toBeNull();
+  expect(screen.getByTitle("second.txt")).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(screen.queryByLabelText("Attached files")).toBeNull());
@@ -3211,7 +3442,7 @@ test("a dropped file is named on the composer, comes off it, and rides the messa
   expect((sent as FormData).getAll("file").map((file) => (file as File).name)).toEqual([
     "second.txt",
   ]);
-  expect(await screen.findByText("second.txt")).toBeTruthy();
+  expect(await screen.findByTitle("second.txt")).toBeTruthy();
 });
 
 test("a send the composer cannot answer leaves the attachment where the member put it", async () => {
@@ -3291,7 +3522,7 @@ test("the card refuses an eleventh file and says so while the member can still s
 
   await waitFor(() => expect(within(composer).queryAllByRole("listitem").length).toBe(10));
   expect(within(composer).getByText("A message carries at most 10 files.")).toBeTruthy();
-  expect(within(composer).queryByText("10.txt")).toBeNull();
+  expect(within(composer).queryByTitle("10.txt")).toBeNull();
 });
 
 test("a file attached while the send runs stays in the card for the next message", async () => {
@@ -3325,10 +3556,10 @@ test("a file attached while the send runs stays in the card for the next message
   mint();
 
   await waitFor(() => expect(chips().length).toBe(1));
-  expect(within(composer).getByText("later.txt")).toBeTruthy();
+  expect(within(composer).getByTitle("later.txt")).toBeTruthy();
 });
 
-test("the composer draws a picked image as itself and a picked PDF as a badged card", async () => {
+test("the composer draws a picked image as itself and a picked PDF as the mark of its kind", async () => {
   wire({
     ...transcript(),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
@@ -3349,8 +3580,8 @@ test("the composer draws a picked image as itself and a picked PDF as a badged c
 
   const picked = await within(composer).findByRole("img", { name: "lights.gif" });
   expect(picked.getAttribute("src")).toMatch(/^data:image\/gif;base64,/);
-  expect(within(composer).getByText("PDF")).toBeTruthy();
-  expect(within(composer).getByText("paper.pdf")).toBeTruthy();
+  const paper = within(composer).getByTitle("paper.pdf");
+  expect(paper.querySelector(".tabler-icon-file-type-pdf")).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   const sent = await within(screen.getByTestId("log")).findByRole("img", { name: "lights.gif" });
@@ -3411,12 +3642,13 @@ test("a reloaded message draws what the member attached rather than naming where
     "[data-slot=message]",
   ) as HTMLElement;
   expect(within(said).getByRole("img", { name: "lights.gif" }).getAttribute("src")).toBe(preview);
-  expect(within(said).getByText("PDF")).toBeTruthy();
-  expect(within(said).getByText("paper.pdf")).toBeTruthy();
+  expect(
+    within(said).getByTitle("paper.pdf").querySelector(".tabler-icon-file-type-pdf"),
+  ).toBeTruthy();
   expect(screen.queryByText(/Attached files/)).toBeNull();
 });
 
-test("an attachment whose picture will not load falls back to naming the file", async () => {
+test("an attachment whose picture will not load falls back to the mark of its kind", async () => {
   wire(
     transcript({
       messages: [
@@ -3439,7 +3671,7 @@ test("an attachment whose picture will not load falls back to naming the file", 
 
   fireEvent.error(await screen.findByRole("img", { name: "lights.gif" }));
   await waitFor(() => expect(screen.queryByRole("img", { name: "lights.gif" })).toBeNull());
-  expect(screen.getByText("lights.gif")).toBeTruthy();
+  expect(screen.getByTitle("lights.gif").querySelector(".tabler-icon-file")).toBeTruthy();
 });
 
 test("a member's own attachment opens from the bubble", async () => {
@@ -3466,7 +3698,7 @@ test("a member's own attachment opens from the bubble", async () => {
   expect(await screen.findByRole("button", { name: "Open lights.gif" })).toBeTruthy();
 });
 
-test("a shared picture whose link will not load falls back to naming the file", async () => {
+test("a shared picture whose link will not load falls back to the mark of its kind", async () => {
   wire(
     transcript({
       messages: [
@@ -3490,7 +3722,7 @@ test("a shared picture whose link will not load falls back to naming the file", 
 
   fireEvent.error(await screen.findByRole("img", { name: "portrait.jpg" }));
   await waitFor(() => expect(screen.queryByRole("img", { name: "portrait.jpg" })).toBeNull());
-  expect(screen.getByText("portrait.jpg")).toBeTruthy();
+  expect(screen.getByTitle("portrait.jpg").querySelector(".tabler-icon-file-type-jpg")).toBeTruthy();
 });
 
 test("a file pasted into the message box is attached rather than typed", async () => {
@@ -3502,7 +3734,7 @@ test("a file pasted into the message box is attached rather than typed", async (
     clipboardData: { files: [new File(["body"], "pasted.txt", { type: "text/plain" })] },
   });
 
-  expect(await screen.findByText("pasted.txt")).toBeTruthy();
+  expect(await screen.findByTitle("pasted.txt")).toBeTruthy();
   expect((screen.getByLabelText("Ask UFO") as HTMLTextAreaElement).value).toBe("");
 });
 
@@ -3774,8 +4006,8 @@ test("a turn the fleet picked back up says so on its working line", async () => 
   StreamFake.last().emit("resumed", { attempt: "attempt-one" });
 
   const resumed = await screen.findByText("Resumed after a restart");
-  expect(resumed.closest("[data-slot=marker]")).toBeTruthy();
-  expect(screen.queryByText("Applying the migration.")).toBeNull();
+  expect(resumed.closest("span.shimmer")).toBeTruthy();
+  expect(screen.getByText("Applying the migration.").closest("span.shimmer")).toBeNull();
 });
 
 test("an opened thread's box asks for a follow-up, and the start screen's starts a new chat", async () => {
@@ -3950,32 +4182,6 @@ test("a pressed starter counts the press, by the kind of row it was", async () =
   const headers = posts[0].headers as Record<string, string>;
   expect(headers["x-ufo-click"]).toBe("starter");
   expect(headers["x-ufo-click-kind"]).toBe("check_in");
-});
-
-test("the composer names the app it addresses, and the band can be taken away", async () => {
-  wire(transcript());
-  location.hash = "#/new/" + SECOND_ID;
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
-
-  await screen.findByLabelText("Ask UFO");
-
-  const page = within(screen.getByRole("main"));
-  const band = page.getByText("Second");
-  expect(band.parentElement!.querySelector("svg")).toBeTruthy();
-
-  await userEvent.click(screen.getByRole("button", { name: "Stop addressing Second" }));
-
-  expect(page.queryByText("Second")).toBeNull();
-  expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
-});
-
-test("the chat app's composer does not name itself over its own words", async () => {
-  wire(transcript());
-  location.hash = "#/agents/" + CHAT_APP_ID + "?open=new";
-  render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
-
-  await screen.findByLabelText("Ask UFO");
-  expect(screen.queryByRole("button", { name: /^Stop addressing/ })).toBeNull();
 });
 
 const SLATE = {
@@ -4297,7 +4503,7 @@ test("a standing connect is the act, pressable to the provider's own page", asyn
   );
   open();
 
-  const act = await screen.findByRole("link", { name: "Connect GitHub" });
+  const act = await screen.findByRole("link", { name: /Connect GitHub/ });
 
   expect(act.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
 });
@@ -4938,7 +5144,7 @@ test("a run that wrote a reply is marked on the reply, not on the words that wok
   expect(marked()!.textContent).not.toContain(WOKE);
 });
 
-test("the mark is the attention accent, never the fill a member's own words carry", () => {
+test("the mark rings the words it stands on, and grounds nothing", () => {
   vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
   render(
     <TranscriptScroll>
@@ -4946,11 +5152,70 @@ test("the mark is the attention accent, never the fill a member's own words carr
     </TranscriptScroll>,
   );
 
-  const mark = marked()!.className;
-  expect(mark).toContain("bg-attention");
-  expect(mark).toContain("outline-attention-ink");
-  expect(mark).not.toContain("bg-said");
-  expect(mark).not.toContain("bg-affirm");
+  const row = marked()!;
+  expect(row.className).toContain("[&_[data-slot=bubble-content]]:outline-2");
+  expect(row.className).toContain("[&_[data-slot=bubble-content]]:outline-attention-ink");
+  expect(row.className).not.toMatch(/\bbg-/);
+  expect(row.querySelectorAll("[data-slot=bubble-content]")).toHaveLength(1);
+  expect(row.matches(":has([data-slot=bubble-content])")).toBe(true);
+});
+
+test("a run that drew no bubble is ringed on the row, because there are no words to ring", () => {
+  vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  render(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[
+          {
+            role: "user",
+            text: "",
+            turn: TURN_ID,
+            files: [
+              {
+                filename: "report.csv",
+                url: "/dl/report.csv",
+                size_bytes: 2048,
+                preview_url: null,
+                media_type: "text/csv",
+              },
+            ],
+          },
+        ]}
+        focus={TURN_ID}
+      />
+    </TranscriptScroll>,
+  );
+
+  const row = marked()!;
+  expect(row.querySelector("[data-slot=bubble-content]")).toBeNull();
+  expect(row.matches(":has([data-slot=bubble-content])")).toBe(false);
+  expect(row.className).toContain("not-has-[[data-slot=bubble-content]]:outline-attention-ink");
+});
+
+test("a row that drew more than one bubble is ringed once, on the words that open it", () => {
+  render(
+    <TranscriptScroll>
+      <MessageScrollerContent>
+        <MessageScrollerItem messageId="both" mark="held">
+          <SpeechBubble>
+            <BubbleContent>{RAN}</BubbleContent>
+          </SpeechBubble>
+          <SpeechBubble>
+            <BubbleContent>{WOKE}</BubbleContent>
+          </SpeechBubble>
+        </MessageScrollerItem>
+      </MessageScrollerContent>
+    </TranscriptScroll>,
+  );
+
+  const row = document.querySelector("[data-slot=message-scroller-item]")!;
+  expect(row.className).toContain(
+    "[&_[data-slot=bubble]~[data-slot=bubble]_[data-slot=bubble-content]]:outline-none",
+  );
+  const unrung = row.querySelectorAll(
+    "[data-slot=bubble]~[data-slot=bubble] [data-slot=bubble-content]",
+  );
+  expect([...unrung].map((words) => words.textContent)).toEqual([WOKE]);
 });
 
 function markOnly() {
@@ -4974,7 +5239,10 @@ test("the mark throbs once, holds, then fades and lets the words go", async () =
 
     expect(marked()!.getAttribute("data-letting-go")).toBe("true");
     expect(marked()!.className).not.toContain("animate-marked");
-    expect(marked()!.className).toContain("bg-transparent");
+    expect(marked()!.className).toContain("[&_[data-slot=bubble-content]]:outline-transparent");
+    expect(marked()!.className).toContain(
+      "not-has-[[data-slot=bubble-content]]:outline-transparent",
+    );
 
     await act(() => vi.advanceTimersByTimeAsync(500));
 
@@ -5153,12 +5421,12 @@ test("an out-of-credit workspace says so above the composer, and offers billing 
   expect(screen.queryByRole("link", { name: "Go to billing" })).toBeNull();
 });
 
-test("the credit line takes the eyebrow from the agent it addresses, and gives it back", async () => {
+test("the credit line stands over the composer while the workspace has none, and leaves with it", async () => {
   wire(OUT_OF_CREDIT());
   render(<Chat agent={AGENT} member={MEMBER} conversationId={CONVO_ID} />);
 
-  expect(await screen.findByText("Out of credit. Ask your admin to add credit.")).toBeTruthy();
-  expect(screen.queryByText("Assistant")).toBeNull();
+  const line = await screen.findByText("Out of credit. Ask your admin to add credit.");
+  expect(line.closest("[role=status]")).toBeTruthy();
 
   /* The credit lands on the poll the mounted box already runs, so the line has to go on that
      answer — resetting the store would clear its listeners and prove nothing. */
@@ -5167,6 +5435,5 @@ test("the credit line takes the eyebrow from the agent it addresses, and gives i
     wakeAppStatus();
   });
 
-  expect(await screen.findByText("Assistant")).toBeTruthy();
-  expect(screen.queryByText(/^Out of credit\./)).toBeNull();
+  await waitFor(() => expect(screen.queryByText(/^Out of credit\./)).toBeNull());
 });

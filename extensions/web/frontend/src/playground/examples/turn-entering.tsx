@@ -12,7 +12,7 @@ export function TurnEntering() {
     <Message>
       <FaceCircle name={SPEAKER.name} photo={FACE_PHOTO} tint={SPEAKER.email} />
       <MessageContent>
-        <BubbleHeader speaker={SPEAKER} />
+        <BubbleHeader name={SPEAKER.name} />
         <Bubble entering>
           <BubbleContent>
             Support have read it and signed off. Send it to the workspace whenever the migration

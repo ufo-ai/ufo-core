@@ -35,8 +35,6 @@ import {
 import { takeFocus } from "@/kernel/focus";
 import { COLUMN } from "@/kernel/pane";
 import { Empty, usePanelRead } from "@/kernel/panel";
-import { AgentIcon } from "@/lib/agentIcon";
-import { agentName } from "@/lib/agentName";
 import { useAppStatus } from "@/lib/appStatusStore";
 import { useMe } from "@/lib/audience";
 import { cn } from "@/lib/cn";
@@ -57,7 +55,6 @@ import {
   writeDraft,
 } from "@/lib/drafts";
 import { useEarlierMessages } from "@/lib/earlier";
-import { CHAT_SURFACE } from "@/lib/mainAgent";
 import { AUTO_MODEL } from "@/lib/models";
 import { setPendingAsk, takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
 import { newChatHash, workspaceHash } from "@/lib/route";
@@ -498,14 +495,9 @@ function Composer({
     return handed?.text ?? readDraft(draftKey);
   });
   const [stopping, setStopping] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
   const model = picked ?? agent.model;
-  /** A conversation's agent reaches this box as a `ConversationAgent`, which carries no `app`, so the
-   *  chat surface arrives named but unclassed. */
-  const addressed = [agent.app, agent.name].includes(CHAT_SURFACE) ? null : agentName(agent.name);
   const { outOfCredit } = useAppStatus();
   const admin = useMe()?.admin === true;
-  const showsEyebrow = addressed !== null && !dismissed;
   const running = attachedTurn(state);
   const disabled = state.messages === null || (target.conversationId === null && state.busy);
 
@@ -581,7 +573,6 @@ function Composer({
     <PromptInput onSend={send}>
       {outOfCredit ? (
         <PromptInputEyebrow
-          tone="attention"
           glyph={<IconCreditCardOff className="size-(--size-glyph) shrink-0" />}
           label={admin ? OUT_OF_CREDIT_ADMIN : OUT_OF_CREDIT_MEMBER}
           action={
@@ -594,16 +585,6 @@ function Composer({
               </a>
             ) : null
           }
-        />
-      ) : showsEyebrow ? (
-        <PromptInputEyebrow
-          glyph={
-            agent.icon ? (
-              <AgentIcon name={agent.icon} className="size-(--size-glyph) shrink-0" />
-            ) : null
-          }
-          label={addressed}
-          onDismiss={() => setDismissed(true)}
         />
       ) : null}
       <PromptInputAttachments />
@@ -658,7 +639,7 @@ function Composer({
       <div
         className={cn(
           COLUMN,
-          "px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]",
+          "px-2xl pb-[max(var(--spacing-2xl),env(safe-area-inset-bottom))]",
           starting && "my-auto",
         )}
       >

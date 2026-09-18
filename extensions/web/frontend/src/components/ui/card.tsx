@@ -45,7 +45,7 @@ export function Card({
       data-slot="card"
       className={cn(
         "flex min-w-0 flex-col rounded-card border p-2xl text-card-foreground",
-        rows ? "gap-0 py-sm" : "gap-2xl",
+        rows ? "gap-0 overflow-hidden p-0" : "gap-2xl",
         CARD_TONES[tone],
         className,
       )}

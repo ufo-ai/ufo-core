@@ -1,50 +1,50 @@
-import { Fragment } from "react";
-
 import { IconChevronRight } from "@tabler/icons-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Card } from "@/components/ui/card";
 import {
   Item,
+  ItemActions,
   ItemContent,
   ItemDescription,
   ItemGroup,
-  ItemSeparator,
+  ItemLink,
+  ItemMedia,
   ItemTitle,
 } from "@/components/ui/item";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
-import { cn } from "@/lib/cn";
 import { agentHash } from "@/lib/route";
 import type { ChatApp } from "@/lib/types";
+import { modelLabel } from "@/lib/models";
 
 export function TurnApps({ apps }: { apps: ChatApp[] }) {
   return (
-    <ItemGroup className="mt-lg max-w-bubble">
-      {apps.map((app, index) => (
-        <Fragment key={app.id}>
-          {index ? <ItemSeparator /> : null}
-          <Item size="flush">
-            <a
-              href={agentHash(app.id)}
-              className={cn(
-                "flex min-w-0 flex-1 items-center gap-lg rounded-panel px-xl py-lg",
-                "text-inherit no-underline hover:bg-fill",
-              )}
-            >
-              <Avatar>
-                <AvatarFallback>
-                  <AgentIcon name={app.icon} />
-                </AvatarFallback>
-              </Avatar>
-              <ItemContent>
-                <ItemTitle>{agentName(app.name)}</ItemTitle>
-                <ItemDescription>{app.model}</ItemDescription>
-              </ItemContent>
-              <IconChevronRight aria-hidden className="size-icon shrink-0 text-ink-soft" />
-            </a>
-          </Item>
-        </Fragment>
+    <div className="mt-sm flex max-w-said flex-col gap-sm">
+      {apps.map((app) => (
+        <Card key={app.id} rows>
+          <ItemGroup>
+            <Item size="flush">
+              <ItemLink href={agentHash(app.id)}>
+                <ItemMedia>
+                  <Avatar>
+                    <AvatarFallback>
+                      <AgentIcon name={app.icon} />
+                    </AvatarFallback>
+                  </Avatar>
+                </ItemMedia>
+                <ItemContent>
+                  <ItemTitle>{agentName(app.name)}</ItemTitle>
+                  <ItemDescription>{modelLabel(app.model)}</ItemDescription>
+                </ItemContent>
+                <ItemActions>
+                  <IconChevronRight aria-hidden className="size-icon shrink-0 text-ink-soft" />
+                </ItemActions>
+              </ItemLink>
+            </Item>
+          </ItemGroup>
+        </Card>
       ))}
-    </ItemGroup>
+    </div>
   );
 }

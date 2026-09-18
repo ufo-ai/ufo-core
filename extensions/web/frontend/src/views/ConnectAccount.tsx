@@ -11,6 +11,7 @@ import {
 
 import { ConnectedBadge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import {
   Item,
   ItemActions,
@@ -281,44 +282,46 @@ export function ConnectAccount({
         ),
       )
     : accounts?.length ? (
-        <ItemGroup>
-          {accounts.map((account, index) => (
-            <Fragment key={account.provider}>
-              {index ? <ItemSeparator /> : null}
-              <Item>
-                <MarkTile>
-                  <BrandMark provider={account.provider} className="text-ink" />
-                </MarkTile>
-                <ItemContent>
-                  <ItemTitle>
-                    <span className="flex items-center gap-sm">
-                      {account.label}
-                      {account.connected ? <ConnectedBadge label={account.label} /> : null}
-                    </span>
-                  </ItemTitle>
-                  <ItemDescription>{AVAILABLE_IN}</ItemDescription>
-                </ItemContent>
-                <ItemActions>
-                  <Button
-                    variant={account.connected ? "row" : "outline"}
-                    size="bar"
-                    onClick={() => {
-                      setLanded(false);
-                      setAsking(account);
-                    }}
-                  >
-                    {account.connected ? "Configure" : "Connect"}
-                  </Button>
-                  {account.connected ? (
-                    <Button variant="row" size="bar" onClick={() => disconnect(account)}>
-                      Disconnect
+        <Card rows>
+          <ItemGroup>
+            {accounts.map((account, index) => (
+              <Fragment key={account.provider}>
+                {index ? <ItemSeparator /> : null}
+                <Item>
+                  <MarkTile>
+                    <BrandMark provider={account.provider} className="text-ink" />
+                  </MarkTile>
+                  <ItemContent>
+                    <ItemTitle>
+                      <span className="flex items-center gap-sm">
+                        {account.label}
+                        {account.connected ? <ConnectedBadge label={account.label} /> : null}
+                      </span>
+                    </ItemTitle>
+                    <ItemDescription>{AVAILABLE_IN}</ItemDescription>
+                  </ItemContent>
+                  <ItemActions>
+                    <Button
+                      variant={account.connected ? "row" : "outline"}
+                      size="bar"
+                      onClick={() => {
+                        setLanded(false);
+                        setAsking(account);
+                      }}
+                    >
+                      {account.connected ? "Configure" : "Connect"}
                     </Button>
-                  ) : null}
-                </ItemActions>
-              </Item>
-            </Fragment>
-          ))}
-        </ItemGroup>
+                    {account.connected ? (
+                      <Button variant="row" size="bar" onClick={() => disconnect(account)}>
+                        Disconnect
+                      </Button>
+                    ) : null}
+                  </ItemActions>
+                </Item>
+              </Fragment>
+            ))}
+          </ItemGroup>
+        </Card>
       ) : null;
 
   return (

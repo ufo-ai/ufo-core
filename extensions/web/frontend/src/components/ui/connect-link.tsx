@@ -1,44 +1,82 @@
-import { IconCheck } from "@tabler/icons-react";
+import { IconCheck, IconChevronRight, IconPlug } from "@tabler/icons-react";
 
-import { buttonVariants } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import {
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemGroup,
+  ItemMedia,
+  ItemTitle,
+  MarkTile,
+  itemVariants,
+} from "@/components/ui/item";
 import { BASE } from "@/lib/api";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { ConsentLink } from "@/lib/consent";
 import type { ChatConnect } from "@/lib/types";
 
+const ROW = cn(
+  itemVariants({ size: "row" }),
+  "min-w-0 flex-1 text-inherit no-underline",
+  "cursor-pointer border-0 bg-transparent text-start hover:bg-fill focus-visible:bg-fill",
+);
+
+/** The account a turn cannot go on without, and the same row once it has one: a card of the same
+ *  make as the files a turn sends, so what a member is asked for reads like what they are given. */
 export function ConnectLink({ connect }: { connect: ChatConnect }) {
-  const mark = connect.provider ? (
-    <BrandMark provider={connect.provider} className="size-icon" />
-  ) : null;
   const named = connect.label ?? "account";
-  if (!connect.turn) {
-    return (
-      <span
-        className={cn(
-          buttonVariants({ variant: "outline", size: "bar" }),
-          "self-start text-ink-soft",
+  const mark = (
+    <ItemMedia>
+      <MarkTile compact>
+        {connect.provider ? (
+          <BrandMark provider={connect.provider} className="size-(--size-glyph)" />
+        ) : (
+          <IconPlug aria-hidden className="size-(--size-glyph) shrink-0 text-ink-soft" />
         )}
-      >
-        {mark}
-        {named + " connected"}
-        {connect.account ? <span className="truncate">{connect.account}</span> : null}
-        <IconCheck className="size-icon text-ink" aria-hidden />
-      </span>
-    );
-  }
-  // The address the press opens is this surface's own: it mints the consent URL for this turn's request
-  // and redirects the window there, so the chip holds nothing that can go stale.
-  return (
-    <ConsentLink
-      url={BASE + "/turns/" + connect.turn + "/connect"}
-      className={cn(
-        buttonVariants({ variant: "outline", size: "bar" }),
-        "self-start no-underline",
-      )}
-    >
+      </MarkTile>
+    </ItemMedia>
+  );
+  const inside = connect.turn ? (
+    <>
       {mark}
-      {connect.label ? "Connect " + connect.label : "Connect account"}
-    </ConsentLink>
+      <ItemContent>
+        <ItemTitle>{connect.label ? "Connect " + connect.label : "Connect account"}</ItemTitle>
+        <ItemDescription>The turn waits on this.</ItemDescription>
+      </ItemContent>
+      <ItemActions>
+        <IconChevronRight aria-hidden className="size-icon shrink-0 text-ink-soft" />
+      </ItemActions>
+    </>
+  ) : (
+    <>
+      {mark}
+      <ItemContent>
+        <ItemTitle>{named + " connected"}</ItemTitle>
+        {connect.account ? <ItemDescription>{connect.account}</ItemDescription> : null}
+      </ItemContent>
+      <ItemActions>
+        <IconCheck aria-hidden className="size-icon shrink-0 text-ink" />
+      </ItemActions>
+    </>
+  );
+  return (
+    <Card rows className="mt-sm max-w-said">
+      <ItemGroup>
+        <Item size="flush">
+          {connect.turn ? (
+            /* This surface mints the consent URL for the turn's request on press, so the row holds
+               no address that can go stale. */
+            <ConsentLink url={BASE + "/turns/" + connect.turn + "/connect"} className={ROW}>
+              {inside}
+            </ConsentLink>
+          ) : (
+            <span className={cn(ROW, "cursor-default hover:bg-transparent")}>{inside}</span>
+          )}
+        </Item>
+      </ItemGroup>
+    </Card>
   );
 }

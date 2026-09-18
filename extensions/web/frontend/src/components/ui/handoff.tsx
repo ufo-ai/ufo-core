@@ -1,9 +1,11 @@
 import type { ReactNode } from "react";
 
+import { Card } from "@/components/ui/card";
+
 export function Handoff({ children }: { children: ReactNode }) {
   return (
-    <div className="flex max-w-bubble flex-col gap-sm self-start rounded-bubble border border-edge px-lg py-md">
+    <Card className="mt-sm max-w-said gap-sm">
       {children}
-    </div>
+    </Card>
   );
 }

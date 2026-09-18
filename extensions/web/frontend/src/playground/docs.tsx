@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 
 /** How wide one state needs to read. A bubble says nothing at a button's width, and fifteen buttons
  *  at a composer's width are a column nobody can scan. */
@@ -87,22 +88,24 @@ export function State({
 }) {
   const [run, again] = useState(0);
   return (
-    <figure className="m-0 flex min-w-0 flex-col rounded-card border border-edge bg-raised">
-      <div className="relative flex min-h-(--size-tile) min-w-0 items-center p-2xl">
-        <div key={run} className="min-w-0 flex-1">
-          {children}
+    <figure className="m-0 min-w-0">
+      <Card rows>
+        <div className="relative flex min-h-(--size-tile) min-w-0 items-center p-2xl">
+          <div key={run} className="min-w-0 flex-1">
+            {children}
+          </div>
+          {replay ? (
+            <span className="absolute end-sm top-sm">
+              <Button variant="outline" size="bar" onClick={() => again((shown) => shown + 1)}>
+                Play again
+              </Button>
+            </span>
+          ) : null}
         </div>
-        {replay ? (
-          <span className="absolute end-sm top-sm">
-            <Button variant="outline" size="bar" onClick={() => again((shown) => shown + 1)}>
-              Play again
-            </Button>
-          </span>
-        ) : null}
-      </div>
-      <figcaption className="min-w-0 border-t border-edge px-2xl py-lg">
-        <span className="font-mono text-label font-medium wrap-anywhere text-ink">{title}</span>
-      </figcaption>
+        <figcaption className="min-w-0 border-t border-edge px-2xl py-lg">
+          <span className="font-mono text-label font-medium wrap-anywhere text-ink">{title}</span>
+        </figcaption>
+      </Card>
     </figure>
   );
 }

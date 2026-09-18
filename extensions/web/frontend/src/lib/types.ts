@@ -1,3 +1,4 @@
+import type { TurnEnding } from "@/components/ui/turn-activity";
 import type { ActivityEvent, AskQuestion, SubagentRun } from "@/lib/contract";
 
 export type {
@@ -218,6 +219,9 @@ export type Message = {
    *  that wrote a reply, and the turn the words that woke it founded. */
   turn?: string;
   events?: ActivityEvent[];
+  /** How the turn behind these words ended, where it ended in anything but a plain answer. The
+   *  activity block draws the verdict; the words stay the agent's own. */
+  ended?: TurnEnding;
   subagents?: SubagentRun[];
   question?: ChatQuestion;
   files?: ChatFile[];

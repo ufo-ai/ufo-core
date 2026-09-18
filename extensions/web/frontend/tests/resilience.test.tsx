@@ -158,9 +158,12 @@ test("a page loaded into a running turn attaches to it and draws the step it is 
   await screen.findByText(saying("still going"));
   expect(screen.getByText("Reading the diff.")).toBeTruthy();
 
+  /* A turn that took one step states it as its settled line: there is no process to fold away, and
+     nothing the member watched is taken back. */
   stream.emit("terminal", { status: "done", model: "opus", tokens: 3, cost_micro_usd: 0 });
-  await waitFor(() => expect(screen.queryByText("Reading the diff.")).toBeNull());
-  expect(screen.getByText("3 tok")).toBeTruthy();
+  await screen.findByText("3 tok");
+  expect(screen.getByText("Reading the diff.")).toBeTruthy();
+  expect(screen.getByText("Reading the diff.").closest("button")).toBeNull();
 });
 
 test("a native retry shows a quiet reconnecting state and the stream carries on", async () => {
@@ -168,7 +171,7 @@ test("a native retry shows a quiet reconnecting state and the stream carries on"
   stream.emit("message", { text: "partial" });
   stream.fail();
   expect(await screen.findByText("Reconnecting…")).toBeTruthy();
-  expect(screen.queryByText("Connection lost — reload to see the reply.")).toBeNull();
+  expect(screen.queryByText("The connection dropped. The turn is still running; reload to read it.")).toBeNull();
   expect(StreamFake.opened.length).toBe(1);
 
   stream.emit("open", {});
@@ -186,7 +189,8 @@ test("persistent fatal closes give up with the loss stated once", async () => {
   first.emit("message", { text: "kept" });
   for (let round = 0; round < 7; round += 1) fatal(StreamFake.last());
 
-  expect(await screen.findByText("Connection lost — reload to see the reply.")).toBeTruthy();
+  expect(await screen.findByText("The connection dropped. The turn is still running; reload to read it.")).toBeTruthy();
+  expect(screen.getAllByText("The connection dropped. The turn is still running; reload to read it.")).toHaveLength(1);
   expect(screen.getByText("kept")).toBeTruthy();
   expect(StreamFake.opened.length).toBe(7);
   await waitFor(() =>

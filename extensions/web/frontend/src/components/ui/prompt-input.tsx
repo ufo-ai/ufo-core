@@ -126,7 +126,7 @@ export function PromptInput({
           held.attach(event.dataTransfer.files);
         }}
         data-field-card
-        className={cn(CONTROL, "flex flex-col gap-5xl rounded-bubble border-0 p-lg", className)}
+        className={cn(CONTROL, "flex flex-col gap-sm rounded-bubble border-0 p-md", className)}
       >
         <input
           ref={picker}
@@ -144,35 +144,24 @@ export function PromptInput({
   );
 }
 
-export type EyebrowTone = "default" | "attention";
-
-const EYEBROW_TONES: Record<EyebrowTone, string> = {
-  default: "bg-fill-strong text-ink-soft",
-  attention: "bg-attention text-attention-ink",
-};
-
-/** `attention` is the palette's second accent at the weight a status is tinted at, the one tone that
- *  asks for the member — the same one a late commitment and a stopped run take. */
+/** The line the composer carries when a member cannot send: the palette's second accent at the
+ *  weight a status is tinted at, and `role="status"`, so a screen reader hears it arrive. */
 export function PromptInputEyebrow({
   glyph,
   label,
   action,
-  tone = "default",
-  onDismiss,
 }: {
   glyph?: ReactNode;
   label: string;
   action?: ReactNode;
-  tone?: EyebrowTone;
-  onDismiss?: () => void;
 }) {
   return (
     <div
-      role={tone === "attention" ? "status" : undefined}
+      role="status"
       className={cn(
-        "-mx-lg -mt-lg -mb-2xs flex h-(--size-row) items-center justify-between",
+        "-mx-md -mt-md -mb-2xs flex h-(--size-row) items-center justify-between",
         "rounded-t-bubble pl-2xl pr-2xs text-label",
-        EYEBROW_TONES[tone],
+        "bg-attention text-attention-ink",
       )}
     >
       <span className="flex min-w-0 items-center gap-xs">
@@ -180,19 +169,6 @@ export function PromptInputEyebrow({
         <span className="truncate">{label}</span>
       </span>
       {action}
-      {onDismiss ? (
-        <Button variant="quiet" aria-label={"Stop addressing " + label} onClick={onDismiss}>
-          <svg viewBox="0 0 16 16" aria-hidden className={GLYPH}>
-            <path
-              d="m4.5 4.5 7 7m0-7-7 7"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-            />
-          </svg>
-        </Button>
-      ) : null}
     </div>
   );
 }
@@ -263,7 +239,7 @@ export function PromptInputTextarea({
 }
 
 export function PromptInputToolbar({ children }: { children: ReactNode }) {
-  return <div className="flex items-center justify-between gap-lg">{children}</div>;
+  return <div className="flex h-(--size-control) items-center justify-between gap-lg">{children}</div>;
 }
 
 export function PromptInputAttach() {

@@ -41,13 +41,13 @@ test("the ask is one card, headed by what it is about and marked at its trailing
   asking({ title: "Create new app", icon: "rocket", questions: [ASKED] });
 
   const title = await screen.findByText("Create new app");
-  const header = title.parentElement!;
-  expect(header.firstElementChild).toBe(title);
-  expect(header.lastElementChild!.getAttribute("data-slot")).toBe("avatar");
+  expect(title.getAttribute("data-slot")).toBe("card-title");
+  const header = title.closest("[data-slot=card-header]")!;
+  expect(header.lastElementChild!.getAttribute("data-slot")).toBe("card-action");
   expect(header.querySelector("[data-slot=avatar-fallback] svg")).toBeTruthy();
 
-  const card = header.parentElement!;
-  expect(card.className).toContain("rounded-panel");
+  const card = header.closest("[data-slot=card]") as HTMLElement;
+  expect(card.className).toContain("rounded-card");
   expect(card.className).toContain("border-edge");
   expect(within(card).getByRole("radio", { name: "left" })).toBeTruthy();
   expect(within(card).getByRole("button", { name: "Continue" })).toBeTruthy();
@@ -532,4 +532,149 @@ test("a selection the member did not press does not carry them off the question"
 
   expect(screen.getByRole("radio", { name: "alpha" })).toBeTruthy();
   expect(document.querySelector("[data-slot=questionnaire-stepper]")!.textContent).toBe("1/2");
+});
+
+const CREDENTIAL = {
+  sealed: "sealed-2f41",
+  reason: "The deploy log is behind an API key.",
+  prompts: [{ slot: "vercel_token", prompt: "Paste a token with read access to the project." }],
+};
+
+const ASKED_FOR = "Paste a token with read access to the project.";
+
+function handing(
+  credentials: Record<string, unknown>,
+  stores: () => Response = () => new Response("", { status: 200 }),
+) {
+  const posted: string[] = [];
+  wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/transcript": () =>
+      json({ messages: [{ role: "assistant", text: "asking" }], credentials }),
+    "/slots": () => json({ slots: [] }),
+    "/credentials$": (_url, init) => {
+      posted.push(String(init?.body ?? ""));
+      return stores();
+    },
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  return posted;
+}
+
+test("the credential a turn asks for is a row in a list, marked at its leading edge", async () => {
+  handing(CREDENTIAL);
+
+  const row = (await screen.findByText("vercel_token")).closest("[data-slot=item]") as HTMLElement;
+  expect(row.tagName).toBe("LI");
+  expect(row.parentElement!.getAttribute("data-slot")).toBe("item-group");
+  expect(row.querySelector("[data-slot=item-media] [data-slot=mark]")).toBeTruthy();
+  expect(within(row).getByText(ASKED_FOR)).toBeTruthy();
+  expect(within(row).getByRole("button", { name: "Set credential" })).toBeTruthy();
+});
+
+/** `item.tsx` keeps one inset for a dense row, so two rows in one list line up; a second spelling of
+ *  it set the two handoffs a turn draws on two different left edges. */
+test("the connect row and the credential row take one row inset", async () => {
+  wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/transcript": () =>
+      json({
+        messages: [
+          { role: "assistant", text: "asking", connect: { turn: TURN_ID, label: "GitHub" } },
+        ],
+        credentials: CREDENTIAL,
+      }),
+    "/slots": () => json({ slots: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const connect = (await screen.findByText("Connect GitHub")).closest("a")!;
+  const credential = screen.getByText("vercel_token").closest("[data-slot=item]")!;
+  const inset = (node: Element) =>
+    node.className
+      .split(" ")
+      .filter((name) => /^(gap|px|py)-/.test(name))
+      .sort();
+  expect(inset(connect)).toEqual(["gap-sm", "px-2xl", "py-sm"]);
+  expect(inset(credential)).toEqual(inset(connect));
+});
+
+/** React mirrors a controlled `value` into the element's attribute, so the secret stood in the
+ *  page's own markup. */
+test("the secret box is named and masked, and its value never reaches the markup", async () => {
+  handing(CREDENTIAL);
+
+  const box = (await screen.findByLabelText(ASKED_FOR)) as HTMLInputElement;
+  expect(box.getAttribute("type")).toBe("password");
+  expect(box.getAttribute("name")).toBe("vercel_token");
+  expect(box.getAttribute("autocomplete")).toBe("new-password");
+  expect(box.getAttribute("placeholder")).toBe("Paste the key");
+
+  await userEvent.type(box, "sk-live-secret");
+
+  expect(box.value).toBe("sk-live-secret");
+  expect(box.getAttribute("value")).toBeNull();
+  expect(document.body.innerHTML).not.toContain("sk-live-secret");
+});
+
+test("the act waits on a value", async () => {
+  handing(CREDENTIAL);
+
+  const act = (await screen.findByRole("button", { name: "Set credential" })) as HTMLButtonElement;
+  expect(act.disabled).toBe(true);
+
+  await userEvent.type(screen.getByLabelText(ASKED_FOR), "sk-live-secret");
+
+  expect(act.disabled).toBe(false);
+});
+
+test("a refusal lands on its own reserved line and leaves what was asked for standing", async () => {
+  handing(CREDENTIAL, () => new Response("The key was refused.", { status: 400 }));
+
+  const box = await screen.findByLabelText(ASKED_FOR);
+  expect(screen.getByRole("alert").textContent).toBe("");
+  expect(screen.getByRole("alert").className).toContain("min-h-lh");
+
+  await userEvent.type(box, "sk-live-secret");
+  await userEvent.click(screen.getByRole("button", { name: "Set credential" }));
+
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("The key was refused."));
+  expect(screen.getByText(ASKED_FOR)).toBeTruthy();
+  expect(screen.getByLabelText(ASKED_FOR)).toBeTruthy();
+});
+
+test("a store the network never carried says so in the same line", async () => {
+  handing(CREDENTIAL, () => {
+    throw new Error("offline");
+  });
+
+  await userEvent.type(await screen.findByLabelText(ASKED_FOR), "sk-live-secret");
+  await userEvent.click(screen.getByRole("button", { name: "Set credential" }));
+
+  await waitFor(() =>
+    expect(screen.getByRole("alert").textContent).toBe("Network error — try again."),
+  );
+});
+
+test("a stored credential marks the row and takes the box away", async () => {
+  const posted = handing(CREDENTIAL);
+
+  await userEvent.type(await screen.findByLabelText(ASKED_FOR), "sk-live-secret");
+  await userEvent.click(screen.getByRole("button", { name: "Set credential" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toBe("sealed=sealed-2f41&slot=vercel_token&value=sk-live-secret");
+  await waitFor(() => expect(screen.queryByLabelText(ASKED_FOR)).toBeNull());
+  const row = screen.getByText("vercel_token").closest("[data-slot=item]") as HTMLElement;
+  expect(within(row).getByText("Stored.")).toBeTruthy();
+  expect(row.querySelector("[data-slot=item-actions] svg")).toBeTruthy();
+});
+
+test("a credential the workspace already holds opens marked", async () => {
+  handing({ ...CREDENTIAL, prompts: [{ ...CREDENTIAL.prompts[0], stored: true }] });
+
+  const row = (await screen.findByText("vercel_token")).closest("[data-slot=item]") as HTMLElement;
+  expect(within(row).getByText("Stored.")).toBeTruthy();
+  expect(row.querySelector("input")).toBeNull();
+  expect(row.querySelector("[data-slot=item-actions] svg")).toBeTruthy();
 });

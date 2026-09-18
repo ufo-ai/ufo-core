@@ -12,7 +12,7 @@ export function TurnColleague() {
     <Message>
       <FaceCircle name={SPEAKER.name} photo={FACE_PHOTO} tint={SPEAKER.email} />
       <MessageContent>
-        <BubbleHeader speaker={SPEAKER} />
+        <BubbleHeader name={SPEAKER.name} />
         <Bubble>
           <BubbleContent>
             Draft the release note for 2.14. It has to name the topic preferences screen and the

@@ -177,7 +177,7 @@ test("the live row draws the segment's last step over its words, and names what 
   if (row.kind !== "live") throw new Error("no live row");
   expect(row.working).toBe("Reading.");
   expect(row.body).toBe("First.\n\nSecond.");
-  expect(row.sources).toEqual([]);
+  expect(row.steps).toEqual([]);
   expect(row.folded).toEqual([]);
 
   const [later] = layout([], fold(first, step("Listing.")));
@@ -194,17 +194,19 @@ test("the live row draws the segment's last step over its words, and names what 
   ]);
 });
 
-test("sources with no step of their own open an unlabelled step whose tiles stand until words arrive", () => {
+test("sources with no step of their own open an unlabelled step whose tiles stand", () => {
   const page = { kind: "web" as const, title: "Docs", url: "https://x/y", ref: "", provider: "" };
   const opened = replay([{ kind: "sources", items: [page, page] }]);
   expect(opened.steps).toEqual([{ kind: "tool", label: null, call_id: "", sources: [page], open: true }]);
   const [row] = layout([], opened);
   if (row.kind !== "live") throw new Error("no live row");
   expect(row.working).toBe(RESEARCHING);
-  expect(row.sources).toEqual([page]);
+  expect(row.steps).toEqual([{ label: "", sources: [page] }]);
+  /* Words arriving do not take the pages away: what a step read stays on its line for the whole
+     turn, so reopening the settled tree shows what the member watched. */
   const [spoke] = layout([], fold(opened, say("Here.")));
   if (spoke.kind !== "live") throw new Error("no live row");
-  expect(spoke.sources).toEqual([]);
+  expect(spoke.steps).toEqual([{ label: "", sources: [page] }]);
   expect(spoke.working).toBeNull();
 });
 
@@ -339,18 +341,33 @@ test("landing puts the answer where the live row stood and clears every wait", (
   expect(landed[3].summary).toEqual({ model: "opus", tokens: 5, cost_micro_usd: 100 });
 });
 
-test("a turn that ended without a verdict keeps the words it streamed and prices nothing", () => {
+test("a dropped stream keeps the words it streamed, prices nothing, and carries its end", () => {
   expect(settled(lost(replay([say("partial")])))).toEqual([
-    { role: "assistant", text: "partial", turn: TURN_ID },
+    { role: "assistant", text: "partial", turn: TURN_ID, ended: { kind: "lost" } },
   ]);
 });
 
-test("a turn that did not finish closes its words with the line its end carries", () => {
-  expect(settled(replay([say("Half"), ended("cancelled")]))[0].text).toBe("Half\nStopped.");
-  expect(settled(replay([ended("failed", "Boom")]))[0].text).toBe("(failed: Boom)");
-  expect(settled(replay([say("Half"), { kind: "parked", message: "Paused." }]))[0].text).toBe(
-    "Half\nPaused.",
-  );
+test("a turn that did not finish carries its end and leaves the words the model wrote alone", () => {
+  const stopped = settled(replay([say("Half"), ended("cancelled")]))[0];
+  expect([stopped.text, stopped.ended]).toEqual(["Half", { kind: "cancelled" }]);
+
+  const failed = settled(replay([ended("failed", "Boom")]))[0];
+  expect([failed.text, failed.ended]).toEqual(["", { kind: "failed" }]);
+
+  const parked = settled(replay([say("Half"), { kind: "parked", message: "Paused." }]))[0];
+  expect([parked.text, parked.ended]).toEqual(["Half", { kind: "parked", message: "Paused." }]);
+});
+
+test("a done turn that ran out of rounds carries the step-limit end", () => {
+  const record = replay([say("Half"), done("Half", undefined)]);
+  expect(settled(record)[0].ended).toBeUndefined();
+  expect(
+    settled(fold(replay([say("Half")]), {
+      kind: "terminal",
+      at: AT,
+      frame: { status: "done", text: "Half", incomplete_reason: "round_budget" },
+    }))[0].ended,
+  ).toEqual({ kind: "incomplete" });
 });
 
 test("a done turn on the auto model names no model, and its question rides its reply", () => {

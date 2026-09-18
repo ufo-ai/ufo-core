@@ -32,7 +32,7 @@ beforeEach(() => {
 });
 
 /** The one line a running turn draws, and the step it currently states. */
-const stepLine = () => document.querySelector<HTMLElement>("[data-slot=marker-content].shimmer");
+const stepLine = () => document.querySelector<HTMLElement>("span.shimmer");
 
 test("an activity frame states its complete description on the line", async () => {
   const stream = await streaming();
@@ -41,9 +41,8 @@ test("an activity frame states its complete description on the line", async () =
   const said = await screen.findByText(label);
   expect(said.className).toContain("sr-only");
 
-  const line = said.closest("[data-slot=marker-content]")!;
-  expect(line.className).toContain("shimmer");
-  expect(line.closest("[data-slot=marker]")).toBeTruthy();
+  const line = said.closest("span.shimmer")!;
+  expect(line.closest("button")).toBeNull();
   const decoded = line.querySelector("[data-slot=decode-text]")!;
   expect(decoded.querySelectorAll("[data-slot=decode-cell]")).toHaveLength(
     label.replaceAll(" ", "").length,
@@ -51,17 +50,18 @@ test("an activity frame states its complete description on the line", async () =
 
   stream.emit("activity", { text: "Listing the workspace." });
   expect(await screen.findByText("Listing the workspace.")).toBeTruthy();
-  expect(screen.queryByText(label)).toBeNull();
+  const closed = screen.getByText(label);
+  expect(closed.closest("span.shimmer")).toBeNull();
 });
 
 test("an activity frame names the guidance being loaded", async () => {
   const stream = await streaming();
   stream.emit("activity", { text: "Loading calendar guidance." });
   const said = await screen.findByText("Loading calendar guidance.");
-  expect(said.closest("[data-slot=marker-content]")!.className).toContain("shimmer");
+  expect(said.closest("span.shimmer")).toBeTruthy();
 });
 
-test("a settled turn drops the line and states none of the steps it took", async () => {
+test("a settled turn folds the steps it took behind a caret, and gives them back", async () => {
   const stream = await streaming();
   const steps = ["Listing the workspace.", "Reading the notes.", "Loading calendar guidance."];
   for (const step of steps) stream.emit("activity", { text: step });
@@ -77,7 +77,14 @@ test("a settled turn drops the line and states none of the steps it took", async
 
   expect(await screen.findByText("Looked it over.")).toBeTruthy();
   await waitFor(() => expect(stepLine()).toBeNull());
+  const caret = screen.getByRole("button", { name: "Completed reasoning" });
+  expect(caret.getAttribute("aria-expanded")).toBe("false");
   for (const step of steps) expect(screen.queryByText(step)).toBeNull();
+
+  await userEvent.click(caret);
+
+  expect(caret.getAttribute("aria-expanded")).toBe("true");
+  for (const step of steps) expect(screen.getByText(step)).toBeTruthy();
 });
 
 test("a late activity frame leaves the reply already streaming where it stands", async () => {
@@ -105,7 +112,7 @@ test("a late activity frame leaves the reply already streaming where it stands",
   expect(screen.queryByText("Reading the changelog.")).toBeNull();
 });
 
-test("a running turn states one step at a time, and holds no line for the ones before it", async () => {
+test("a running turn moves its line to the step it is on and keeps the ones before it", async () => {
   const stream = await streaming();
   stream.emit("message", { text: "Reading the changelog first." });
   stream.emit("activity", { text: "Reading the changelog." });
@@ -116,11 +123,11 @@ test("a running turn states one step at a time, and holds no line for the ones b
   stream.emit("activity", { text: "Checking the release tags." });
 
   expect(await screen.findByText("Checking the release tags.")).toBeTruthy();
-  expect(screen.queryByText("Reading the changelog.")).toBeNull();
-  expect(document.querySelectorAll("[data-slot=marker-content].shimmer")).toHaveLength(1);
+  expect(screen.getByText("Reading the changelog.").closest("span.shimmer")).toBeNull();
+  expect(document.querySelectorAll("span.shimmer")).toHaveLength(1);
 });
 
-test("an activity leaves no line behind when the turn is stopped", async () => {
+test("a stopped turn keeps the step it was on, with the stop stated under it", async () => {
   const stream = await streaming();
   stream.emit("message", { text: "Loading the triage skill." });
   stream.emit("activity", { text: "Loading calendar guidance." });
@@ -130,10 +137,13 @@ test("an activity leaves no line behind when the turn is stopped", async () => {
 
   await waitFor(() => expect(document.body.textContent).toContain("Stopped."));
   expect(stepLine()).toBeNull();
-  expect(screen.queryByText("Loading calendar guidance.")).toBeNull();
+  expect(screen.queryByRole("button", { name: /Completed reasoning/ })).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Stopped." }));
+  expect(screen.getByText("Loading calendar guidance.")).toBeTruthy();
 });
 
-test("a subagent still running is what the line states, in place of the step that dispatched it", async () => {
+test("a subagent the turn started stands under the step that dispatched it", async () => {
   const stream = await streaming();
   stream.emit("message", { text: "Handing the research off." });
   stream.emit("activity", { text: "Delegating the research." });
@@ -152,9 +162,8 @@ test("a subagent still running is what the line states, in place of the step tha
     status: "",
   });
 
-  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
-  expect(screen.queryByText("Delegating the research.")).toBeNull();
-  expect(screen.getByText("Subagent · general_purpose")).toBeTruthy();
+  expect(await screen.findByText("Subagent · general_purpose")).toBeTruthy();
+  expect(stepLine()!.textContent).toContain("Delegating the research.");
 });
 
 const RUN_CONVERSATION = "66666666-6666-4666-8666-666666666666";
@@ -179,7 +188,7 @@ test("a run's frame leaves the answer the turn has already streamed where it sta
     status: "",
   });
   expect(screen.getByText(saying(answer))).toBeTruthy();
-  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+  expect(await screen.findByText("Subagent · general_purpose")).toBeTruthy();
 
   stream.emit("subagent", {
     profile: "general_purpose",
@@ -199,10 +208,11 @@ test("a run's frame leaves the answer the turn has already streamed where it sta
   });
 
   expect(await screen.findByText(answer)).toBeTruthy();
-  expect(screen.getByText("Awaiting 1 subagent")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Completed reasoning" }));
+  expect(screen.getByText("Subagent · general_purpose")).toBeTruthy();
 });
 
-test("the turn that opened a run gives the line back when the run itself ends", async () => {
+test("a run that ended stays in the reasoning the settled reply folds away", async () => {
   const stream = await streaming();
   stream.emit("subagent_activity", {
     turn_id: "88888888-8888-4888-8888-888888888888",
@@ -212,7 +222,7 @@ test("the turn that opened a run gives the line back when the run itself ends", 
     name: "",
     status: "",
   });
-  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+  expect(await screen.findByText("Subagent · general_purpose")).toBeTruthy();
 
   stream.emit("subagent", {
     profile: "general_purpose",
@@ -233,6 +243,11 @@ test("the turn that opened a run gives the line back when the run itself ends", 
 
   expect(await screen.findByText("Its answer will follow.")).toBeTruthy();
   await waitFor(() => expect(stepLine()).toBeNull());
+  expect(screen.queryByText("Subagent · general_purpose")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Completed reasoning" }));
+
+  expect(screen.getByText("Subagent · general_purpose")).toBeTruthy();
 });
 
 test("a drain closes the round: its step settles behind it and no label carries into the next", async () => {
@@ -281,7 +296,7 @@ test("a turn with nothing to say draws no row: no words and no meta line", async
   );
 });
 
-test("a reloaded turn draws the reply alone, and none of the thoughts behind it", async () => {
+test("a reloaded turn states the one step behind its reply", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
     ...chatsOnWire([CHAT_ROW]),
@@ -301,11 +316,12 @@ test("a reloaded turn draws the reply alone, and none of the thoughts behind it"
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("It shipped Tuesday.")).toBeTruthy();
-  expect(screen.queryByText("Reading the changelog first.")).toBeNull();
+  expect(screen.getByText("Reading the changelog first.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Completed reasoning/ })).toBeNull();
   expect(stepLine()).toBeNull();
 });
 
-test("a terminal subagent event keeps the work it did out of the transcript", async () => {
+test("a subagent's steps stand in the reasoning the settled reply folds away", async () => {
   const stream = await streaming();
   const conversationId = "66666666-6666-4666-8666-666666666666";
   stream.emit("subagent", {
@@ -326,6 +342,11 @@ test("a terminal subagent event keeps the work it did out of the transcript", as
   expect(await screen.findByText("Done.")).toBeTruthy();
   expect(screen.queryByText("Subagent · general_purpose")).toBeNull();
   expect(screen.queryByText("Reading the changelog.")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Completed reasoning" }));
+
+  expect(screen.getByText("Subagent · general_purpose")).toBeTruthy();
+  expect(screen.getByText("Reading the changelog.")).toBeTruthy();
   expect(screen.queryByText("It shipped Tuesday.")).toBeNull();
 });
 
@@ -339,7 +360,7 @@ test("a turn with no tool calls renders no fold", async () => {
     cost_micro_usd: 1_000_000,
   });
   expect(await screen.findByText("Just words.")).toBeTruthy();
-  expect(screen.queryByText(/tool calls?$/)).toBeNull();
+  expect(screen.queryByRole("button", { name: /Completed reasoning/ })).toBeNull();
 });
 
 test("a cost frame prices nothing on the screen while the turn is still running", async () => {
@@ -350,7 +371,7 @@ test("a cost frame prices nothing on the screen while the turn is still running"
   stream.emit("cost", { tokens: 29_000, cost_micro_usd: 5_000 });
 
   const line = await screen.findByText("Reading the changelog.");
-  expect(line.closest("[data-slot=marker]")!.textContent).not.toContain("29K");
+  expect(line.closest("span.shimmer")!.textContent).not.toContain("29K");
   expect(screen.getByTestId("log").textContent).not.toContain("29K tok");
   expect(screen.getByTestId("log").textContent).not.toContain("1m 42s");
   clock.mockRestore();
@@ -381,14 +402,14 @@ test("a settled turn states its spend beside the mark of the model that spent it
 test("a connect frame offers the act, pressable to the address that mints its consent", async () => {
   const stream = await streaming();
   stream.emit("connect", { provider: "gmail", label: "Gmail", turn: TURN_ID });
-  const link = await screen.findByRole("link", { name: "Connect Gmail" });
+  const link = await screen.findByRole("link", { name: /Connect Gmail/ });
   expect(link.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
 });
 
 test("the consent link stands after the page re-reads the transcript", async () => {
   const stream = await streaming();
   stream.emit("connect", { provider: "gmail", label: "Gmail", turn: TURN_ID });
-  await screen.findByRole("link", { name: "Connect Gmail" });
+  await screen.findByRole("link", { name: /Connect Gmail/ });
   stream.emit("terminal", {
     status: "done",
     text: "Authorize it.",
@@ -416,7 +437,7 @@ test("the consent link stands after the page re-reads the transcript", async () 
   });
 
   await screen.findByText("Authorize it, says the record.");
-  const link = await screen.findByRole("link", { name: "Connect Gmail" });
+  const link = await screen.findByRole("link", { name: /Connect Gmail/ });
   expect(link.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
 });
 
@@ -424,15 +445,15 @@ test("a connect turn that ends wordless keeps the control it posted", async () =
   const stream = await streaming();
   stream.emit("activity", { text: "Connecting Gmail." });
   stream.emit("connect", { provider: "gmail", label: "Gmail", turn: TURN_ID });
-  await screen.findByRole("link", { name: "Connect Gmail" });
+  await screen.findByRole("link", { name: /Connect Gmail/ });
 
   stream.emit("terminal", { status: "done", text: "", model: "opus", tokens: 5, cost_micro_usd: 1 });
   await delivered();
 
-  const link = screen.getByRole("link", { name: "Connect Gmail" });
+  const link = screen.getByRole("link", { name: /Connect Gmail/ });
   expect(link.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
   expect(stepLine()).toBeNull();
-  expect(screen.queryByText("Connecting Gmail.")).toBeNull();
+  expect(screen.getByText("Connecting Gmail.")).toBeTruthy();
 });
 
 test("consent opens in a window this page owns, so its return page can close itself", async () => {
@@ -440,7 +461,7 @@ test("consent opens in a window this page owns, so its return page can close its
   const consent = { focus: vi.fn() };
   const open = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
   stream.emit("connect", { provider: "gmail", label: "Gmail", turn: TURN_ID });
-  const link = await screen.findByRole("link", { name: "Connect Gmail" });
+  const link = await screen.findByRole("link", { name: /Connect Gmail/ });
 
   await userEvent.click(link);
 
@@ -458,7 +479,7 @@ test("a blocked consent window falls through to the tab the link already opens",
   const stream = await streaming();
   const open = vi.spyOn(window, "open").mockReturnValue(null);
   stream.emit("connect", { turn: TURN_ID });
-  const link = await screen.findByRole("link", { name: "Connect account" });
+  const link = await screen.findByRole("link", { name: /Connect account/ });
   const clicked = new MouseEvent("click", { bubbles: true, cancelable: true });
 
   act(() => {
@@ -477,7 +498,8 @@ test("an apps frame draws the application the turn created, pressable to its own
   });
   const card = await screen.findByRole("link", { name: /Daily-Digest/ });
   expect(card.getAttribute("href")).toBe("#/agents/" + SECOND_ID);
-  expect(card.textContent).toContain("claude-sonnet-5");
+  expect(card.textContent).toContain("Sonnet 5");
+  expect(card.textContent).not.toContain("claude-sonnet-5");
 
   stream.emit("terminal", {
     status: "done",
@@ -499,7 +521,7 @@ test("a credentials frame arriving mid-stream renders the prompt it asks for", a
     prompts: [{ slot: "NOTION_TOKEN", prompt: "the token" }],
   });
   expect(await screen.findByText("notion authenticates with this value.")).toBeTruthy();
-  expect(await screen.findByPlaceholderText("NOTION_TOKEN")).toBeTruthy();
+  expect(await screen.findByLabelText("the token")).toBeTruthy();
 });
 
 test("an arrival the reload found undrained waits until an absorbed frame names it", async () => {
@@ -529,10 +551,13 @@ test("an arrival the reload found undrained waits until an absorbed frame names 
   );
 });
 
-test("a terminal that is not done states the status and error class it carries", async () => {
+test("a failed terminal states what to do next and keeps its error class off the screen", async () => {
   const stream = await streaming();
   stream.emit("terminal", { status: "failed", error_class: "ProviderTimeout" });
-  expect(await screen.findByText("(failed: ProviderTimeout)")).toBeTruthy();
+  expect(
+    await screen.findByText("The turn stopped before it finished. Send the message again."),
+  ).toBeTruthy();
+  expect(document.body.textContent).not.toContain("ProviderTimeout");
   expect(stream.closed).toBe(true);
 });
 
@@ -542,10 +567,15 @@ test("a cancelled turn reads as the member's own word for it", async () => {
   expect(await screen.findByText("Stopped.")).toBeTruthy();
 });
 
-test("a terminal that is not done and names no error class states the status alone", async () => {
+test("a done terminal that ran out of rounds says so over the answer it reached", async () => {
   const stream = await streaming();
-  stream.emit("terminal", { status: "failed" });
-  expect(await screen.findByText("(failed)")).toBeTruthy();
+  stream.emit("terminal", { status: "done", text: "Half of it.", incomplete_reason: "round_budget" });
+  expect(
+    await screen.findByText(
+      "The turn hit its step limit and answered with what it had. Ask for the rest.",
+    ),
+  ).toBeTruthy();
+  expect(screen.getByText(saying("Half of it."))).toBeTruthy();
 });
 
 test("a parked turn states why it stopped and closes the stream", async () => {
@@ -583,6 +613,17 @@ test("a done terminal meters the model, tokens, and spend of the turn", async ()
 });
 
 test("a member's own message states the moment it landed and nothing else", async () => {
+  await streaming();
+
+  const said = screen.getByText("go").closest("[data-slot=message]")!;
+  const meta = said.querySelector("[data-slot=marker-content]")!;
+  expect([...meta.children].map((part) => part.textContent)).toEqual([
+    expect.stringMatching(/^\d{1,2}:\d{2} (AM|PM)$/),
+  ]);
+  expect(said.querySelector('button[aria-label="Copy message"]')).toBeTruthy();
+});
+
+test("the member's own line survives the answer that lands under it", async () => {
   const stream = await streaming();
   stream.emit("terminal", {
     status: "done",
@@ -594,12 +635,12 @@ test("a member's own message states the moment it landed and nothing else", asyn
   await screen.findByText("Answered.");
 
   const said = screen.getByText("go").closest("[data-slot=message]")!;
-  const meta = said.querySelector("[data-slot=marker-content]")!;
-  expect([...meta.children].map((part) => part.textContent)).toEqual([
-    expect.stringMatching(/^\d{1,2}:\d{2} (AM|PM)$/),
-  ]);
-  expect(said.querySelector('button[aria-label="Copy message"]')).toBeTruthy();
-  expect(meta.closest("[data-slot=marker]")!.className).toContain("opacity-0");
+  expect(said.querySelector("[data-slot=marker-content]")!.textContent).toMatch(
+    /^\d{1,2}:\d{2} (AM|PM)$/,
+  );
+  expect(said.querySelector("[data-slot=message-content]")!.getAttribute("title")).toMatch(
+    /at \d{1,2}:\d{2} (AM|PM)/,
+  );
 });
 
 const ENTRY = {
@@ -767,28 +808,40 @@ const RENEWALS = {
 const tiles = () =>
   Array.from(document.querySelectorAll<HTMLElement>("[data-slot=sources] [data-slot=source-tile]"));
 
-test("the turn opens as researching and a sources frame draws a favicon tile per web site", async () => {
-  const stream = await streaming();
-  expect(await screen.findByText("Researching…")).toBeTruthy();
+const titles = (row: HTMLElement) =>
+  Array.from(row.querySelectorAll<HTMLElement>("[data-slot=source-tile]"), (tile) => tile.title);
 
-  stream.emit("sources", { items: [PRICING, SUPPORT] });
-  expect(await screen.findByText("2 sources")).toBeTruthy();
+const rows = () => Array.from(document.querySelectorAll<HTMLElement>("[data-slot=sources]"));
+
+/** A step joins the tree once the turn has closed a second one, so each of these reads the tiles
+ *  off a turn that has moved on twice. */
+async function readThenMoveOn(stream: StreamFake, items: unknown[]): Promise<void> {
+  stream.emit("sources", { items });
+  stream.emit("activity", { text: "Checking the pricing page." });
+  stream.emit("activity", { text: "Reading the order form." });
+  await screen.findByText("Reading the order form.");
+}
+
+test("a sources frame draws a favicon tile per web site the step read", async () => {
+  const stream = await streaming();
+  await readThenMoveOn(stream, [PRICING, SUPPORT]);
+
   const drawn = tiles();
   expect(drawn.map((tile) => tile.title)).toEqual([PRICING.title, SUPPORT.title]);
   const pictures = drawn.map((tile) => tile.querySelector("img")!.getAttribute("src"));
   expect(pictures).toEqual([faviconUrl(PRICING.url), faviconUrl(SUPPORT.url)]);
-  expect(pictures[0]).toBe(
-    "https://www.google.com/s2/favicons?domain=northwind.example&sz=32",
-  );
+  expect(pictures[0]).toBe("https://www.google.com/s2/favicons?domain=northwind.example&sz=32");
   expect(drawn[0].closest("a")!.getAttribute("href")).toBe(PRICING.url);
-  expect(screen.getByText("Researching…")).toBeTruthy();
 });
 
 test("web and workspace sources share one row, a page drawing its provider's mark or a page glyph", async () => {
   const stream = await streaming();
-  stream.emit("sources", { items: [PRICING, ORDER_FORM, NOTE] });
-  expect(await screen.findByText("3 sources")).toBeTruthy();
-  expect(document.querySelectorAll("[data-slot=sources]")).toHaveLength(1);
+  await readThenMoveOn(stream, [PRICING, ORDER_FORM, NOTE]);
+
+  expect(rows()).toHaveLength(1);
+  expect(
+    screen.getByRole("img", { name: [PRICING.title, ORDER_FORM.title, NOTE.title].join(", ") }),
+  ).toBeTruthy();
   const [site, page, note] = tiles();
   expect(site.querySelector("img")).toBeTruthy();
   expect(page.querySelector("img")).toBeNull();
@@ -797,49 +850,100 @@ test("web and workspace sources share one row, a page drawing its provider's mar
   expect(note.querySelector("svg")).toBeTruthy();
 });
 
-test("the research tiles clear when a tool step begins, and a step's own tiles stand under it", async () => {
+test("a step's tiles stand on its own line, and a page named again adds no second tile", async () => {
   const stream = await streaming();
   stream.emit("sources", { items: [PRICING] });
-  expect(await screen.findByText("1 source")).toBeTruthy();
-
   stream.emit("activity", { text: "Checking the pricing page." });
-  expect(await screen.findByText("Checking the pricing page.")).toBeTruthy();
-  expect(screen.queryByText("Researching…")).toBeNull();
-  await waitFor(() => expect(tiles()).toHaveLength(0));
-
   stream.emit("sources", { items: [PRICING, SUPPORT, RENEWALS] });
-  expect(await screen.findByText("3 sources")).toBeTruthy();
-  expect(tiles().map((tile) => tile.title)).toEqual([PRICING.title, SUPPORT.title]);
-  expect(screen.getByText("Checking the pricing page.")).toBeTruthy();
-
   stream.emit("activity", { text: "Reading the order form." });
   expect(await screen.findByText("Reading the order form.")).toBeTruthy();
-  await waitFor(() => expect(tiles()).toHaveLength(0));
+
+  const drawn = rows();
+  expect(drawn).toHaveLength(2);
+  expect(titles(drawn[0])).toEqual([PRICING.title]);
+  expect(titles(drawn[1])).toEqual([PRICING.title, SUPPORT.title]);
+  expect(drawn[1].closest(".unfolds")!.textContent).toContain("Checking the pricing page.");
 });
 
-test("a page named again adds no second tile, and the tiles leave with the opening line", async () => {
+test("the steps and what they read stay on the line while the answer streams under them", async () => {
   const stream = await streaming();
-  stream.emit("sources", { items: [PRICING] });
-  stream.emit("sources", { items: [PRICING, SUPPORT] });
-  expect(await screen.findByText("2 sources")).toBeTruthy();
-  expect(tiles()).toHaveLength(2);
-  expect(screen.getByText("Researching…")).toBeTruthy();
+  await readThenMoveOn(stream, [PRICING, SUPPORT]);
 
   stream.emit("message", { text: "The team plan is $30 a seat." });
+
   expect(await screen.findByText(saying("The team plan is $30 a seat."))).toBeTruthy();
   expect(screen.queryByText("Researching…")).toBeNull();
-  expect(tiles()).toHaveLength(0);
+  expect(tiles()).toHaveLength(2);
+  expect(screen.getByText("Checking the pricing page.")).toBeTruthy();
 });
 
 test("a favicon the service cannot draw falls back to the globe", async () => {
   const stream = await streaming();
-  stream.emit("sources", { items: [PRICING] });
-  const [tile] = await waitFor(() => {
-    const found = tiles();
-    expect(found).toHaveLength(1);
-    return found;
-  });
+  await readThenMoveOn(stream, [PRICING]);
+  const [tile] = tiles();
+
   act(() => tile.querySelector("img")!.dispatchEvent(new Event("error")));
+
   await waitFor(() => expect(tile.querySelector("img")).toBeNull());
   expect(document.querySelector("[data-slot=source-tile] svg")).toBeTruthy();
+});
+
+/* The tree is gated on a second closed step (`folds`, src/components/ui/turn-activity.tsx:109),
+   so the first step a turn closes — and every page it read there — is drawn nowhere. */
+test("the first step a turn closes stands on the line with what it read", async () => {
+  const stream = await streaming();
+  stream.emit("sources", { items: [PRICING] });
+  stream.emit("activity", { text: "Checking the pricing page." });
+  expect(await screen.findByText("Checking the pricing page.")).toBeTruthy();
+
+  expect(tiles()).toHaveLength(1);
+});
+
+/** The row a step is drawn in, which `unfolds` opens to the height its line needs. */
+function unfolded(step: string): HTMLElement {
+  const row = [...document.querySelectorAll<HTMLElement>(".unfolds")].find(
+    (drawn) => drawn.textContent === step,
+  );
+  if (!row) throw new Error(step + " stands in no row");
+  return row;
+}
+
+test("a step arriving leaves the rows above it where they are, stem and all", async () => {
+  const stream = await streaming();
+  const steps = ["Listing the workspace.", "Reading the notes.", "Loading calendar guidance."];
+  stream.emit("activity", { text: steps[0] });
+  stream.emit("activity", { text: steps[1] });
+  await screen.findByText(steps[1]);
+
+  const first = unfolded(steps[0]);
+  expect(first.querySelectorAll("[aria-hidden]").length).toBeGreaterThan(0);
+
+  stream.emit("activity", { text: steps[2] });
+  await screen.findByText(steps[2]);
+  await waitFor(() => expect(unfolded(steps[1])).toBeTruthy());
+
+  expect(unfolded(steps[0])).toBe(first);
+});
+
+test("a document the deploy can address no way at all is named, and offers no act", async () => {
+  const stream = await streaming();
+  stream.emit("message", { text: "Here it is." });
+  stream.emit("files", {
+    files: [
+      {
+        filename: "notes.md",
+        url: null,
+        size_bytes: 3072,
+        preview_url: null,
+        media_type: "text/markdown",
+      },
+    ],
+  });
+
+  const named = await screen.findByText("notes.md");
+  expect(named.closest("[data-slot=item]")).toBeTruthy();
+  expect(screen.getByText("3 kB")).toBeTruthy();
+  expect(named.closest("button")).toBeNull();
+  expect(named.closest("a")).toBeNull();
+  expect(screen.queryByRole("button", { name: /notes\.md/ })).toBeNull();
 });

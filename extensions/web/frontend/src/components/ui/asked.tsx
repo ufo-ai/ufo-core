@@ -2,7 +2,20 @@ import { useEffect, useRef, useState } from "react";
 
 import { IconCheck } from "@tabler/icons-react";
 
+import { Fragment } from "react";
+
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Card, CardAction, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemGroup,
+  ItemMedia,
+  ItemSeparator,
+  ItemTitle,
+} from "@/components/ui/item";
 import {
   Questionnaire,
   QuestionnaireActions,
@@ -18,12 +31,10 @@ import {
   QuestionnaireSubmit,
   QuestionnaireTitle,
   KEY,
-  ROW,
   type QuestionnaireItemDefinition,
 } from "@/components/ui/questionnaire";
 import { Meta } from "@/components/ui/meta";
 import { AgentIcon } from "@/lib/agentIcon";
-import { cn } from "@/lib/cn";
 import type { ChatQuestion, QuestionEntry, QuestionOption } from "@/lib/types";
 
 const MAX_ANSWER_OPTIONS = 10;
@@ -85,23 +96,30 @@ function suggested(entry: QuestionEntry): QuestionOption[] {
 
 export function Settled({ rows, restated }: { rows: SettledRow[]; restated: boolean }) {
   return (
-    <div className="flex flex-col gap-md rounded-panel bg-fill p-lg">
+    <ItemGroup className="-mx-2xl">
       {rows.map(({ entry, answer }, index) => {
         const words = restated ? answer.slice(0, -(entry.question.length + 3)) : answer;
         return (
-          <div key={index} className="flex flex-col gap-sm">
-            <div className="text-ui leading-chrome font-medium text-pretty">{entry.question}</div>
-            <div className={cn(ROW, "bg-surface text-ink-soft")}>
-              <span aria-hidden className={KEY}>
-                {answerKey(entry, words)}
-              </span>
-              <span className="min-w-0 flex-1 truncate">{words}</span>
-              <IconCheck aria-hidden className="size-icon shrink-0" />
-            </div>
-          </div>
+          <Fragment key={index}>
+            {index ? <ItemSeparator /> : null}
+            <Item size="row">
+              <ItemMedia>
+                <span aria-hidden className={KEY}>
+                  {answerKey(entry, words)}
+                </span>
+              </ItemMedia>
+              <ItemContent>
+                <ItemTitle>{words}</ItemTitle>
+                <ItemDescription whole>{entry.question}</ItemDescription>
+              </ItemContent>
+              <ItemActions>
+                <IconCheck aria-hidden className="size-icon shrink-0 text-ink-soft" />
+              </ItemActions>
+            </Item>
+          </Fragment>
         );
       })}
-    </div>
+    </ItemGroup>
   );
 }
 
@@ -150,18 +168,20 @@ export function Asked({
   const moving = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => clearTimeout(moving.current ?? undefined), []);
   return (
-    <div className="mt-lg flex max-w-bubble flex-col gap-lg rounded-panel border border-edge p-xl">
+    <Card className="mt-sm max-w-said gap-lg">
       {question.title || question.icon ? (
-        <div className="flex items-center gap-lg">
-          <div className="min-w-0 flex-1 text-label font-medium text-ink-soft">{question.title}</div>
+        <CardHeader>
+          <CardTitle>{question.title}</CardTitle>
           {question.icon ? (
-            <Avatar>
-              <AvatarFallback>
-                <AgentIcon name={question.icon} />
-              </AvatarFallback>
-            </Avatar>
+            <CardAction>
+              <Avatar>
+                <AvatarFallback>
+                  <AgentIcon name={question.icon} />
+                </AvatarFallback>
+              </Avatar>
+            </CardAction>
           ) : null}
-        </div>
+        </CardHeader>
       ) : null}
       {settled.length ? <Settled rows={settled} restated={asked.length !== 1} /> : null}
       {prose.map(({ entry, index }) => (
@@ -247,6 +267,6 @@ export function Asked({
           </QuestionnaireActions>
         </Questionnaire>
       ) : null}
-    </div>
+    </Card>
   );
 }

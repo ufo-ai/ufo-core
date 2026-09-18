@@ -1,9 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 
+import { AvatarGroupCount } from "@/components/ui/avatar";
 import { AvatarStack, type AvatarStackPerson } from "@/components/ui/avatar-stack";
 
-const OVERLAP = "-ml-2xs";
+const OVERLAP = "[&>*:not(:first-child)]:-ml-2xs";
+const RING = "border-[length:var(--spacing-hair)]";
 const GAP = /(?<![\w-])gap-/;
 
 const TEAM: AvatarStackPerson[] = [
@@ -47,15 +49,14 @@ test("the stack draws three faces and states the rest as a count", () => {
   expect(screen.queryByText("I")).toBeNull();
 });
 
-test("the overlap is the stack's own, spelled on every circle after the first", () => {
+test("the overlap is the group's own, so a container spaces the stack without pulling it apart", () => {
   render(<AvatarStack people={TEAM} />);
   const stack = screen.getByRole("img", { name: EVERYONE });
   expect(GAP.test(stack.className)).toBe(false);
-  const circles = circlesOf(stack);
-  expect(circles[0].className).not.toContain(OVERLAP);
-  for (const circle of circles.slice(1)) {
-    expect(circle.className).toContain(OVERLAP);
-    expect(circle.className).toContain("border-card");
+  expect(stack.className).toContain(OVERLAP);
+  for (const circle of circlesOf(stack)) {
+    expect(circle.className).toContain(RING);
+    expect(circle.className).toContain("border-surface");
   }
 });
 
@@ -137,4 +138,25 @@ test("a member the workspace holds a picture for is drawn by it", async () => {
   );
   await vi.waitFor(() => expect(asked).toEqual(["/surface/web/members/m1/photo?v=abc123"]));
   expect(screen.getByText("A")).toBeTruthy();
+});
+
+test("a count closing a run of marks is that square, and one closing faces is a circle", () => {
+  const { container, unmount } = render(<AvatarGroupCount count={3} />);
+  const square = container.querySelector("[data-slot=avatar]") as HTMLElement;
+  expect(square.textContent).toBe("+3");
+  expect(square.className).toContain("rounded-key");
+  expect(square.className).not.toContain("rounded-full");
+  unmount();
+
+  render(<AvatarStack people={TEAM} />);
+  const circle = screen.getByText("+2").closest("[data-slot=avatar]") as HTMLElement;
+  expect(circle.className).toContain("rounded-full");
+  expect(circle.className).not.toContain("rounded-key");
+});
+
+test("the kit's stack answers to its own name, with one mark per face and the count", () => {
+  const { container } = render(<AvatarStack people={TEAM} />);
+  const stack = container.querySelector("[data-slot=avatar-stack]");
+  expect(stack).toBeTruthy();
+  expect(stack!.querySelectorAll("[data-slot=avatar]")).toHaveLength(4);
 });

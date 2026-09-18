@@ -160,7 +160,7 @@ const GROWING_CELL = "col-start-1 row-start-1 w-full";
 
 const BARE = cn(
   "border-0 bg-transparent p-0 text-field-ink font-sans",
-  "text-label placeholder:text-ink-faint",
+  "text-body placeholder:text-ink-faint",
 );
 
 /** The value is drawn twice, so the box grows on the browser's own layout pass: measuring `scrollHeight`

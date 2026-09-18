@@ -1,25 +1,23 @@
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { SheetHost } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { resetAppStatusStore } from "@/lib/appStatusStore";
-import { resetChatStore, useChat } from "@/lib/chatStore";
+import { resetChatStore, updateChat, useChat } from "@/lib/chatStore";
 import { clearDraft } from "@/lib/drafts";
 import { sendMessage, type ChatTarget } from "@/lib/turnStream";
 import { Chat, type ChatProps } from "@/views/Chat";
 import {
-  PACES,
   SCENARIOS,
+  SIMULATED_CONVERSATION as CONVERSATION,
   SIMULATED_MODEL,
-  type Pace,
   type Scenario,
 } from "@/playground/simulator/scenarios";
-import { armScenario, clearWire, holdPace, installWire } from "@/playground/simulator/wire";
+import { armScenario, clearWire, installWire } from "@/playground/simulator/wire";
 
 export const SIMULATOR_SLUG = "simulator";
 export const SIMULATOR_NAME = "Chat simulator";
-
-const CONVERSATION = "9f1c7a20-0000-4000-8000-0000000000e1";
 
 const AGENT: ChatProps["agent"] = {
   id: "9f1c7a20-0000-4000-8000-0000000000e2",
@@ -55,7 +53,6 @@ const THREAD = "flex min-h-0 min-w-0 flex-1 flex-col";
  *  portal is never running beside them. */
 export function ChatSimulator() {
   const [installed, setInstalled] = useState(false);
-  const [pace, setPace] = useState<Pace>("fast");
   const [armed, setArmed] = useState(SCENARIOS[0].id);
   const [generation, setGeneration] = useState(0);
   const state = useChat(CONVERSATION);
@@ -67,11 +64,15 @@ export function ChatSimulator() {
     return restore;
   }, []);
 
-  useEffect(() => holdPace(pace), [pace]);
-
   const start = (scenario: Scenario) => {
     armScenario(scenario);
     setArmed(scenario.id);
+    const cast = scenario.cast;
+    if (cast)
+      updateChat(CONVERSATION, (state) => ({
+        ...state,
+        messages: [...(state.messages ?? []), ...cast],
+      }));
     void sendMessage(TARGET, scenario.ask, scenario.ask);
   };
 
@@ -101,20 +102,6 @@ export function ChatSimulator() {
             </Button>
           ))}
         </div>
-        <div className={GROUP} role="group" aria-label="Pace">
-          <span className={LABEL}>Pace</span>
-          {PACES.map((option) => (
-            <Button
-              key={option.pace}
-              variant="option"
-              size="bar"
-              aria-pressed={pace === option.pace}
-              onClick={() => setPace(option.pace)}
-            >
-              {option.label}
-            </Button>
-          ))}
-        </div>
         <Button variant="outline" size="bar" onClick={reset}>
           Reset
         </Button>
@@ -122,13 +109,15 @@ export function ChatSimulator() {
       <div className={THREAD}>
         {installed ? (
           <TooltipProvider>
-            <Chat
-              key={generation}
-              agent={AGENT}
-              member={MEMBER}
-              conversationId={CONVERSATION}
-              focusComposer
-            />
+            <SheetHost>
+              <Chat
+                key={generation}
+                agent={AGENT}
+                member={MEMBER}
+                conversationId={CONVERSATION}
+                focusComposer
+              />
+            </SheetHost>
           </TooltipProvider>
         ) : null}
       </div>

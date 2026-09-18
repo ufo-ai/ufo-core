@@ -965,7 +965,7 @@ test("the suggestions hold their cards' place while the ranking is read", async 
 
   rank!();
 
-  const settled = (await screen.findByText(HEROES[0].line)).closest("li")!;
+  const settled = (await screen.findByText(HEROES[0].line)).closest("[data-slot=card]") as HTMLElement;
   expect(settled.className.split(" ")).toEqual(
     expect.arrayContaining(waiting[0].className.split(" ")),
   );
@@ -976,8 +976,8 @@ test("a suggestion card draws the surface a connection card draws", async () => 
   location.hash = automationsHash();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const card = (await screen.findByText(HEROES[0].line)).closest("li")!;
-  for (const held of ["rounded-card", "border-edge", "bg-raised", "p-2xl"])
+  const card = (await screen.findByText(HEROES[0].line)).closest("[data-slot=card]")!;
+  for (const held of ["rounded-card", "border-edge", "bg-card", "p-2xl"])
     expect(card.className).toContain(held);
   expect(card.className).not.toContain("rounded-panel");
 });
@@ -1175,7 +1175,7 @@ test("a suggestion card is drawn as a connection card is: mark, title, line, and
   location.hash = automationsHash();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const card = (await screen.findByText(HEROES[0].line)).closest("li")!;
+  const card = (await screen.findByText(HEROES[0].line)).closest("[data-slot=card]") as HTMLElement;
   expect(card.className).toContain("rounded-card");
   expect(card.className).toContain("border-edge");
   const tile = card.querySelector("[data-slot=mark]")!;
@@ -1204,7 +1204,7 @@ test("a suggestion opens a new chat with the main agent", async () => {
   location.hash = automationsHash();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click((await screen.findByText(HEROES[0].line)).closest("li")!);
+  await userEvent.click((await screen.findByText(HEROES[0].line)).closest("[data-slot=card]")!);
 
   await vi.waitFor(() => expect(location.hash).toBe(newChatHash(AGENT.id)));
 });
