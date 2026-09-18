@@ -1,9 +1,9 @@
 """One workspace's member profiles: the name a member is drawn under and the picture beside it.
 
-A profile has three writers and they rank. The member's own edit outranks what the Slack install
-reports, which outranks what gravatar answers for their address, so a prefill job fills what is
-empty or derived and never overwrites a member's own choice. The rank is enforced at the one write
-rather than by each writer checking before it acts.
+A profile's writers rank. The member's own edit outranks what their sign-in or the Slack install
+reports, which outranks what gravatar answers for their address, so a prefill fills what is empty
+or derived and never overwrites a member's own choice. The rank is enforced at the one write rather
+than by each writer checking before it acts.
 
 Every stored picture is normalized on the way in — centre-cropped square, bounded to
 `PROFILE_PHOTO_DIMENSION`, re-encoded as WebP — so what a member uploads, what Slack hosts, and what
@@ -33,9 +33,14 @@ from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.schema import tables
 
-ProfileSource = Literal["member", "slack", "gravatar"]
+ProfileSource = Literal["member", "signin", "slack", "gravatar"]
 
-PROFILE_SOURCE_RANK: dict[ProfileSource, int] = {"gravatar": 1, "slack": 2, "member": 3}
+PROFILE_SOURCE_RANK: dict[ProfileSource, int] = {
+    "gravatar": 1,
+    "signin": 2,
+    "slack": 2,
+    "member": 3,
+}
 
 PROFILE_PHOTO_DIMENSION = 256
 PROFILE_PHOTO_MEDIA_TYPE = "image/webp"
@@ -55,11 +60,14 @@ class InvalidProfilePhoto(ValueError):
 class MemberProfile:
     """What one member is called and whether a picture stands for them. `name` is None until
     somebody names them, so a reader falls through `profile_name` rather than inventing one;
-    `photo_digest` is None until a picture lands, which is what tells a face from initials."""
+    `given_name` is what a greeting opens with, carried only when the source that named them
+    reported it as its own field — never split off `name`; `photo_digest` is None until a picture
+    lands, which is what tells a face from initials."""
 
     id: UUID
     email: str
     name: str | None
+    given_name: str | None
     name_source: ProfileSource | None
     photo_digest: str | None
     photo_source: ProfileSource | None
@@ -92,6 +100,7 @@ async def read_profiles(
             tables.member.c.id,
             tables.member.c.email,
             tables.member.c.display_name,
+            tables.member.c.given_name,
             tables.member.c.display_name_source,
             tables.member.c.photo_digest,
             tables.member.c.photo_source,
@@ -199,9 +208,17 @@ class MemberProfiles:
             return None
         return await self.blob.get(photo_blob_key(member_id))
 
-    async def set_name(self, member_id: UUID, name: str | None, source: ProfileSource) -> bool:
-        """Name this member, or clear the name so the derived one answers again. Answers whether
-        the write landed — False where a stronger source already named them."""
+    async def set_name(
+        self,
+        member_id: UUID,
+        name: str | None,
+        source: ProfileSource,
+        given_name: str | None = None,
+    ) -> bool:
+        """Name this member, or clear the name so the derived one answers again. `given_name` rides
+        the same write under the same source, so a source that reports no first name of its own
+        clears one a weaker source left. Answers whether the write landed — False where a stronger
+        source already named them."""
         cleaned = _cleaned_name(name)
         async with workspace_tx() as connection:
             if not await self._outranks(
@@ -211,11 +228,22 @@ class MemberProfiles:
             await connection.execute(
                 self._row(member_id).values(
                     display_name=cleaned,
+                    given_name=None if cleaned is None else _cleaned_name(given_name),
                     display_name_source=None if cleaned is None else source,
                     updated_at=sa.func.now(),
                 )
             )
         return True
+
+    async def expect_photo(self, member_id: UUID, url: str) -> None:
+        """Record where this member's sign-in says their picture is hosted, for the sign-in photo
+        job to fetch on its next tick. Only the address moves here: the bytes are derived state and
+        the ranked write that stores them is the job's, so a member's own picture is never
+        displaced by recording an address."""
+        async with workspace_tx() as connection:
+            await connection.execute(
+                self._row(member_id).values(signin_photo_url=url, updated_at=sa.func.now())
+            )
 
     async def set_photo(self, member_id: UUID, data: bytes, source: ProfileSource) -> str | None:
         """Store a picture for this member and answer its digest, or None where a stronger source
@@ -285,6 +313,7 @@ def _profile(row: sa.Row) -> MemberProfile:
         id=row.id,
         email=row.email,
         name=row.display_name,
+        given_name=row.given_name,
         name_source=row.display_name_source,
         photo_digest=row.photo_digest,
         photo_source=row.photo_source,

@@ -1,7 +1,7 @@
 mod harness;
 
 use chrono::{Duration, Utc};
-use harness::{ledger_pool, spawn_http};
+use harness::{ledger_pool, spawn_http, Exchange};
 use reqwest::redirect::Policy;
 use reqwest::StatusCode;
 use ufo_control::catalogue::Messages;
@@ -17,7 +17,7 @@ use ufo_control::gateway::{
 use ufo_control::invite::InviteCodes;
 use ufo_control::lifecycle::Sequences;
 use ufo_control::shared::SharedWorkspaces;
-use ufo_control::store::OnboardStore;
+use ufo_control::store::{OnboardClaim, OnboardStore};
 use ufo_control::token::{mint_token, sign, SESSION_COOKIE};
 use ufo_control::web::{
     ASSET_CACHE, ILLUSTRATION_BYTES, ILLUSTRATION_PATH, LOGIN_PAGE, LOGO_PATH, LOGO_PNG_BYTES,
@@ -35,6 +35,7 @@ const SIGNUP_KEY: &str = "ufo";
 struct Rig {
     base: String,
     pool: deadpool_postgres::Pool,
+    serve_log: std::sync::Arc<std::sync::Mutex<Vec<Exchange>>>,
 }
 
 async fn rig(workos: Vec<(u16, String)>, serve: Vec<(u16, String)>, gate: bool) -> Rig {
@@ -49,7 +50,7 @@ async fn rig_with(
 ) -> Rig {
     let pool = ledger_pool().await;
     let (workos_base, _) = spawn_http(workos).await;
-    let (serve_base, _) = spawn_http(serve).await;
+    let (serve_base, serve_log) = spawn_http(serve).await;
     let store = OnboardStore::new(pool.clone());
     let workspaces = SharedWorkspaces {
         workspace_url: "https://app.flyingobject.ai".to_string(),
@@ -98,7 +99,11 @@ async fn rig_with(
     tokio::spawn(async move {
         let _ = axum::serve(listener, router(state)).await;
     });
-    Rig { base, pool }
+    Rig {
+        base,
+        pool,
+        serve_log,
+    }
 }
 
 fn client() -> reqwest::Client {
@@ -574,6 +579,55 @@ async fn a_granted_domain_founds_its_workspace_and_signs_the_founder_in() {
     );
     assert!(screen.contains(BILLING_CHOICE), "{screen}");
     assert!(screen.contains("first\t1"), "{screen}");
+}
+
+#[tokio::test]
+async fn the_name_the_sign_in_reported_reaches_the_seat() {
+    let rig = rig(
+        vec![],
+        vec![
+            (200, r#"{"choices":[]}"#.to_string()),
+            (
+                200,
+                r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true,"founding":true}"#
+                    .to_string(),
+            ),
+        ],
+        false,
+    )
+    .await;
+    OnboardStore::new(rig.pool.clone())
+        .insert_claim(&OnboardClaim {
+            claim_id: uuid::Uuid::new_v4(),
+            email: "founder@acme.com".to_string(),
+            email_domain: "acme.com".to_string(),
+            signup_subject: "acme.com".to_string(),
+            surface: "terminal".to_string(),
+            surface_ref: "session-1".to_string(),
+            expires_at: Utc::now() + Duration::minutes(10),
+            verified_at: Some(Utc::now()),
+            invite_id: None,
+            display_name: Some("Rae Whitlock".to_string()),
+            given_name: Some("Rae".to_string()),
+            picture_url: Some("https://lh3.googleusercontent.com/a/ACg8ocRae=s96-c".to_string()),
+        })
+        .await
+        .unwrap();
+
+    let screen = turn(&rig, "session-1", "").await;
+    assert!(
+        screen.contains("say\tSigned in: founder@acme.com"),
+        "{screen}"
+    );
+    let exchanges = rig.serve_log.lock().unwrap();
+    let body: serde_json::Value = serde_json::from_str(&exchanges[1].body).unwrap();
+    assert_eq!(exchanges[1].path, "/internal/onboard/seat");
+    assert_eq!(body["display_name"], "Rae Whitlock");
+    assert_eq!(body["given_name"], "Rae");
+    assert_eq!(
+        body["picture_url"],
+        "https://lh3.googleusercontent.com/a/ACg8ocRae=s96-c"
+    );
 }
 
 #[tokio::test]

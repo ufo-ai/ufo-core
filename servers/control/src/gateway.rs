@@ -16,7 +16,7 @@ use crate::email_send::{self, EmailSends};
 use crate::hud;
 use crate::invite::{InviteCodes, InviteError, Redemption, SignupProfile};
 use crate::lifecycle::{self, Sequences};
-use crate::shared::{EnsuredWorkspace, SeatError, SharedWorkspaces, WorkspaceChoice};
+use crate::shared::{EnsuredWorkspace, SeatError, SeatFace, SharedWorkspaces, WorkspaceChoice};
 use crate::store::{OnboardClaim, OnboardStore};
 use crate::token;
 use crate::web::{
@@ -237,7 +237,12 @@ impl Onboarding {
         if choices.len() == 1 && !create_available {
             let ensured = self
                 .workspaces
-                .join(&choices[0], &claim.signup_subject, &claim.email)
+                .join(
+                    &choices[0],
+                    &claim.signup_subject,
+                    &claim.email,
+                    seat_face(claim),
+                )
                 .await?;
             return Ok(Chosen::Ensured(ensured, false));
         }
@@ -273,7 +278,12 @@ impl Onboarding {
         };
         let ensured = self
             .workspaces
-            .join(selected, &claim.signup_subject, &claim.email)
+            .join(
+                selected,
+                &claim.signup_subject,
+                &claim.email,
+                seat_face(claim),
+            )
             .await?;
         Ok(Chosen::Ensured(ensured, false))
     }
@@ -310,7 +320,12 @@ impl Onboarding {
             goals: profile.goals,
         });
         self.workspaces
-            .create(&claim.signup_subject, &claim.email, carried.as_ref())
+            .create(
+                &claim.signup_subject,
+                &claim.email,
+                carried.as_ref(),
+                seat_face(claim),
+            )
             .await
     }
 
@@ -815,10 +830,10 @@ async fn auth_callback(
     let refusal = match bound {
         Some(bound) if !code.is_empty() && bound == carry.session => {
             match state.onboarding.verifier.exchange(&code).await {
-                Ok(email) => match state
+                Ok(signed_in) => match state
                     .onboarding
                     .claims
-                    .admit_verified(&email, WEB_CHANNEL, &carry.session)
+                    .admit_verified(&signed_in, WEB_CHANNEL, &carry.session)
                     .await
                 {
                     Ok(_) => None,
@@ -838,6 +853,14 @@ async fn auth_callback(
         format!("/login?{}", encode_pairs(&landing))
     };
     Redirect::to(&target).into_response()
+}
+
+fn seat_face(claim: &OnboardClaim) -> SeatFace<'_> {
+    SeatFace {
+        display_name: claim.display_name.as_deref(),
+        given_name: claim.given_name.as_deref(),
+        picture_url: claim.picture_url.as_deref(),
+    }
 }
 
 /// The `__Host-` prefix is enforced by the browser: it refuses to set such a cookie with a `Domain`,

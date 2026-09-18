@@ -94,6 +94,12 @@ pub fn reshape() -> Vec<String> {
             store::TABLE
         ),
         format!(
+            "alter table {} add column if not exists display_name text, \
+             add column if not exists given_name text, \
+             add column if not exists picture_url text",
+            store::TABLE
+        ),
+        format!(
             "alter table {} add column if not exists signup_subject text",
             invite::TABLE
         ),

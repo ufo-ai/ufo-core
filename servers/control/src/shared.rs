@@ -88,6 +88,19 @@ struct SeatRequest<'a> {
     email: &'a str,
     signup_subject: &'a str,
     profile: Option<&'a SignupProfile>,
+    #[serde(flatten)]
+    face: SeatFace<'a>,
+}
+
+/// What the sign-in that verified a member reported about them, offered to their profile at the
+/// seat: the full name they are drawn under, the given name a greeting opens with, and where their
+/// picture is hosted. A face is what the portal calls a name drawn beside a picture; any part may
+/// be absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct SeatFace<'a> {
+    pub display_name: Option<&'a str>,
+    pub given_name: Option<&'a str>,
+    pub picture_url: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -205,12 +218,14 @@ impl SharedWorkspaces {
         signup_subject: &str,
         email: &str,
         profile: Option<&SignupProfile>,
+        face: SeatFace<'_>,
     ) -> Result<EnsuredWorkspace, SeatError> {
         self.seat(
             deterministic_workspace_id(signup_subject),
             signup_subject,
             email,
             profile,
+            face,
         )
         .await
     }
@@ -220,12 +235,15 @@ impl SharedWorkspaces {
         choice: &WorkspaceChoice,
         signup_subject: &str,
         email: &str,
+        face: SeatFace<'_>,
     ) -> Result<EnsuredWorkspace, SeatError> {
         let workspace_id = choice.workspace_id.parse::<Uuid>().map_err(|_| {
             SeatError::Refused(format!("{} is not a workspace", choice.workspace_id))
         })?;
         if !choice.member {
-            return self.seat(workspace_id, signup_subject, email, None).await;
+            return self
+                .seat(workspace_id, signup_subject, email, None, face)
+                .await;
         }
         let membership: Membership = self
             .get(
@@ -249,6 +267,7 @@ impl SharedWorkspaces {
         signup_subject: &str,
         email: &str,
         profile: Option<&SignupProfile>,
+        face: SeatFace<'_>,
     ) -> Result<EnsuredWorkspace, SeatError> {
         let subject = signup_subject.trim().to_lowercase();
         let body = SeatRequest {
@@ -257,6 +276,7 @@ impl SharedWorkspaces {
             email: &email.trim().to_lowercase(),
             signup_subject: &subject,
             profile,
+            face,
         };
         let response = self
             .client()?

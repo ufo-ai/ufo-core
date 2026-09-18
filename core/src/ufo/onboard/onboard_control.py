@@ -32,6 +32,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.dialects.postgresql import insert
 
+from ufo.blob import WorkspaceBlobStore
 from ufo.db import owner_tx, workspace_tx
 from ufo.harness.o11y import warn
 from ufo.harness.untrusted import wall
@@ -43,6 +44,7 @@ from ufo.onboard.onboarding import (
 from ufo.runtime.access.credentials import member_slot
 from ufo.runtime.billing.balance import credit, set_reserve
 from ufo.runtime.ext.manifest import MessageSpec
+from ufo.runtime.member_profiles import MemberProfiles
 from ufo.runtime.seats import create_member, email_domain, signup_workspace_id, workspace_subject
 from ufo.runtime.workspace import MEMBER_ROUTED_SLOTS, ws, ws_current
 from ufo.schema import tables
@@ -134,6 +136,12 @@ class SeatRequest(BaseModel):
     signup_subject: str | None = None
     profile: SignupProfile | None = None
     model_key: MemberModelKey | None = None
+    display_name: str | None = None
+    given_name: str | None = None
+    picture_url: str | None = None
+    """What the identity provider that verified `email` calls its holder, the first name it
+    reported as its own field, and where it hosts their picture, for the seat to offer under the
+    `signin` profile source; None where the sign-in carried none."""
 
 
 class EnsuredWorkspace(BaseModel):
@@ -317,6 +325,7 @@ class OnboardControl:
     request without it is refused before any read."""
 
     control_token: str
+    blob: WorkspaceBlobStore
     messages: tuple[MessageSpec, ...] = ()
     """Every message the installed extensions declare they can send, for the operator catalogue.
     The control plane runs no Python and cannot read the words, so it asks for them here."""
@@ -358,7 +367,9 @@ class OnboardControl:
         seat the member either way. What the intake form collected opens the main agent's prompt,
         so the agent knows who it works for from its first turn instead of asking for what this
         customer already told us. A `model_key` lands in the seated member's own credential slot —
-        the row the connect flow writes — once the seat has committed."""
+        the row the connect flow writes — once the seat has committed; a `display_name` is offered
+        under the `signin` source, so a name the member chose themselves stands, and a
+        `picture_url` is recorded for the sign-in photo job to fetch."""
         member, _, signup_subject = _verified_signup(
             request.email, request.domain, request.signup_subject
         )
@@ -444,6 +455,13 @@ class OnboardControl:
                 await ws_current().put_credential(
                     member_slot(request.model_key.slot(), member_id), request.model_key.key
                 )
+            profiles = MemberProfiles(workspace_id=workspace_id, blob=self.blob)
+            if request.display_name is not None:
+                await profiles.set_name(
+                    member_id, request.display_name, "signin", given_name=request.given_name
+                )
+            if request.picture_url is not None:
+                await profiles.expect_photo(member_id, request.picture_url)
         return EnsuredWorkspace(
             workspace_id=str(workspace_id), admin=admin, founding=first_email is None
         )

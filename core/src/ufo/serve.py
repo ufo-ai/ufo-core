@@ -543,6 +543,7 @@ def run(fleet: Fleet) -> None:
         app.include_router(
             OnboardControl(
                 control_token=onboard_token,
+                blob=blob,
                 messages=tuple(message for manifest in manifests for message in manifest.messages),
             ).router()
         )

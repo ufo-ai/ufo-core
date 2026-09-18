@@ -7,7 +7,7 @@ use ufo_control::claim::{
 use ufo_control::store::OnboardStore;
 use ufo_control::web::WEB_CHANNEL;
 use ufo_control::workos::{
-    console_signin_page, open_session, pack_state, seal_session, unpack_state, AuthCarry,
+    console_signin_page, open_session, pack_state, seal_session, unpack_state, AuthCarry, SignedIn,
     StateError, Verifier, WorkosVerifier, AUTH_CALLBACK_PATH, AUTH_CONSOLE_PATH, CONSOLE_CODE,
     GOOGLE_PROVIDER, MAX_STATE_SESSION_BYTES,
 };
@@ -163,10 +163,9 @@ async fn the_console_verifier_confirms_only_its_fixed_code() {
         .confirm("founder@acme.com", "111111")
         .await
         .unwrap());
-    assert_eq!(
-        verifier.exchange("  Founder@Acme.com ").await.unwrap(),
-        "founder@acme.com"
-    );
+    let signed_in = verifier.exchange("  Founder@Acme.com ").await.unwrap();
+    assert_eq!(signed_in.email, "founder@acme.com");
+    assert!(signed_in.display_name.is_none());
 }
 
 fn workos(base: &str) -> Verifier {
@@ -202,8 +201,9 @@ async fn exchange_posts_the_authorization_code_grant_and_reads_the_email() {
         r#"{"user":{"email":"  Founder@Acme.COM "}}"#.to_string(),
     )])
     .await;
-    let email = workos(&base).exchange("code_abc").await.unwrap();
-    assert_eq!(email, "founder@acme.com");
+    let signed_in = workos(&base).exchange("code_abc").await.unwrap();
+    assert_eq!(signed_in.email, "founder@acme.com");
+    assert!(signed_in.display_name.is_none());
 
     let exchanges = log.lock().unwrap();
     assert_eq!(exchanges[0].path, "/user_management/authenticate");
@@ -216,6 +216,33 @@ async fn exchange_posts_the_authorization_code_grant_and_reads_the_email() {
         exchanges[0].authorization.as_deref(),
         Some("Bearer sk_test_key")
     );
+}
+
+#[tokio::test]
+async fn exchange_reads_the_name_the_identity_provider_reported() {
+    let (base, _log) = spawn_http(vec![(
+        200,
+        r#"{"user":{"email":"founder@acme.com","first_name":"  Rae ","last_name":"Whitlock","profile_picture_url":"https://lh3.googleusercontent.com/a/ACg8ocRae=s96-c"}}"#
+            .to_string(),
+    )])
+    .await;
+    let signed_in = workos(&base).exchange("code_abc").await.unwrap();
+    assert_eq!(signed_in.display_name.as_deref(), Some("Rae Whitlock"));
+    assert_eq!(signed_in.given_name.as_deref(), Some("Rae"));
+    assert_eq!(
+        signed_in.picture_url.as_deref(),
+        Some("https://lh3.googleusercontent.com/a/ACg8ocRae=s96-c")
+    );
+
+    let (base, _log) = spawn_http(vec![(
+        200,
+        r#"{"user":{"email":"founder@acme.com","first_name":null,"last_name":"  "}}"#.to_string(),
+    )])
+    .await;
+    let signed_in = workos(&base).exchange("code_abc").await.unwrap();
+    assert!(signed_in.display_name.is_none());
+    assert!(signed_in.given_name.is_none());
+    assert!(signed_in.picture_url.is_none());
 }
 
 #[tokio::test]
@@ -436,15 +463,27 @@ async fn a_refusal_that_lost_its_race_reports_the_race_not_a_verdict() {
 #[tokio::test]
 async fn the_browser_claim_arrives_verified_and_a_repeat_callback_resolves_it() {
     let (flow, store) = workflow(vec![]).await;
+    let signed_in = SignedIn {
+        email: "Founder@Acme.com".to_string(),
+        display_name: Some("Rae Whitlock".to_string()),
+        given_name: Some("Rae".to_string()),
+        picture_url: Some("https://lh3.googleusercontent.com/a/ACg8ocRae=s96-c".to_string()),
+    };
     let admitted = flow
-        .admit_verified("Founder@Acme.com", WEB_CHANNEL, "session-1")
+        .admit_verified(&signed_in, WEB_CHANNEL, "session-1")
         .await
         .unwrap();
     assert_eq!(admitted.email, "founder@acme.com");
     assert!(admitted.verified_at.is_some(), "WorkOS already answered");
+    assert_eq!(admitted.display_name.as_deref(), Some("Rae Whitlock"));
+    assert_eq!(admitted.given_name.as_deref(), Some("Rae"));
+    assert_eq!(
+        admitted.picture_url.as_deref(),
+        Some("https://lh3.googleusercontent.com/a/ACg8ocRae=s96-c")
+    );
 
     let again = flow
-        .admit_verified("Founder@Acme.com", WEB_CHANNEL, "session-1")
+        .admit_verified(&signed_in, WEB_CHANNEL, "session-1")
         .await
         .unwrap();
     assert_eq!(again.claim_id, admitted.claim_id);
@@ -458,8 +497,14 @@ async fn the_browser_claim_arrives_verified_and_a_repeat_callback_resolves_it() 
 #[tokio::test]
 async fn the_browser_claim_uses_the_address_for_a_personal_mail_subject() {
     let (flow, _store) = workflow(vec![]).await;
+    let signed_in = SignedIn {
+        email: "someone@gmail.com".to_string(),
+        display_name: None,
+        given_name: None,
+        picture_url: None,
+    };
     let admitted = flow
-        .admit_verified("someone@gmail.com", WEB_CHANNEL, "session-1")
+        .admit_verified(&signed_in, WEB_CHANNEL, "session-1")
         .await
         .unwrap();
     assert_eq!(admitted.email_domain, "gmail.com");

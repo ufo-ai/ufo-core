@@ -22,6 +22,9 @@ fn claim(surface_ref: &str, email: &str) -> OnboardClaim {
         expires_at: Utc::now() + Duration::minutes(15),
         verified_at: None,
         invite_id: None,
+        display_name: None,
+        given_name: None,
+        picture_url: None,
     }
 }
 
@@ -231,13 +234,22 @@ async fn a_dropped_column_is_drift_the_gateway_refuses_to_serve_against() {
 async fn a_claim_is_written_read_back_and_verified_once() {
     let pool = ledger_pool().await;
     let store = OnboardStore::new(pool);
-    let written = claim("session-a", "founder@acme.com");
+    let mut written = claim("session-a", "founder@acme.com");
+    written.display_name = Some("Rae Whitlock".to_string());
+    written.given_name = Some("Rae".to_string());
+    written.picture_url = Some("https://lh3.googleusercontent.com/a/ACg8ocRae=s96-c".to_string());
     store.insert_claim(&written).await.unwrap();
 
     let read = store.live_claim("web", "session-a").await.unwrap().unwrap();
     assert_eq!(read.claim_id, written.claim_id);
     assert_eq!(read.email, "founder@acme.com");
     assert_eq!(read.email_domain, "acme.com");
+    assert_eq!(read.display_name.as_deref(), Some("Rae Whitlock"));
+    assert_eq!(read.given_name.as_deref(), Some("Rae"));
+    assert_eq!(
+        read.picture_url.as_deref(),
+        Some("https://lh3.googleusercontent.com/a/ACg8ocRae=s96-c")
+    );
     assert!(read.verified_at.is_none());
     assert!(read.invite_id.is_none());
 

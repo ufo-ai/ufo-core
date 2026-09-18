@@ -90,6 +90,12 @@ from ufo.runtime.indexing import OWNER_KIND_PAGE, EmbedClient, IndexBackend, Ind
 from ufo.runtime.kinds.provisioning import AgentProvisioning
 from ufo.runtime.media.preview_renderer import PreviewRenderer
 from ufo.runtime.seats import Seats
+from ufo.runtime.signin_photo import (
+    SIGNIN_PHOTO_JOB,
+    SIGNIN_PHOTO_SCHEDULE,
+    SigninPhotos,
+    unfetched_signin_photo_workspaces,
+)
 from ufo.runtime.sources.sync import (
     SOURCE_SYNC_JOB,
     SOURCE_SYNC_SCHEDULE,
@@ -1016,6 +1022,12 @@ def core_jobs(
             schedule=GRAVATAR_SCHEDULE,
             handler=GravatarPrefill().run,
             candidates=unpictured_member_workspaces(),
+        ),
+        JobSpec(
+            name=SIGNIN_PHOTO_JOB,
+            schedule=SIGNIN_PHOTO_SCHEDULE,
+            handler=SigninPhotos().run,
+            candidates=unfetched_signin_photo_workspaces(),
         ),
         *(
             (

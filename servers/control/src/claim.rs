@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::email::{EmailError, SignupEmailPolicy};
 use crate::store::{OnboardClaim, OnboardStore, StoreError};
-use crate::workos::{VerificationError, Verifier};
+use crate::workos::{SignedIn, VerificationError, Verifier};
 
 pub const CLAIM_TTL_MINUTES: i64 = 10;
 pub const VERIFICATION_CHANGED: &str = "Another verification attempt changed this session.";
@@ -54,7 +54,7 @@ impl ClaimWorkflow {
         surface_ref: &str,
     ) -> Result<String, ClaimError> {
         let signup = self.email_policy.validate(email)?;
-        let claim = self.claim(&signup, surface, surface_ref, None);
+        let claim = self.claim(&signup, surface, surface_ref, None, None);
         self.store.insert_claim(&claim).await?;
         if let Err(VerificationError(message)) = self.verifier.begin(&claim.email).await {
             self.store.delete_claim(claim.claim_id).await?;
@@ -100,15 +100,21 @@ impl ClaimWorkflow {
 
     pub async fn admit_verified(
         &self,
-        email: &str,
+        signed_in: &SignedIn,
         surface: &str,
         surface_ref: &str,
     ) -> Result<OnboardClaim, ClaimError> {
-        let signup = self.email_policy.validate(email)?;
+        let signup = self.email_policy.validate(&signed_in.email)?;
         if let Some(existing) = self.store.live_claim(surface, surface_ref).await? {
             return Ok(existing);
         }
-        let claim = self.claim(&signup, surface, surface_ref, Some(Utc::now()));
+        let claim = self.claim(
+            &signup,
+            surface,
+            surface_ref,
+            Some(Utc::now()),
+            Some(signed_in),
+        );
         self.store.insert_claim(&claim).await?;
         Ok(claim)
     }
@@ -119,6 +125,7 @@ impl ClaimWorkflow {
         surface: &str,
         surface_ref: &str,
         verified_at: Option<DateTime<Utc>>,
+        reported: Option<&SignedIn>,
     ) -> OnboardClaim {
         OnboardClaim {
             claim_id: Uuid::new_v4(),
@@ -130,6 +137,9 @@ impl ClaimWorkflow {
             expires_at: Utc::now() + self.claim_ttl,
             verified_at,
             invite_id: None,
+            display_name: reported.and_then(|signed_in| signed_in.display_name.clone()),
+            given_name: reported.and_then(|signed_in| signed_in.given_name.clone()),
+            picture_url: reported.and_then(|signed_in| signed_in.picture_url.clone()),
         }
     }
 }

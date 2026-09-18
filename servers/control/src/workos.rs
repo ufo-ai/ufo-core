@@ -191,10 +191,15 @@ impl Verifier {
         }
     }
 
-    pub async fn exchange(&self, code: &str) -> Result<String, VerificationError> {
+    pub async fn exchange(&self, code: &str) -> Result<SignedIn, VerificationError> {
         match self {
             Self::Workos(verifier) => verifier.exchange(code).await,
-            Self::Console => Ok(code.trim().to_lowercase()),
+            Self::Console => Ok(SignedIn {
+                email: code.trim().to_lowercase(),
+                display_name: None,
+                given_name: None,
+                picture_url: None,
+            }),
         }
     }
 
@@ -230,6 +235,42 @@ pub struct WorkosVerifier {
 #[derive(Deserialize)]
 struct AuthenticatedUser {
     email: String,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    profile_picture_url: Option<String>,
+}
+
+/// Who WorkOS says signed in: the address it verified, and what the identity provider reported
+/// for the account — Google's name and picture for a Google sign-in, none for an address that
+/// only typed a code. `given_name` is the provider's own first-name field, never a split of
+/// `display_name`; `picture_url` is where the provider hosts the account's picture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedIn {
+    pub email: String,
+    pub display_name: Option<String>,
+    pub given_name: Option<String>,
+    pub picture_url: Option<String>,
+}
+
+impl From<AuthenticatedUser> for SignedIn {
+    fn from(user: AuthenticatedUser) -> Self {
+        let given = trimmed(user.first_name);
+        let parts: Vec<String> = [given.clone(), trimmed(user.last_name)]
+            .into_iter()
+            .flatten()
+            .collect();
+        Self {
+            email: user.email.trim().to_lowercase(),
+            display_name: (!parts.is_empty()).then(|| parts.join(" ")),
+            given_name: given,
+            picture_url: trimmed(user.profile_picture_url),
+        }
+    }
+}
+
+fn trimmed(part: Option<String>) -> Option<String> {
+    part.map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
 }
 
 #[derive(Deserialize)]
@@ -255,7 +296,7 @@ impl WorkosVerifier {
         )
     }
 
-    pub async fn exchange(&self, code: &str) -> Result<String, VerificationError> {
+    pub async fn exchange(&self, code: &str) -> Result<SignedIn, VerificationError> {
         let body = serde_json::json!({
             "grant_type": AUTHORIZATION_CODE_GRANT,
             "client_id": self.client_id,
@@ -273,7 +314,7 @@ impl WorkosVerifier {
         }
         let authenticated: AuthenticateResponse = serde_json::from_str(&payload)
             .map_err(|_| VerificationError(SIGN_IN_FAILED.to_string()))?;
-        Ok(authenticated.user.email.trim().to_lowercase())
+        Ok(authenticated.user.into())
     }
 
     pub async fn begin(&self, email: &str) -> Result<(), VerificationError> {

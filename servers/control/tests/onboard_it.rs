@@ -3,7 +3,8 @@ mod harness;
 use harness::spawn_http;
 use std::collections::BTreeMap;
 use ufo_control::shared::{
-    deterministic_workspace_id, SeatError, SharedWorkspaces, SignupProfile, WorkspaceChoice,
+    deterministic_workspace_id, SeatError, SeatFace, SharedWorkspaces, SignupProfile,
+    WorkspaceChoice,
 };
 
 const TOKEN: &str = "onboard-control-token";
@@ -87,7 +88,12 @@ async fn a_personal_mail_call_states_the_exact_address_as_the_previous_identity(
         .unwrap()
         .is_empty());
     shared
-        .create("carol@gmail.com", "carol@gmail.com", None)
+        .create(
+            "carol@gmail.com",
+            "carol@gmail.com",
+            None,
+            SeatFace::default(),
+        )
         .await
         .unwrap();
 
@@ -186,7 +192,16 @@ async fn create_sends_the_derived_workspace_and_the_intake_profile() {
         goals: "answer support mail".to_string(),
     };
     let ensured = workspaces(&base)
-        .create("acme.com", "  Founder@Acme.com ", Some(&profile))
+        .create(
+            "acme.com",
+            "  Founder@Acme.com ",
+            Some(&profile),
+            SeatFace {
+                display_name: Some("Rae Whitlock"),
+                given_name: Some("Rae"),
+                picture_url: Some("https://lh3.googleusercontent.com/a/ACg8ocRae=s96-c"),
+            },
+        )
         .await
         .unwrap();
     assert_eq!(ensured.workspace_id, "3e38d44d-322e-53af-97b6-6204849f6a5c");
@@ -201,6 +216,12 @@ async fn create_sends_the_derived_workspace_and_the_intake_profile() {
     assert_eq!(body["signup_subject"], "acme.com");
     assert_eq!(body["profile"]["business"], "we sell widgets");
     assert_eq!(body["profile"]["goals"], "answer support mail");
+    assert_eq!(body["display_name"], "Rae Whitlock");
+    assert_eq!(body["given_name"], "Rae");
+    assert_eq!(
+        body["picture_url"],
+        "https://lh3.googleusercontent.com/a/ACg8ocRae=s96-c"
+    );
 }
 
 #[tokio::test]
@@ -212,11 +233,14 @@ async fn create_without_a_profile_sends_none_rather_than_an_empty_one() {
     )])
     .await;
     workspaces(&base)
-        .create("acme.com", "founder@acme.com", None)
+        .create("acme.com", "founder@acme.com", None, SeatFace::default())
         .await
         .unwrap();
     let body: serde_json::Value = serde_json::from_str(&log.lock().unwrap()[0].body).unwrap();
     assert!(body["profile"].is_null(), "{body}");
+    assert!(body["display_name"].is_null(), "{body}");
+    assert!(body["given_name"].is_null(), "{body}");
+    assert!(body["picture_url"].is_null(), "{body}");
 }
 
 #[tokio::test]
@@ -228,7 +252,12 @@ async fn joining_an_existing_membership_reads_it_rather_than_seating_again() {
         member: true,
     };
     let ensured = workspaces(&base)
-        .join(&choice, "acme.com", "  Teammate@Acme.com ")
+        .join(
+            &choice,
+            "acme.com",
+            "  Teammate@Acme.com ",
+            SeatFace::default(),
+        )
         .await
         .unwrap();
     assert_eq!(ensured.workspace_id, choice.workspace_id);
@@ -259,7 +288,16 @@ async fn joining_a_domain_match_seats_the_member() {
         member: false,
     };
     workspaces(&base)
-        .join(&choice, "acme.com", "newcomer@acme.com")
+        .join(
+            &choice,
+            "acme.com",
+            "newcomer@acme.com",
+            SeatFace {
+                display_name: Some("New Comer"),
+                given_name: None,
+                picture_url: None,
+            },
+        )
         .await
         .unwrap();
     let exchanges = log.lock().unwrap();
@@ -269,6 +307,9 @@ async fn joining_a_domain_match_seats_the_member() {
         body["profile"].is_null(),
         "a join carries no intake profile — the form described the founder, not this member"
     );
+    assert_eq!(body["display_name"], "New Comer");
+    assert!(body["given_name"].is_null(), "{body}");
+    assert!(body["picture_url"].is_null(), "{body}");
 }
 
 #[tokio::test]
@@ -280,7 +321,7 @@ async fn a_workspace_id_that_is_not_a_uuid_is_refused_before_any_call() {
         member: true,
     };
     let refused = workspaces(&base)
-        .join(&choice, "acme.com", "founder@acme.com")
+        .join(&choice, "acme.com", "founder@acme.com", SeatFace::default())
         .await
         .unwrap_err();
     assert!(matches!(refused, SeatError::Refused(_)), "{refused}");
@@ -315,7 +356,7 @@ async fn a_missing_membership_carries_cores_refusal() {
         member: true,
     };
     let refused = workspaces(&base)
-        .join(&choice, "acme.com", "gone@acme.com")
+        .join(&choice, "acme.com", "gone@acme.com", SeatFace::default())
         .await
         .unwrap_err();
     assert!(

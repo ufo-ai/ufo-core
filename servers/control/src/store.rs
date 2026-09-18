@@ -19,6 +19,9 @@ pub const DDL: &[&str] = &[
        resulting_workspace_id text,\
        created_workspace boolean not null default false,\
        invite_id uuid,\
+       display_name text,\
+       given_name text,\
+       picture_url text,\
        created_at timestamptz not null default now())",
     "create unique index if not exists onboard_claim_active_session \
        on ufo_control.onboard_claim (surface, surface_ref) \
@@ -26,7 +29,8 @@ pub const DDL: &[&str] = &[
 ];
 
 const COLUMNS: &str = "id, email, split_part(email, '@', 2) as email_domain, signup_subject, \
-                       surface, surface_ref, expires_at, verified_at, invite_id";
+                       surface, surface_ref, expires_at, verified_at, invite_id, display_name, \
+                       given_name, picture_url";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnboardClaim {
@@ -39,6 +43,9 @@ pub struct OnboardClaim {
     pub expires_at: DateTime<Utc>,
     pub verified_at: Option<DateTime<Utc>>,
     pub invite_id: Option<Uuid>,
+    pub display_name: Option<String>,
+    pub given_name: Option<String>,
+    pub picture_url: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -66,7 +73,8 @@ impl OnboardStore {
                 &format!(
                     "insert into {TABLE} \
                      (id, email, email_domain, signup_subject, surface, surface_ref, expires_at, \
-                      verified_at) values ($1, $2, $3, $4, $5, $6, $7, $8)"
+                      verified_at, display_name, given_name, picture_url) \
+                     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
                 ),
                 &[
                     &claim.claim_id,
@@ -77,6 +85,9 @@ impl OnboardStore {
                     &claim.surface_ref,
                     &claim.expires_at,
                     &claim.verified_at,
+                    &claim.display_name,
+                    &claim.given_name,
+                    &claim.picture_url,
                 ],
             )
             .await?;
@@ -108,6 +119,9 @@ impl OnboardStore {
             expires_at: row.get("expires_at"),
             verified_at: row.get("verified_at"),
             invite_id: row.get("invite_id"),
+            display_name: row.get("display_name"),
+            given_name: row.get("given_name"),
+            picture_url: row.get("picture_url"),
         }))
     }
 

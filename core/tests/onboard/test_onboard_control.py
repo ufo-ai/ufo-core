@@ -8,6 +8,7 @@ balance grant, the default agent, the walled intake prompt — is core's to prov
 
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -16,6 +17,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import owner_tx, workspace_tx
 from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT
 from ufo.onboard.onboard_control import (
@@ -29,6 +31,7 @@ from ufo.onboard.onboard_control import (
 from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.runtime.access.credentials import CredentialStore, member_slot
 from ufo.runtime.billing.balance import read_balance
+from ufo.runtime.member_profiles import MemberProfiles, read_profile
 from ufo.runtime.seats import Seats, create_member, signup_workspace_id
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
@@ -37,10 +40,17 @@ from ufo.schema.records import DEFAULT_AGENT_NAME
 CONTROL_TOKEN = "onboard-control-token"
 
 
+def _control(root: Path) -> OnboardControl:
+    return OnboardControl(
+        control_token=CONTROL_TOKEN,
+        blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root)),
+    )
+
+
 @pytest.fixture
-def onboard_client(db: None) -> AsyncClient:
+def onboard_client(db: None, tmp_path: Path) -> AsyncClient:
     app = FastAPI()
-    app.include_router(OnboardControl(control_token=CONTROL_TOKEN).router())
+    app.include_router(_control(tmp_path).router())
     return AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://control",
@@ -49,9 +59,9 @@ def onboard_client(db: None) -> AsyncClient:
 
 
 @pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
-async def test_the_guard_refuses_a_request_carrying_no_token(db: None) -> None:
+async def test_the_guard_refuses_a_request_carrying_no_token(db: None, tmp_path: Path) -> None:
     app = FastAPI()
-    app.include_router(OnboardControl(control_token=CONTROL_TOKEN).router())
+    app.include_router(_control(tmp_path).router())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://control") as client:
         assert (await client.get("/internal/onboard/fleet")).status_code == 401
         wrong = await client.get(
@@ -116,6 +126,47 @@ async def test_seat_creates_the_workspace_its_member_and_its_main_agent(
             "workspace",
         )
     ]
+
+
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
+async def test_seat_names_the_member_after_their_sign_in_unless_they_named_themselves(
+    onboard_client: AsyncClient, tmp_path: Path
+) -> None:
+    workspace_id = signup_workspace_id("acme.com")
+    seat = {
+        "workspace_id": str(workspace_id),
+        "domain": "acme.com",
+        "email": "founder@acme.com",
+        "signup_subject": "acme.com",
+        "display_name": "Rae Whitlock",
+        "given_name": "Rae",
+        "picture_url": "https://lh3.googleusercontent.com/a/ACg8ocRae=s96-c",
+    }
+    async with onboard_client as client:
+        assert (await client.post("/internal/onboard/seat", json=seat)).status_code == 200
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                member_id, expected_photo = (
+                    await connection.execute(
+                        sa.select(tables.member.c.id, tables.member.c.signin_photo_url).where(
+                            tables.member.c.workspace_id == workspace_id
+                        )
+                    )
+                ).one()
+            first = await read_profile(workspace_id, member_id)
+            await MemberProfiles(
+                workspace_id=workspace_id,
+                blob=WorkspaceBlobStore(backend=FilesystemBlobStore(tmp_path)),
+            ).set_name(member_id, "Rae W.", "member")
+        assert (await client.post("/internal/onboard/seat", json=seat)).status_code == 200
+
+    with ws(workspace_id):
+        held = await read_profile(workspace_id, member_id)
+    assert first is not None and first.name == "Rae Whitlock" and first.name_source == "signin"
+    assert first.given_name == "Rae"
+    assert expected_photo == "https://lh3.googleusercontent.com/a/ACg8ocRae=s96-c"
+    assert held is not None and held.name == "Rae W." and held.name_source == "member"
+    assert held.given_name is None
 
 
 @pytest.mark.parametrize("database_url", ["postgres"], indirect=True)

@@ -69,6 +69,7 @@ from ufo.runtime.jobs import (
     core_jobs,
     reap_index_queue,
 )
+from ufo.runtime.signin_photo import SIGNIN_PHOTO_JOB
 from ufo.runtime.sources import rest, sync
 from ufo.runtime.sources.backend import ConnectorBackend, ConnectorSourceConfig
 from ufo.runtime.sources.connector import (
@@ -5341,6 +5342,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         JOB_DAY_ROLLUP_JOB,
         PRODUCT_CENSUS_JOB,
         GRAVATAR_JOB,
+        SIGNIN_PHOTO_JOB,
     ]
     assert all(spec.schedule is not None for spec in specs)
     keys = {binding.key for binding in bindings_from((), specs)}
@@ -5353,6 +5355,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         f"{CORE_EXTENSION}:{JOB_DAY_ROLLUP_JOB}",
         f"{CORE_EXTENSION}:{PRODUCT_CENSUS_JOB}",
         f"{CORE_EXTENSION}:{GRAVATAR_JOB}",
+        f"{CORE_EXTENSION}:{SIGNIN_PHOTO_JOB}",
     }
 
 

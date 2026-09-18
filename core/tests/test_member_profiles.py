@@ -61,6 +61,7 @@ def test_an_unnamed_member_is_drawn_under_the_local_part_of_their_address() -> N
         id=uuid4(),
         email="rae.whitlock@example.com",
         name=None,
+        given_name=None,
         name_source=None,
         photo_digest=None,
         photo_source=None,
@@ -164,6 +165,24 @@ async def test_a_name_a_member_set_outranks_slack_and_clearing_reopens_it(
         assert cleared.name_source is None
         assert profile_name(cleared) == "rae.whitlock"
         assert await profiles.set_name(member_id, "Rae Whitlock", "slack") is True
+
+
+async def test_a_name_a_member_set_outranks_their_sign_in(db: None, tmp_path: Path) -> None:
+    workspace_id, member_id = await _seed()
+    with ws(workspace_id):
+        profiles = _profiles(workspace_id, tmp_path)
+        assert (
+            await profiles.set_name(member_id, "Rae Whitlock", "signin", given_name=" Rae ") is True
+        )
+        named = await read_profile(workspace_id, member_id)
+        assert named is not None
+        assert (named.name, named.given_name) == ("Rae Whitlock", "Rae")
+
+        assert await profiles.set_name(member_id, "Rae W.", "member") is True
+        assert await profiles.set_name(member_id, "Rae Whitlock", "signin") is False
+        held = await read_profile(workspace_id, member_id)
+        assert held is not None
+        assert (held.name, held.given_name) == ("Rae W.", None)
 
 
 async def test_a_name_is_collapsed_and_bounded(db: None, tmp_path: Path) -> None:
