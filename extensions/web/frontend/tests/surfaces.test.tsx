@@ -336,3 +336,11 @@ test("a deploy that sends offers the notifications tab", async () => {
 
   await waitFor(() => expect(screen.queryByRole("tab", { name: "Notifications" })).toBeTruthy());
 });
+
+
+test.each([false, true])("Admin is visible only for an admin: %s", async (admin) => {
+  location.hash = "#/workspace/apps";
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin }} surfaces={ALL_SURFACES} onAgents={() => {}} />);
+  await screen.findByRole("tab", { name: "Apps" });
+  expect(Boolean(screen.queryByRole("tab", { name: "Admin" }))).toBe(admin);
+});

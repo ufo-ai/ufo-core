@@ -3,6 +3,7 @@ import base64
 import json
 import re
 import secrets
+import tarfile
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import (
@@ -43,6 +44,7 @@ from ufo_ext_context_rollover.rollover import ROLLOVER_PREFIX
 from ufo_ext_imessage.manifest import manifest as imessage_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_lifecycle_email.preference import PRODUCT_EMAIL_TOOL
+from ufo_ext_memory.workspace_export import EXPORT_ACTION, ExportWorker, export_request
 from ufo_ext_report_digest.manifest import manifest as report_digest_manifest
 from ufo_ext_report_digest.writer import report_digest_entry
 from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
@@ -1004,7 +1006,11 @@ async def _write_summary_record(
         )
 
 
+MEMORY_EXPORT = Manifest(name="memory", version="0.1.0", tools=(EXPORT_ACTION,))
+
+
 PORTAL_MANIFESTS = (
+    MEMORY_EXPORT,
     web_manifest(),
     rollover_manifest(),
     connectors_manifest(),
@@ -1129,6 +1135,7 @@ async def web(
         app,
         (
             web_manifest(),
+            MEMORY_EXPORT,
             imessage_manifest(),
             todos.manifest(),
             SCHEDULED_TASK_KIND_ONLY,
@@ -1160,6 +1167,7 @@ async def web(
         objects=member_object_registry(
             (
                 web_manifest(),
+                MEMORY_EXPORT,
                 imessage_manifest(),
                 slack_manifest(),
                 SCHEDULED_TASK_KIND_ONLY,
@@ -14527,3 +14535,88 @@ async def test_notifications_read_own_email_preference_and_team_omits_its_action
         assert team.status_code == 200
         assert "set_product_email" not in {view["name"] for view in team.json()["actions"]}
     assert (await client.get("/surface/web/workspace/profile")).status_code == 401
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_admin_export_through_the_action_lane(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, WorkspaceBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, workspace_id, agent_id = web
+    admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    offered = await client.get("/surface/web/actions/workspace", headers=cookie)
+    action = next(action for action in offered.json()["actions"] if action["name"] == "export")
+    assert "all members' private conversations, files, and memory" in action["confirm"]
+    response = await client.post(
+        f"/surface/web/agents/{agent_id}/actions/workspace/export", json={}, headers=cookie
+    )
+    outcome = response.json()
+    assert outcome["applied"] is True, outcome
+    assert "url" not in outcome
+    status = await client.get("/surface/web/workspace/export", headers=cookie)
+    assert status.json()["export"]["status"] == "queued"
+    export_id = status.json()["export"]["id"]
+    path = f"/surface/web/workspace/export/{export_id}/download"
+    assert (await client.get(path, headers=cookie)).status_code == 410
+    with ws(workspace_id):
+        await ExportWorker(context_for("memory", frozenset(), blob=dbos_runtime[2])).run()
+    status = await client.get("/surface/web/workspace/export", headers=cookie)
+    assert status.json()["export"]["status"] == "ready"
+    download = await client.get(path, headers=cookie)
+    assert download.status_code == 200
+    assert download.headers["cache-control"] == "no-store"
+    with tarfile.open(fileobj=BytesIO(download.content)) as archive:
+        metadata = json.load(archive.extractfile("manifest.json"))
+        assert metadata["requested_by"] == str(admin_id)
+        assert metadata["workspace_id"] == str(workspace_id)
+
+    async def direct_download(self: WorkspaceBlobStore, key: str, ttl_seconds: int) -> str:
+        return "https://storage.example.com/workspace-export.tar"
+
+    with monkeypatch.context() as patch:
+        patch.setattr(WorkspaceBlobStore, "download_url", direct_download)
+        direct = await client.get(path, headers=cookie, follow_redirects=False)
+        assert direct.status_code == 303
+        assert direct.headers["location"] == "https://storage.example.com/workspace-export.tar"
+        assert direct.headers["cache-control"] == "no-store"
+        assert direct.content == b""
+    _other, other_token = await _seed_member(workspace_id, "member-export@example.com")
+    denied = {"cookie": f"{SESSION_COOKIE}={other_token}"}
+    assert (await client.get(path, headers=denied)).status_code == 403
+    assert (await client.get("/surface/web/workspace/export", headers=denied)).status_code == 403
+    assert (await client.get(path)).status_code == 401
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(export_request)
+                .where(export_request.c.id == UUID(export_id))
+                .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+    assert (await client.get(path, headers=cookie)).status_code == 410
+    assert (await client.get("/surface/web/workspace/export", headers=cookie)).json()["export"][
+        "status"
+    ] == "expired"
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_non_admin_cannot_export_through_the_action_lane(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    response = await client.post(
+        f"/surface/web/agents/{agent_id}/actions/workspace/export",
+        json={},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert response.json()["applied"] is False
+    assert "url" not in response.json()
+    async with workspace_tx() as connection:
+        count = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.shared_artifact))
+        ).scalar_one()
+    assert count == 0

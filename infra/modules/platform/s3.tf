@@ -82,3 +82,27 @@ resource "aws_s3_bucket_lifecycle_configuration" "cache" {
     expiration { days = 60 }
   }
 }
+
+resource "aws_s3_bucket_lifecycle_configuration" "blob" {
+  bucket = aws_s3_bucket.blob.id
+
+  rule {
+    id     = "expire-workspace-exports"
+    status = "Enabled"
+    filter {
+      tag {
+        key   = "ufo-export"
+        value = "true"
+      }
+    }
+    expiration { days = 1 }
+    noncurrent_version_expiration { noncurrent_days = 1 }
+  }
+
+  rule {
+    id     = "abort-incomplete-uploads"
+    status = "Enabled"
+    filter {}
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
+  }
+}

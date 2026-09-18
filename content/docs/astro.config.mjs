@@ -104,6 +104,7 @@ export default defineConfig({
           label: "Working with ufo",
           items: [
             "docs/work/web",
+            "docs/work/data-ownership",
             "docs/work/slack",
             "docs/work/terminal",
             "docs/work/imessage",

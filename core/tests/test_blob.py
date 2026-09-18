@@ -451,3 +451,52 @@ async def test_workspace_store_presigned_get_reads_the_full_key(s3_store: S3Blob
         await store.put("artifacts/abc/source.pdf", b"source bytes")
         url = await store.presigned_get("artifacts/abc/source.pdf", 60)
     assert f"workspaces/{workspace_id}/artifacts/abc/source.pdf" in urlsplit(url).path
+
+
+async def test_s3_multipart_export_tags_download_and_abort(s3_store: S3BlobStore) -> None:
+    chunk = b"x" * (5 * 1024 * 1024)
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield chunk
+        yield chunk
+
+    key = "exports/multipart/workspace-export.tar"
+    await s3_store.put_stream(
+        key, chunks(), part_size_bytes=len(chunk), tags={"ufo-export": "true"}
+    )
+    assert await s3_store.get(key) == chunk + chunk
+    client = await s3_store._client()
+    tags = await client.get_object_tagging(Bucket=s3_store.bucket, Key=key)
+    assert tags["TagSet"] == [{"Key": "ufo-export", "Value": "true"}]
+
+    async def broken() -> AsyncIterator[bytes]:
+        yield chunk
+        raise ValueError("incomplete export")
+
+    failed = "exports/multipart/failed.tar"
+    with pytest.raises(ValueError, match="incomplete export"):
+        await s3_store.put_stream(failed, broken(), part_size_bytes=len(chunk))
+    assert not await s3_store.exists(failed)
+    uploads = await client.list_multipart_uploads(
+        Bucket=s3_store.bucket, Prefix="exports/multipart/"
+    )
+    assert not uploads.get("Uploads", [])
+
+
+async def test_workspace_download_uses_s3_and_local_download_requires_the_app(
+    s3_store: S3BlobStore, tmp_path: Path
+) -> None:
+    store = WorkspaceBlobStore(s3_store)
+    workspace_id = uuid4()
+    with ws(workspace_id):
+        key = "exports/download/workspace-export.tar"
+        await store.put(key, b"archive")
+        url = await store.download_url(key, 60)
+        assert url is not None
+        async with AsyncClient() as client:
+            response = await client.get(url)
+        assert response.status_code == 200
+        assert response.content == b"archive"
+        assert response.headers["content-disposition"] == "attachment"
+        assert response.headers["cache-control"] == "no-store"
+        assert await WorkspaceBlobStore(FilesystemBlobStore(tmp_path)).download_url(key, 60) is None

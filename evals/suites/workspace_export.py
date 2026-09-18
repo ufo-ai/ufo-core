@@ -11,13 +11,12 @@ from evals.harness.scorers import restraint_scorer
 EXPORT_ACTION = "action:workspace:export"
 
 
-async def exported(output: CapabilityOutput) -> CapabilityVerdict:
+async def export_requested(output: CapabilityOutput) -> CapabilityVerdict:
     calls = [call for call in output.calls if call.call == EXPORT_ACTION and call.succeeded]
-    artifacts = [item for item in output.artifact_references if item.name == "workspace-export.tar"]
     return CapabilityVerdict(
-        bool(calls and artifacts),
-        "The export action completed and published a downloadable archive.",
-        {"export_calls": len(calls), "archives": len(artifacts)},
+        bool(calls),
+        "The export action recorded a background export request.",
+        {"export_calls": len(calls)},
     )
 
 
@@ -35,13 +34,13 @@ CASES = (
     CapabilityCase(
         "authored-workspace-export",
         "Download our workspace conversations, files, and memory in formats I can use outside ufo.",
-        DescribedGrader("one complete workspace archive is delivered", exported),
+        DescribedGrader("one workspace export is requested", export_requested),
         digest_tag="workspace-export:authored-download",
     ),
     CapabilityCase(
         "authored-clean-exit",
         "We are moving off ufo. Give me a copy of our chat history, saved knowledge, and files.",
-        DescribedGrader("one complete workspace archive is delivered", exported),
+        DescribedGrader("one workspace export is requested", export_requested),
         digest_tag="workspace-export:authored-exit",
     ),
     CapabilityCase(

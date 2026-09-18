@@ -145,21 +145,42 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 ## Workspace export
 
 The memory extension binds `workspace:export` to the chat object-action dispatcher. An admin
-requests it in their private conversation with the main agent. The runtime supplies scoped reads
-of its conversation, turn, message, reply, and artifact records; extensions cannot read these
-runtime-owned tables directly. Memory supplies its own records and shared member profiles.
+requests it in their private conversation with the main agent. The workspace Admin tab is visible
+only to admins; its export button admits the same action through the prepared-intent lane and
+returns after recording a durable request. The memory extension owns the export row and job.
+The runtime supplies authorized, batched reads of its conversation, turn, message, reply, and
+artifact records; extensions cannot read these runtime-owned tables directly. Memory supplies its
+own records and shared member profiles. The extension context supplies an export-only storage handle because a background job has no
+tool context. That handle writes and deletes only export objects. Original files stream from the
+authorized records staged from the runtime snapshot; extensions receive no general blob-store handle.
 
-The download is a tar archive containing JSON lines and original artifact bytes. Its manifest
-states exclusions and read times. Reads include workspace-shared data and the admin's own private
-data, subject to agent and source access. Other members' private data and rooms whose membership
-cannot be verified are excluded. Connector content, source pages, credentials, configuration,
-usage, audit records, model context, and search indexes are outside this export. Generated
-workspace archives are marked on their artifact records and excluded from later exports.
+The job runs once per workspace through the durable job queue. A pending row survives a restart;
+a recovered execution rebuilds an incomplete archive. The Admin tab reads queued, preparing,
+ready, failed, or expired status from the database. Concurrent requests share the active export;
+replaying a completed request never rebuilds it.
 
-A missing artifact, content mismatch, unavailable store, or exceeded bound refuses the export;
-no partial archive is published. Each record file is bounded to 100,000 rows and 32 MiB; the
-streamed archive is bounded to 1 GiB. Runtime records share one database snapshot; the manifest
-does not claim an atomic snapshot across memory and blob storage.
+The TAR archive contains numbered JSON lines files and original artifact bytes. Database records,
+including memory, share one repeatable-read snapshot. The job stages records in private temporary
+files and closes that snapshot before any object-store transfer. Staging uses disk in proportion
+to metadata size and closes and removes its files on completion or failure. Original files stream
+in bounded chunks and must match
+the size and digest in that snapshot. A missing file or mismatch fails the export without publishing
+a download. The manifest states exclusions, the snapshot start, and completion time. Admin exports
+include every member's private, private-agent, room, archived, and retained deleted conversations
+and memory. Other workspaces, externally shared channels, connector content, source pages,
+credentials, configuration, usage, audit records, model context, and search indexes are excluded.
+Export objects live outside shared attachments and do not enter later exports. Previously generated
+archives remain excluded by their artifact marker.
+
+Production uploads use multipart S3 writes with 64 MiB parts and enforce the 10,000-part
+object-store limit. Metadata is read in bounded row batches without a total record limit.
+An admin-only download read creates a fresh signed S3 GET, valid for at most 15 minutes and no
+longer than the archive's remaining retention. The browser downloads directly from S3. Local
+filesystem deployments serve the same authenticated read as a stream. The requester must remain a
+seated admin at execution and publication; every status and download read checks current access.
+Downloads expire 24 hours after completion. The job deletes expired objects; S3 lifecycle rules
+remove tagged export versions and abandoned multipart uploads. A signed link can be used by anyone
+holding it until it expires. The confirmation and Data ownership documentation disclose private data.
 
 ## Agent loop
 

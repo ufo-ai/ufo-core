@@ -106,3 +106,11 @@ test("the radar row stands with the flag on, and its address opens either way", 
   await waitFor(() => expect(screen.queryByText("This link is not valid.")).toBeNull());
   expect(parseHash(location.hash)).toEqual({ kind: "section", section: "radar", place: {} });
 });
+
+
+test.each([false, true])("Admin is visible only for an admin: %s", async (admin) => {
+  location.hash = "#/workspace/apps";
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin }} surfaces={ALL_SURFACES} onAgents={() => {}} />);
+  await screen.findByRole("tab", { name: "Apps" });
+  expect(Boolean(screen.queryByRole("tab", { name: "Admin" }))).toBe(admin);
+});

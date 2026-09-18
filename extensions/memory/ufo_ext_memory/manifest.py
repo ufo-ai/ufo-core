@@ -113,7 +113,7 @@ from ufo_ext_memory.store import (
 )
 from ufo_ext_memory.surface import ROUTES as MEMORY_ROUTES
 from ufo_ext_memory.surface import SURFACE_MEMORY
-from ufo_ext_memory.workspace_export import EXPORT_ACTION
+from ufo_ext_memory.workspace_export import EXPORT_ACTION, EXPORT_JOB
 
 NAME = "memory"
 VERSION = "0.1.0"
@@ -1038,6 +1038,7 @@ def manifest() -> Manifest:
             HookSpec(event="page_change", handler=derive_facts),
         ),
         jobs=(
+            EXPORT_JOB,
             JobSpec(
                 name=MEMORY_INDEX_JOB,
                 schedule=MEMORY_INDEX_SCHEDULE,

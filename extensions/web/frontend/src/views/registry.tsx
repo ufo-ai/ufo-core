@@ -65,6 +65,13 @@ export const CONNECTION_VIEWS: Record<ConnectionTab, PaneView> = {
 };
 
 export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
+  admin: {
+    label: "Admin",
+    remountOnPlace: false,
+    render: placed(() =>
+      import("@/views/WorkspaceAdmin").then((module) => ({ default: module.WorkspaceAdmin })),
+    ),
+  },
   profile: {
     label: "Profile",
     remountOnPlace: false,

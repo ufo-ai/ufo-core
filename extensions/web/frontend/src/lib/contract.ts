@@ -50,6 +50,20 @@ export type DrainStep = {
   arrivals: string[];
 };
 
+export type ExportStatus = {
+  id: string;
+  status: "queued" | "preparing" | "ready" | "failed" | "expired";
+  created_at: string;
+  finished_at: string | null;
+  expires_at: string | null;
+  size_bytes: number | null;
+  error: string | null;
+};
+
+export type ExportView = {
+  export: ExportStatus | null;
+};
+
 export type LostEnd = {
   kind: "lost";
 };

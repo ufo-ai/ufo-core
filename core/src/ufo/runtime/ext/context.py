@@ -99,6 +99,7 @@ from ufo.runtime.turns.audience import (
 from ufo.runtime.turns.subjects import MEMBER_SUBJECT_PREFIX, SHARED_SUBJECT
 from ufo.runtime.turns.transcript import TranscriptDecodeError, decode, transcript_key
 from ufo.runtime.workspace import PLATFORM_FUNDED, ResolvedModelClient, ws_current
+from ufo.runtime.workspace_export import ExportStorage
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
 from ufo.schema.records import (
@@ -1361,6 +1362,7 @@ class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
     audience: Audience = SHARED_AUDIENCE
+    exports: ExportStorage | None = None
     installations: SurfaceInstallationAccess = field(
         default_factory=lambda: SurfaceInstallationAccess(frozenset())
     )
@@ -3010,6 +3012,7 @@ def context_for(
         embed=embed,
         search=search,
         pages=pages,
+        exports=None if blob is None else ExportStorage(blob),
         corpus=None if blob is None else TrajectoryCorpus(blob),
         profiles=None if blob is None else MemberProfileWrites(blob),
         files=None if sandboxes is None else ConversationFiles(sandboxes),

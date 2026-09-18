@@ -60,6 +60,7 @@ BILLING_PORTAL_LINK_KEY = "portal_url"
 IMESSAGE_STATE_KEY = "state"
 IMESSAGE_INSTRUCTION_KEY = "instruction"
 IMESSAGE_LINK_KEY = "opt_in_link"
+EXPORT_WORKSPACE_ACTION = "export"
 MANAGE_BILLING_ACTION = "manage_billing"
 BILLING_OPERATION_KEY = "operation"
 BILLING_PORTAL_OPERATION = "portal"
@@ -1041,6 +1042,17 @@ async def submit_action(
             async for _cursor, frame in frames:
                 match frame:
                     case Terminal():
+                        if (kind, action) == (
+                            WORKSPACE_KIND,
+                            EXPORT_WORKSPACE_ACTION,
+                        ) and frame.frame.status == "done":
+                            return JSONResponse(
+                                {
+                                    "applied": True,
+                                    "message": frame.frame.text,
+                                    "turn_id": str(admitted.turn_id),
+                                }
+                            )
                         return _action_outcome(kind, action, body, frame.frame, admitted.turn_id)
                     case Parked():
                         return JSONResponse(

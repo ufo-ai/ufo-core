@@ -11,6 +11,9 @@ Memory keeps facts that remain useful across conversations, such as preferences 
 - **Workspace memory** is available across the workspace. Shared channels use this scope.
 - **Room memory** belongs to a private channel or group direct message.
 
+These scopes control how agents use memory. Workspace admins can export all members' private
+memory. See [Data ownership](/docs/work/data-ownership/).
+
 No memory crosses between workspaces.
 
 An externally shared channel is sealed from workspace memory. Facts from the channel stay in that

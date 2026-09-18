@@ -205,6 +205,7 @@ export function WorkspacePane({
   onPlace?: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
 }) {
   const tabs = useOfferedTabs();
+  if (view === "admin" && !tabs.includes(view)) return <InvalidLink />;
   return (
     <TabbedPane
       group="workspace"

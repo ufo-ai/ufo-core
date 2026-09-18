@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from uuid import uuid4
 
 from aiobotocore.client import AioBaseClient
@@ -21,6 +21,9 @@ from ufo.runtime.workspace import ws_current
 MISSING_KEY_CODES = ("404", "NoSuchKey", "NotFound")
 BLOB_STREAM_CHUNK_BYTES = 1024 * 1024
 S3_MULTIPART_PART_BYTES = 8 * 1024 * 1024
+S3_MAX_PARTS = 10_000
+S3_MIN_PART_BYTES = 5 * 1024 * 1024
+S3_MAX_PART_BYTES = 5 * 1024 * 1024 * 1024
 BLOB_LIST_MAX_KEYS = 10_000
 BLOB_ROOT_SETTING = "blob.root"
 WORKSPACE_KEY_PREFIX = "workspaces/"
@@ -62,7 +65,14 @@ class BlobStore(Protocol):
 
     def get_stream(self, key: str) -> AsyncIterator[bytes]: ...
 
-    async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None: ...
+    async def put_stream(
+        self,
+        key: str,
+        chunks: AsyncIterator[bytes],
+        *,
+        part_size_bytes: int = S3_MULTIPART_PART_BYTES,
+        tags: dict[str, str] | None = None,
+    ) -> None: ...
 
     async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
         """Every stored object under a key prefix, sorted by key, capped at `BLOB_LIST_MAX_KEYS`
@@ -114,7 +124,14 @@ class FilesystemBlobStore:
         finally:
             await asyncio.to_thread(handle.close)
 
-    async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None:
+    async def put_stream(
+        self,
+        key: str,
+        chunks: AsyncIterator[bytes],
+        *,
+        part_size_bytes: int = S3_MULTIPART_PART_BYTES,
+        tags: dict[str, str] | None = None,
+    ) -> None:
         path = self._resolve(key)
         await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
         temp = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
@@ -239,8 +256,18 @@ class S3BlobStore:
             async for chunk in body.iter_chunks(BLOB_STREAM_CHUNK_BYTES):
                 yield chunk
 
-    async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None:
+    async def put_stream(
+        self,
+        key: str,
+        chunks: AsyncIterator[bytes],
+        *,
+        part_size_bytes: int = S3_MULTIPART_PART_BYTES,
+        tags: dict[str, str] | None = None,
+    ) -> None:
+        if not S3_MIN_PART_BYTES <= part_size_bytes <= S3_MAX_PART_BYTES:
+            raise ValueError("S3 multipart part size is outside its supported range")
         client = await self._client()
+        tagging = {} if not tags else {"Tagging": urlencode(tags)}
         buffer = bytearray()
         upload_id: str | None = None
         parts: list[dict[str, object]] = []
@@ -248,11 +275,15 @@ class S3BlobStore:
         try:
             async for chunk in chunks:
                 buffer += chunk
-                if len(buffer) < S3_MULTIPART_PART_BYTES:
+                if len(buffer) < part_size_bytes:
                     continue
                 if upload_id is None:
-                    started = await client.create_multipart_upload(Bucket=self.bucket, Key=key)
+                    started = await client.create_multipart_upload(
+                        Bucket=self.bucket, Key=key, **tagging
+                    )
                     upload_id = started["UploadId"]
+                if part_number > S3_MAX_PARTS:
+                    raise ValueError("multipart upload exceeds the S3 part limit")
                 uploaded = await client.upload_part(
                     Bucket=self.bucket,
                     Key=key,
@@ -264,16 +295,19 @@ class S3BlobStore:
                 part_number += 1
                 buffer = bytearray()
             if upload_id is None:
-                await client.put_object(Bucket=self.bucket, Key=key, Body=bytes(buffer))
+                await client.put_object(Bucket=self.bucket, Key=key, Body=bytes(buffer), **tagging)
                 return
-            uploaded = await client.upload_part(
-                Bucket=self.bucket,
-                Key=key,
-                PartNumber=part_number,
-                UploadId=upload_id,
-                Body=bytes(buffer),
-            )
-            parts.append({"ETag": uploaded["ETag"], "PartNumber": part_number})
+            if buffer:
+                if part_number > S3_MAX_PARTS:
+                    raise ValueError("multipart upload exceeds the S3 part limit")
+                uploaded = await client.upload_part(
+                    Bucket=self.bucket,
+                    Key=key,
+                    PartNumber=part_number,
+                    UploadId=upload_id,
+                    Body=bytes(buffer),
+                )
+                parts.append({"ETag": uploaded["ETag"], "PartNumber": part_number})
             await client.complete_multipart_upload(
                 Bucket=self.bucket,
                 Key=key,
@@ -323,13 +357,14 @@ class S3BlobStore:
             "put_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=ttl_seconds
         )
 
-    async def presigned_get(self, key: str, ttl_seconds: int) -> str:
-        """A URL any holder can GET `key` from, until it expires — the read-side mirror of
-        `presigned_put`. No measurement to sign: a GET carries no body, so there is nothing a
-        forged request could substitute."""
+    async def presigned_get(self, key: str, ttl_seconds: int, *, attachment: bool = False) -> str:
+        """A temporary GET for one object, optionally served as an uncached download."""
         client = await self._client()
+        params = {"Bucket": self.bucket, "Key": key}
+        if attachment:
+            params.update(ResponseContentDisposition="attachment", ResponseCacheControl="no-store")
         return await client.generate_presigned_url(
-            "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=ttl_seconds
+            "get_object", Params=params, ExpiresIn=ttl_seconds
         )
 
     async def put_host(self) -> str:
@@ -429,8 +464,17 @@ class WorkspaceBlobStore:
         after the block exits."""
         return self.backend.get_stream(self._full(key))
 
-    async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None:
-        await self.backend.put_stream(self._full(key), chunks)
+    async def put_stream(
+        self,
+        key: str,
+        chunks: AsyncIterator[bytes],
+        *,
+        part_size_bytes: int = S3_MULTIPART_PART_BYTES,
+        tags: dict[str, str] | None = None,
+    ) -> None:
+        await self.backend.put_stream(
+            self._full(key), chunks, part_size_bytes=part_size_bytes, tags=tags
+        )
 
     async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
         if not prefix:
@@ -469,6 +513,14 @@ class WorkspaceBlobStore:
             case _:
                 raise TypeError("presigned_get requires the s3 backend")
 
+    async def download_url(self, key: str, ttl_seconds: int) -> str | None:
+        """Return a direct S3 download link, or None for local filesystem storage."""
+        match self.backend:
+            case S3BlobStore() as s3:
+                return await s3.presigned_get(self._full(key), ttl_seconds, attachment=True)
+            case FilesystemBlobStore():
+                return None
+
     def _full(self, key: str) -> str:
         if key.startswith(WORKSPACE_KEY_PREFIX):
             raise ValueError(f"key is already workspace-prefixed: {key!r}")
@@ -498,8 +550,17 @@ class FleetBlobStore:
     def get_stream(self, key: str) -> AsyncIterator[bytes]:
         return self.backend.get_stream(self._checked(key))
 
-    async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None:
-        await self.backend.put_stream(self._checked(key), chunks)
+    async def put_stream(
+        self,
+        key: str,
+        chunks: AsyncIterator[bytes],
+        *,
+        part_size_bytes: int = S3_MULTIPART_PART_BYTES,
+        tags: dict[str, str] | None = None,
+    ) -> None:
+        await self.backend.put_stream(
+            self._checked(key), chunks, part_size_bytes=part_size_bytes, tags=tags
+        )
 
     async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
         return await self.backend.list(self._checked(prefix))

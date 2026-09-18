@@ -539,7 +539,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         _core_migration_head(),
         "index_default_0002",
         "objectives_0002",
-        "memory_0026",
+        "20260917232811",
         "sample_ext_note_0001",
         "scheduled_tasks_0004",
         "sources_0009",

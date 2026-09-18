@@ -14,6 +14,7 @@ from uuid import UUID
 
 from pydantic import TypeAdapter
 from pydantic.json_schema import GenerateJsonSchema, JsonSchemaMode
+from ufo_ext_memory.workspace_export import ExportView
 from ufo_ext_web.surface import _sse
 
 from ufo.harness.models.interface import TextDelta
@@ -148,6 +149,9 @@ def rendered_contract() -> str:
     """The TypeScript module: one type per model `TurnRecord` reaches, and one alias per union
     the record names."""
     defs = TypeAdapter(ROOT).json_schema(schema_generator=_Definitions, mode=MODE)["$defs"]
+    defs.update(
+        TypeAdapter(ExportView).json_schema(schema_generator=_Definitions, mode=MODE)["$defs"]
+    )
     aliases: dict[frozenset[str], str] = {}
     for name, union in ALIASES.items():
         members = TypeAdapter(union).json_schema(mode=MODE)["oneOf"]

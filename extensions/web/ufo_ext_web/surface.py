@@ -43,6 +43,12 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 from ufo_ext_imessage.cloud import imessage_offered
 from ufo_ext_imessage.surface import SURFACE_IMESSAGE
 from ufo_ext_imessage.tools import IMESSAGE_CONNECT_ACTION
+from ufo_ext_memory.workspace_export import (
+    EXPORT_LINK_SECONDS,
+    ExportAccess,
+    ExportStatus,
+    ExportView,
+)
 from ufo_ext_sites.objects import SITE_KIND
 from ufo_ext_sites.store import HostedSites
 from ufo_ext_sites.surface import homepage_embed_url, shipped_homepage_url
@@ -62,6 +68,7 @@ from ufo.sdk.context import (
     WorkspaceAgent,
 )
 from ufo.sdk.credentials import CredentialValueInvalid
+from ufo.sdk.export import EXPORT_FILENAME
 from ufo.sdk.flags import flag_enabled
 from ufo.sdk.http import (
     FormData,
@@ -4105,6 +4112,75 @@ async def workspace_email(ctx: SurfaceContext, request: Request) -> Response:
 PRODUCT_EMAIL_ACTION = "set_product_email"
 
 
+async def workspace_export_status(ctx: SurfaceContext, request: Request) -> Response:
+    """The most recent workspace export, visible only to seated admins."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    if not any(action.name == "export" for action in ctx.object_actions("workspace", "collection")):
+        return JSONResponse({"error": "Workspace export is not available."}, status_code=404)
+    if not audience.admin:
+        return JSONResponse({"error": "Admin access required."}, status_code=403)
+    try:
+        async with ctx.transaction() as connection:
+            row = await ExportAccess(connection, ctx.workspace_id, member_id).read()
+    except PermissionError:
+        return JSONResponse({"error": "Admin access required."}, status_code=403)
+    status = None if row is None else ExportStatus.model_validate(dict(row._mapping))
+    if (
+        status is not None
+        and status.expires_at is not None
+        and status.expires_at.replace(tzinfo=UTC) <= datetime.now(UTC)
+    ):
+        status = status.model_copy(update={"status": "expired"})
+    return JSONResponse(
+        ExportView(export=status).model_dump(mode="json"), headers={"Cache-Control": "no-store"}
+    )
+
+
+async def workspace_export_download(ctx: SurfaceContext, request: Request) -> Response:
+    """Authorize a fresh direct object-store link, or stream a local development archive."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    if not any(action.name == "export" for action in ctx.object_actions("workspace", "collection")):
+        return JSONResponse({"error": "Workspace export is not available."}, status_code=404)
+    if not audience.admin:
+        return JSONResponse({"error": "Admin access required."}, status_code=403)
+    try:
+        export_id = UUID(request.path_params["export_id"])
+    except ValueError:
+        return JSONResponse({"error": "Export not found."}, status_code=404)
+    try:
+        async with ctx.transaction() as connection:
+            row = await ExportAccess(connection, ctx.workspace_id, member_id).read(export_id)
+    except PermissionError:
+        return JSONResponse({"error": "Admin access required."}, status_code=403)
+    if row is None:
+        return JSONResponse({"error": "Export not found."}, status_code=404)
+    now = datetime.now(UTC)
+    if row.status != "ready" or row.expires_at.replace(tzinfo=UTC) <= now:
+        return JSONResponse({"error": "Export is not available."}, status_code=410)
+    ttl = max(
+        1, min(EXPORT_LINK_SECONDS, int((row.expires_at.replace(tzinfo=UTC) - now).total_seconds()))
+    )
+    url = await ctx.blob.download_url(row.blob_key, ttl)
+    headers = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+    if url is not None:
+        return RedirectResponse(url, status_code=303, headers=headers)
+    return StreamingResponse(
+        ctx.blob.get_stream(row.blob_key),
+        media_type="application/x-tar",
+        headers={
+            **headers,
+            "Content-Disposition": f'attachment; filename="{EXPORT_FILENAME}"',
+            "Content-Length": str(row.size_bytes),
+        },
+    )
+
+
 async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
     """The workspace roster: who the members are, what each is called, which of them administer the
     workspace, and whose access is live — the same rows the `member` kind lists to a member asking
@@ -6069,6 +6145,12 @@ ROUTES = (
         method="GET",
         path="agents/{agent_id}/conversations/{conversation_id}/slots/{slot_id}",
         handler=conversation_slot,
+    ),
+    SurfaceRoute(method="GET", path="workspace/export", handler=workspace_export_status),
+    SurfaceRoute(
+        method="GET",
+        path="workspace/export/{export_id}/download",
+        handler=workspace_export_download,
     ),
     SurfaceRoute(method="GET", path="workspace/team", handler=workspace_team),
     SurfaceRoute(method="GET", path="workspace/email", handler=workspace_email),

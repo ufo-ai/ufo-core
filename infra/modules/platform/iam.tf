@@ -44,6 +44,11 @@ data "aws_iam_policy_document" "app_s3" {
     actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
     resources = ["${aws_s3_bucket.blob.arn}/*"]
   }
+  statement {
+    sid       = "ExportUploads"
+    actions   = ["s3:PutObjectTagging", "s3:AbortMultipartUpload"]
+    resources = ["${aws_s3_bucket.blob.arn}/workspaces/*/exports/*"]
+  }
 }
 
 resource "aws_iam_policy" "app_s3" {

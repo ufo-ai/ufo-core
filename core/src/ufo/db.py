@@ -86,6 +86,8 @@ def _build_engine(url: str, pool: _Pool) -> AsyncEngine:
     if engine.dialect.name == "sqlite":
         sa.event.listen(engine.sync_engine, "connect", _sqlite_on_connect)
         sa.event.listen(engine.sync_engine, "begin", _sqlite_begin_immediate)
+        sa.event.listen(engine.sync_engine, "commit", _sqlite_end_read_only)
+        sa.event.listen(engine.sync_engine, "rollback", _sqlite_end_read_only)
     return engine
 
 
@@ -339,7 +341,7 @@ async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnecti
     from ufo.harness.o11y import emit_histogram, emit_metric
 
     lock = None
-    if engine.dialect.name == "sqlite":
+    if engine.dialect.name == "sqlite" and not engine.get_execution_options().get("ufo_read_only"):
         lock = _SQLITE_TRANSACTION_LOCKS.get(engine)
         if lock is None:
             lock = _SQLITE_TRANSACTION_LOCKS[engine] = asyncio.Lock()
@@ -388,18 +390,26 @@ async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnecti
 
 
 @asynccontextmanager
-async def workspace_tx(*, snapshot: bool = False) -> AsyncIterator[AsyncConnection]:
+async def workspace_tx(
+    *, snapshot: bool = False, read_only: bool = False
+) -> AsyncIterator[AsyncConnection]:
     """`snapshot=True` reads every statement of the transaction from one snapshot, for a caller
     assembling several reads into one picture of a row's state: under the default read committed
     each statement takes its own, so a concurrent commit can land between two of them and be half
     visible. The level is chosen at BEGIN because the workspace GUC below is a query, and Postgres
-    refuses SET TRANSACTION after one. SQLite already runs each transaction alone."""
+    refuses SET TRANSACTION after one. Read-only SQLite snapshots use a deferred transaction,
+    so WAL readers do not hold the writer slot. Other SQLite transactions acquire that slot
+    before reading."""
     if _app_url is None:
         raise RuntimeError("db not initialized (init_db runs in the composition root)")
     engine = _engine_for(_app_url, _APP)
     if snapshot and engine.dialect.name == "postgresql":
         engine = engine.execution_options(isolation_level="REPEATABLE READ")
+    if read_only:
+        engine = engine.execution_options(ufo_read_only=True)
     async with _opened(engine, "workspace") as connection:
+        if read_only and connection.dialect.name == "postgresql":
+            await connection.exec_driver_sql("SET TRANSACTION READ ONLY")
         workspace_id = current_workspace.get()
         if workspace_id is not None and connection.dialect.name == "postgresql":
             await connection.execute(
@@ -531,4 +541,13 @@ def _sqlite_on_connect(dbapi_connection: Any, _connection_record: Any) -> None:
 
 def _sqlite_begin_immediate(connection: sa.Connection) -> None:
     """Claim the single writer slot up front: lock-upgrade deadlocks become queueing."""
-    connection.exec_driver_sql("begin immediate")
+    if connection.get_execution_options().get("ufo_read_only"):
+        connection.exec_driver_sql("pragma query_only=on")
+        connection.exec_driver_sql("begin")
+    else:
+        connection.exec_driver_sql("begin immediate")
+
+
+def _sqlite_end_read_only(connection: sa.Connection) -> None:
+    if connection.get_execution_options().get("ufo_read_only"):
+        connection.exec_driver_sql("pragma query_only=off")

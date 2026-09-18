@@ -1,5 +1,6 @@
 import { createContext, useContext, type ReactNode } from "react";
 
+import { useMe } from "@/lib/audience";
 import { WORKSPACE_TABS, type WorkspaceTab } from "@/lib/route";
 import type { Surfaces } from "@/lib/types";
 
@@ -35,17 +36,16 @@ export function useSurfaces(): Surfaces {
 
 export function useOfferedTabs(): readonly WorkspaceTab[] {
   const surfaces = useSurfaces();
-  return WORKSPACE_TABS.filter((tab) =>
-    tab === "team"
-      ? surfaces.team
-      : tab === "email"
-        ? surfaces.email
-        : tab === "apps"
-          ? surfaces.apps
-          : tab === "memory"
-            ? surfaces.memory
-            : tab === "skills"
-              ? surfaces["community-skills"] || surfaces["installed-skills"]
-              : true,
-  );
+  const member = useMe();
+  return WORKSPACE_TABS.filter((tab) => {
+    switch (tab) {
+      case "admin": return member?.admin === true;
+      case "team": return surfaces.team;
+      case "email": return surfaces.email;
+      case "apps": return surfaces.apps;
+      case "memory": return surfaces.memory;
+      case "skills": return surfaces["community-skills"] || surfaces["installed-skills"];
+      default: return true;
+    }
+  });
 }
