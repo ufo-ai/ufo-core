@@ -889,7 +889,8 @@ takes the page project and that SDK into its sandbox, edits the one source file,
 and deploys the result through the standing site tools, so the workspace then owns its copy at its
 own origin and unbinding it returns the app to the page the deploy carries. That SDK reaches the
 sandbox as the archive `[sites] page_kit` names, a deploy input the portal's build produces; a
-deploy that names none builds no app page and refuses a deploy of one.
+deploy that names none builds no app page and refuses a deploy of one. Before hosting an app page,
+sites validates its source imports and mount call, then builds it.
 
 Beside chat, each agent carries read projections shaped by the same contracts chat enforces: its
 homepage (the frame link of the hosted site `set_homepage` bound; a bound site's audience IS the

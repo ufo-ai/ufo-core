@@ -13,6 +13,7 @@ package data, because this materialization is its only reader; the kit is the de
 keys. Only the config and the kit are fixed at the deploy — which is what makes an app page forked a
 year ago build against today's components rather than the ones its first build froze."""
 
+import re
 import shlex
 from pathlib import Path
 
@@ -31,17 +32,25 @@ PAGE_DIR = Path(__file__).parent / "page"
 KIT_MOUNT = "sdk"
 KIT_ARCHIVE = "sdk.tar.gz"
 PROJECT_SOURCE = "app.tsx"
-PROJECT_DESIGN = "application-design.svg"
 PROJECT_CONFIG = "vite.config.ts"
-PROJECT_PREVIEW = "preview.html"
 PROJECT_DIST = "dist"
-"""A page project's entry, the design it is held to, the config it is built with, the frame the
-audit drives it in, and where that build writes the page. The entry's presence is what tells a
-deploy the directory it was handed is source rather than a site: no browser runs TSX, so a directory
-whose page names one is a project either way. The config and the preview frame are the deploy's own
-— written beside the entry at deploy time, never carried in the project — so a page builds against
-components as current as the deploy that built it, and a page an app extension ships is audited in
-the same preview frame a generated one is."""
+IMPORT_DECLARATION = re.compile(r"(?m)^[ \t]*import\b")
+EXPORT_DECLARATION = re.compile(r"(?m)^[ \t]*export\b")
+IMPORT_MODULE = re.compile(r"\bfrom\s*['\"]([^'\"]+)['\"]|\bimport\s*\(\s*['\"]([^'\"]+)['\"]")
+SIDE_EFFECT_IMPORT = re.compile(r"(?m)^[ \t]*import\s*['\"]")
+NON_NAMED_IMPORT = re.compile(r"(?m)^[ \t]*import\s+(?!type\s*\{|\{)")
+SIBLING_MODULE = re.compile(r"\./[\w-]+\.(?:md\?raw|[a-z0-9]+\?url)")
+PUBLISHED_MODULES = ("ufo/kit", "ufo/blocks")
+SIBLING_IMPORT = re.compile(
+    r"(?m)^[ \t]*import\s+[A-Za-z_$][\w$]*\s*from\s*['\"]"
+    r"\./[\w-]+\.(?:md\?raw|[a-z0-9]+\?url)['\"]"
+)
+ROOT_MOUNT = re.compile(
+    r"\bmountApp\s*\(\s*document\.getElementById\(\s*['\"]root['\"]\s*\)\s*!?\s*,"
+)
+
+APPLICATION_SOURCE_MAX_CHARS = 256_000
+
 PROJECT_FILE_ABSENT = 17
 PROJECT_FILE_READ = f"""import sys
 
@@ -81,7 +90,30 @@ UNPACK_TIMEOUT_SECONDS = 300
 
 
 PROJECT_CONFIG_BYTES = (PAGE_DIR / PROJECT_CONFIG).read_bytes()
-PROJECT_PREVIEW_BYTES = (PAGE_DIR / PROJECT_PREVIEW).read_bytes()
+
+
+def validate_application_source(source: str) -> None:
+    """Require the published module boundary and the application mount call."""
+    modules = tuple(left or right for left, right in IMPORT_MODULE.findall(source))
+    if IMPORT_DECLARATION.search(source) is None or "ufo/kit" not in modules:
+        raise ValueError("app.tsx must import its runtime and components from ufo/kit")
+    if SIDE_EFFECT_IMPORT.search(source) or any(
+        module not in PUBLISHED_MODULES and SIBLING_MODULE.fullmatch(module) is None
+        for module in modules
+    ):
+        raise ValueError(
+            "app.tsx may import only from ufo/kit, ufo/blocks and a file beside it, "
+            "as ./name.md?raw or ./name.ext?url"
+        )
+    if NON_NAMED_IMPORT.search(SIBLING_IMPORT.sub("", source)):
+        raise ValueError("app.tsx must use named imports from ufo/kit and ufo/blocks")
+    if EXPORT_DECLARATION.search(source):
+        raise ValueError("app.tsx must not export declarations")
+    if "UfoAppKit" in source:
+        raise ValueError("app.tsx must import from ufo/kit instead of using UfoAppKit")
+
+    if ROOT_MOUNT.search(source) is None:
+        raise ValueError("mountApp must receive the root element and a render callback")
 
 
 async def transfer(

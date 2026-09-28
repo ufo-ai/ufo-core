@@ -51,7 +51,6 @@ import json
 import shlex
 from dataclasses import dataclass
 from hashlib import sha256
-from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -79,34 +78,21 @@ from ufo.sdk.tools import (
     ToolResult,
     clipped,
 )
-from ufo_ext_sites.application_audit import (
-    APPLICATION_DESIGN_MAX_CHARS,
-    APPLICATION_DESIGN_WIDTH,
-    APPLICATION_SOURCE_MAX_CHARS,
-    MAX_MESSAGE_CHARS,
-    ApplicationAuditIssue,
-    ApplicationAuditVerdict,
-    ApplicationDesign,
-    AuditIssueCode,
-    validate_application_design,
-    validate_application_source,
-)
 from ufo_ext_sites.objects import SITE_KIND, effective_visibility, site_object_name
 from ufo_ext_sites.share_card import draw_from_page
 from ufo_ext_sites.source import (
+    APPLICATION_SOURCE_MAX_CHARS,
     PROJECT_CONFIG,
     PROJECT_CONFIG_BYTES,
-    PROJECT_DESIGN,
     PROJECT_DIST,
     PROJECT_FILE_ABSENT,
     PROJECT_FILE_READ,
-    PROJECT_PREVIEW,
-    PROJECT_PREVIEW_BYTES,
     PROJECT_SOURCE,
     SOURCE_PUT_TTL_SECONDS,
     UPLOAD_SCRIPT,
     transfer,
     unpack_page_kit,
+    validate_application_source,
 )
 from ufo_ext_sites.store import (
     HostedSite,
@@ -123,95 +109,10 @@ DEPLOY_WEBSITE_TOOL = "deploy_website"
 PUBLISH_WEBSITE_TOOL = "publish_website"
 SET_HOMEPAGE_TOOL = "set_homepage"
 
+MAX_MESSAGE_CHARS = 500
 START_SERVER_PORT = 5000
-APPLICATION_AUDIT_TIMEOUT_SECONDS = 120
-APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS = 15
-APPLICATION_LIFECYCLE_DIAGNOSTIC_MAX_BYTES = 4096
-APPLICATION_LIFECYCLE_EXIT = 3
-APPLICATION_LIFECYCLE_SUFFIX = ".lifecycle.json"
-APPLICATION_LIFECYCLE_UNREAD = (
-    "the page did not become ready, and the audit's own record of why could not be read"
-)
-"""What a lifecycle refusal says when its diagnostic is gone. An issue message cannot be empty, so
-an unread diagnostic would raise a validation error in place of the refusal the exit code already
-earned, and the builder would lose the verdict to an internal fault."""
-APPLICATION_AUDIT_SCRIPT_PATH = Path(__file__).parent / "scripts" / "audit_application.cjs"
-APPLICATION_AUDIT_SCRIPT = APPLICATION_AUDIT_SCRIPT_PATH.read_bytes()
+SERVER_STOP_TIMEOUT_SECONDS = 15
 PAGE_REFUSAL_OPENING = "This page cannot be hosted yet. Repair it and deploy again:"
-APPLICATION_AUDIT_REPORT_READ = """from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-data = path.read_bytes()
-if len(data) > int(sys.argv[2]):
-    raise SystemExit("application audit report is too large")
-sys.stdout.buffer.write(data)"""
-
-
-class _ApplicationLifecycleBlocking(BaseModel):
-    startup: int = Field(ge=0)
-    observation: int = Field(ge=0)
-    unary: int = Field(ge=0)
-    stream: int = Field(ge=0)
-    timeout: int = Field(ge=0)
-    interval: int = Field(ge=0)
-
-
-class _ApplicationLifecycleSnapshot(BaseModel):
-    version: Literal[1]
-    generation: int = Field(ge=1)
-    epoch: int = Field(ge=0)
-    mounted: bool
-    state: Literal["booting", "active", "idle", "unmounted"]
-    revision: int = Field(ge=0)
-    blocking_work: int = Field(alias="blockingWork", ge=0)
-    blocking: _ApplicationLifecycleBlocking
-
-
-class _ApplicationLifecycleDiagnostic(BaseModel):
-    code: Literal["application_lifecycle"]
-    reason: str = Field(min_length=1, max_length=400)
-    snapshot: _ApplicationLifecycleSnapshot | None
-    problems: tuple[str, ...] = ()
-
-
-def _lifecycle_state(snapshot: _ApplicationLifecycleSnapshot) -> str:
-    """In one recorded run this check produced eight of twelve refusals, and the builder answered
-    each by drawing and building the whole page again."""
-
-    if not snapshot.mounted:
-        return "the page never mounted"
-    blocking = tuple(
-        f"{kind} {count}" for kind, count in snapshot.blocking.model_dump().items() if count
-    )
-    if not blocking and snapshot.state == "idle":
-        return "the page kept re-rendering"
-    named = [] if snapshot.state == "idle" else [f"state {snapshot.state}"]
-    if blocking:
-        named.append(f"{snapshot.blocking_work} blocking ({', '.join(blocking)})")
-    return ", ".join(named)
-
-
-def _lifecycle_joined(reason: str, named: tuple[str, ...], dropped: bool) -> str:
-    parts = (*named, "…") if dropped else named
-    return f"{reason}: {'; '.join(parts)}" if parts else reason
-
-
-def _lifecycle_message(reason: str, named: tuple[str, ...]) -> str:
-    """The audit hands up to four 500-character console lines, about five times the field's cap,
-    which would raise a validation error in place of the refusal."""
-
-    kept: tuple[str, ...] = ()
-    remaining = named
-    while remaining:
-        composed = _lifecycle_joined(reason, (*kept, remaining[0]), len(remaining) > 1)
-        if len(composed) > MAX_MESSAGE_CHARS:
-            break
-        kept, remaining = (*kept, remaining[0]), remaining[1:]
-    if not remaining:
-        return _lifecycle_joined(reason, kept, False)
-    room = MAX_MESSAGE_CHARS - len(_lifecycle_joined(reason, (*kept, ""), True))
-    head = remaining[0][:room] if room > 0 else ""
-    return _lifecycle_joined(reason, (*kept, head) if head else kept, True)
 
 
 PORT_STOP_PROG = """import os
@@ -542,7 +443,7 @@ async def _free_log(ctx: ToolContext, log_path: str) -> None:
 
 async def _stop_server(ctx: ToolContext, port: int) -> None:
     result = await ctx.sandbox.python(
-        PORT_STOP_PROG, str(port), timeout_s=APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS
+        PORT_STOP_PROG, str(port), timeout_s=SERVER_STOP_TIMEOUT_SECONDS
     )
     if result.exit_code != 0:
         raise RuntimeError(result.stderr.strip() or f"cannot free port {port}")
@@ -553,7 +454,7 @@ async def _stop_server_task(ctx: ToolContext, command: str, base: str, pid: str)
         SERVER_TASK_STOP,
         pid,
         base,
-        timeout_s=APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS,
+        timeout_s=SERVER_STOP_TIMEOUT_SECONDS,
     )
     if stopped.exit_code != 0:
         raise RuntimeError(stopped.stderr.strip() or "cannot stop the server task")
@@ -562,7 +463,7 @@ async def _stop_server_task(ctx: ToolContext, command: str, base: str, pid: str)
         base,
         detach=False,
         model_authored=True,
-        timeout_s=APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS,
+        timeout_s=SERVER_STOP_TIMEOUT_SECONDS,
     )
     if waited.timed_out_after_s is not None:
         raise RuntimeError("the server task did not stop")
@@ -574,8 +475,8 @@ async def _reset_server_task(ctx: ToolContext, base: str) -> None:
     reset = await ctx.sandbox.sh(
         SERVER_TASK_RESET,
         base,
-        str(APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS),
-        timeout_s=APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS + 5,
+        str(SERVER_STOP_TIMEOUT_SECONDS),
+        timeout_s=SERVER_STOP_TIMEOUT_SECONDS + 5,
     )
     if reset.exit_code != 0:
         raise RuntimeError(reset.stderr.strip() or f"cannot clear the server task at {base}")
@@ -952,12 +853,8 @@ async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResu
     )
 
 
-def _verdict(code: AuditIssueCode, message: str) -> ApplicationAuditVerdict:
-    return ApplicationAuditVerdict(issues=(ApplicationAuditIssue(code=code, message=message),))
-
-
 def _last_words(output: str) -> str:
-    """vite, node and the audit script print the fatal error last; a head-truncated message once
+    """Vite prints the fatal error last; a head-truncated message once
     spent a repair round on a `configLoader` deprecation notice."""
 
     text = output.strip()
@@ -966,57 +863,31 @@ def _last_words(output: str) -> str:
     return "…" + text[-(MAX_MESSAGE_CHARS - 1) :]
 
 
+class ApplicationPageIssue(BaseModel):
+    code: Literal["source", "build"]
+    message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)
+
+
 class ApplicationPageRefused(RuntimeError):
-    """The deterministic verdict that stopped an app page from becoming a site.
+    """A source or build failure that prevents hosting."""
 
-    The message is the repair list, because the builder's next `edit` is what reads it. It is
-    raised before anything is written, so a refusal leaves no row, no server, and no blob — which
-    is what makes the audit and the hosting one act: a hosted page is an audited page, and there is
-    nothing else to ask.
-
-    It refuses every attempt, and counts none. A page that fails four times fails four times; the
-    bounds are the child's rounds and the member's next message, never a budget that turns the
-    fourth attempt into a hosted page nobody checked."""
-
-    def __init__(self, verdict: ApplicationAuditVerdict) -> None:
-        super().__init__(
-            PAGE_REFUSAL_OPENING
-            + "\n"
-            + "\n".join(f"- {issue.message}" for issue in verdict.issues)
-        )
-        self.verdict = verdict
+    def __init__(self, code: Literal["source", "build"], message: str) -> None:
+        self.issue = ApplicationPageIssue(code=code, message=message)
+        super().__init__(PAGE_REFUSAL_OPENING + "\n- " + self.issue.message)
 
 
 @dataclass(frozen=True)
 class ApplicationPageGate:
-    """What a directory holding `app.tsx` must be true of before its bytes become a site.
-
-    Three deterministic acts in the order that makes each one cheap: the source is read and held to
-    the kit before a build is paid for, the build runs, and the browser measures the page that
-    build wrote. A design sitting beside the source adds the two checks only a design can carry —
-    its components and regions in the source, its layout in the rendered lane.
-
-    An audit that cannot run is not a repair. Chromium dying, a report that will not parse, a
-    wedged sandbox: those raise as themselves, so the builder is never told to edit `app.tsx` to
-    fix the browser."""
+    """Validate source and build the page before hosting."""
 
     ctx: ToolContext
     project: str
     kit: bytes
 
     async def built_page(self) -> str:
-        """What must be true of a page before its bytes become a site, and nothing more.
-
-        Four facts, each one a thing a member would meet as a broken product rather than an
-        ugly one: the design parses into named regions, the source stays inside the module
-        boundary and mounts, the project builds, and the built page reaches its ready state in
-        a browser. Whether the page is good is read off the page by whoever drew it — the
-        builder holds `js_repl` and looks before it deploys."""
-        design = await self._design()
+        """Return the built directory after source and build checks pass."""
         await self._gate_source()
         await self._build()
-        if design is not None:
-            await self._mounts()
         return f"{self.project}/{PROJECT_DIST}"
 
     async def _read(self, name: str, maximum: int) -> str | None:
@@ -1029,15 +900,6 @@ class ApplicationPageGate:
             raise RuntimeError(held.stderr.strip() or f"{name} could not be read")
         return held.stdout
 
-    async def _design(self) -> ApplicationDesign | None:
-        source = await self._read(PROJECT_DESIGN, APPLICATION_DESIGN_MAX_CHARS)
-        if source is None:
-            return None
-        try:
-            return validate_application_design(source)
-        except ValueError as error:
-            raise ApplicationPageRefused(_verdict("design", str(error))) from error
-
     async def _gate_source(self) -> None:
         source = await self._read(PROJECT_SOURCE, APPLICATION_SOURCE_MAX_CHARS)
         if source is None:
@@ -1045,67 +907,19 @@ class ApplicationPageGate:
         try:
             validate_application_source(source)
         except ValueError as error:
-            raise ApplicationPageRefused(_verdict("source", str(error))) from error
+            raise ApplicationPageRefused("source", str(error)) from error
 
     async def _build(self) -> None:
         await self.ctx.sandbox.write_file(f"{self.project}/{PROJECT_CONFIG}", PROJECT_CONFIG_BYTES)
-        await self.ctx.sandbox.write_file(
-            f"{self.project}/{PROJECT_PREVIEW}", PROJECT_PREVIEW_BYTES
-        )
         await unpack_page_kit(self.ctx, self.kit, self.project)
         built = await self.ctx.sandbox.sh(
             f"cd {shlex.quote(self.project)} && vite build", timeout_s=BUILD_TIMEOUT_SECONDS
         )
         if built.exit_code != 0:
             raise ApplicationPageRefused(
-                _verdict(
-                    "build",
-                    _last_words(built.stderr or built.stdout) or "the page did not build",
-                )
+                "build",
+                _last_words(built.stderr or built.stdout) or "the page did not build",
             )
-
-    async def _mounts(self) -> None:
-
-        relative_root = f"{TOOL_OUTPUT_DIR}/application-audit/{self.ctx.turn.id}"
-        root = await self.ctx.sandbox.runtime_path(relative_root)
-        report_path = f"{root}.json"
-        await self.ctx.sandbox.write_runtime_file(f"{relative_root}.cjs", APPLICATION_AUDIT_SCRIPT)
-        run = await self.ctx.sandbox.sh(
-            'node "$@"',
-            f"{root}.cjs",
-            self.project,
-            report_path,
-            f"{root}-light.png",
-            f"{root}-dark.png",
-            f"{root}-interactive.html",
-            f"{root}-static.html",
-            str(APPLICATION_DESIGN_WIDTH),
-            timeout_s=APPLICATION_AUDIT_TIMEOUT_SECONDS,
-        )
-        if run.exit_code != 0:
-            await self._refuse_or_raise(run, report_path)
-
-    async def _refuse_or_raise(self, run: ExecResult, report_path: str) -> None:
-
-        detail = _last_words(run.stderr or run.stdout)
-        if run.exit_code == APPLICATION_LIFECYCLE_EXIT:
-            reason = await self._lifecycle_reason(report_path)
-            raise ApplicationPageRefused(
-                _verdict("lifecycle", reason or detail or APPLICATION_LIFECYCLE_UNREAD)
-            )
-        raise RuntimeError(detail or "the browser audit returned no error")
-
-    async def _lifecycle_reason(self, report_path: str) -> str:
-        diagnostic = await self.ctx.sandbox.python(
-            APPLICATION_AUDIT_REPORT_READ,
-            f"{report_path}{APPLICATION_LIFECYCLE_SUFFIX}",
-            str(APPLICATION_LIFECYCLE_DIAGNOSTIC_MAX_BYTES),
-        )
-        if diagnostic.exit_code != 0:
-            return ""
-        record = _ApplicationLifecycleDiagnostic.model_validate_json(diagnostic.stdout)
-        state = (_lifecycle_state(record.snapshot),) if record.snapshot else ()
-        return _lifecycle_message(record.reason, state + record.problems)
 
 
 async def _served_directory(

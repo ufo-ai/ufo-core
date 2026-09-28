@@ -16,30 +16,6 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ValidationError
 from ufo_ext_sites import manifest as sites_manifest
 from ufo_ext_sites import tools as sites_tools
-from ufo_ext_sites.application_audit import (
-    APPLICATION_DESIGN_FOLD,
-    APPLICATION_DESIGN_MAX_HEIGHT,
-    APPLICATION_DESIGN_WIDTH,
-    APPLICATION_REGION_MIN_AREA,
-    APPLICATION_REGION_MIN_HEIGHT,
-    APPLICATION_REGION_MIN_WIDTH,
-    DESKTOP_WIDTH,
-    KIT_QUIET_TEXT_MIN,
-    MAX_MESSAGE_CHARS,
-    MEASURED_VIEWS,
-    ApplicationAuditRegion,
-    ApplicationAuditReport,
-    ApplicationDesign,
-    ApplicationDesignFidelity,
-    application_design_fidelity,
-    application_design_region_fold_failure,
-    application_design_region_size_failure,
-    application_region_failure,
-    application_region_relation,
-    audit_application,
-    validate_application_design,
-    validate_application_source,
-)
 from ufo_ext_sites.delegation import BuildWebsiteInput
 from ufo_ext_sites.objects import (
     CONVERSATION_DIGEST_HEX,
@@ -52,6 +28,7 @@ from ufo_ext_sites.source import (
     PROJECT_FILE_ABSENT,
     PROJECT_FILE_READ,
     UNPACK_KIT_PROG,
+    validate_application_source,
 )
 from ufo_ext_sites.store import (
     SITE_NAME_MAX,
@@ -225,8 +202,7 @@ class FakeSandbox:
         for needle, result in self.scripted_programs.items():
             if needle in program:
                 return result
-        readable = (PROJECT_FILE_READ, sites_tools.APPLICATION_AUDIT_REPORT_READ)
-        if program in readable and args:
+        if program == PROJECT_FILE_READ and args:
             held = self.writes.get(args[0])
             if held is None:
                 return ExecResult("", "", PROJECT_FILE_ABSENT)
@@ -400,59 +376,6 @@ def _keyed_server_task(sandbox: FakeSandbox, key: str, port: int, log: str) -> N
     ]
 
 
-def _side_by_side_bands(page_height: int) -> tuple[dict[str, object], ...]:
-    """Two 60 px bands 100 px down one page, side by side in the 1440 px lane."""
-    return tuple(
-        {
-            "name": name,
-            "left": left,
-            "top": 100 / page_height,
-            "width": 0.4,
-            "height": 60 / page_height,
-            "aboveFold": True,
-        }
-        for name, left in (("stats", 0.05), ("filters", 0.55))
-    )
-
-
-def _side_by_side_report(design_height: int, application_height: int) -> ApplicationAuditReport:
-    return ApplicationAuditReport.model_validate(
-        {
-            "designHeight": design_height,
-            "designRegions": _side_by_side_bands(design_height),
-            "views": [
-                {
-                    "scheme": scheme,
-                    "width": width,
-                    "textChecked": 4,
-                    "text": [],
-                    "documentWidth": width,
-                    "pageHeight": application_height,
-                    "clipped": [],
-                    "overlaps": [],
-                    "console": [],
-                    "aboveFoldText": "Stats",
-                    "regions": _side_by_side_bands(application_height),
-                }
-                for width in (DESKTOP_WIDTH,)
-                for scheme in ("light", "dark")
-            ],
-            "interaction": {
-                "controls": [
-                    {"selector": "#first", "name": "First"},
-                    {"selector": "#second", "name": "Second"},
-                ],
-                "successes": [
-                    {"selector": "#first", "name": "First"},
-                    {"selector": "#second", "name": "Second"},
-                ],
-                "states": [["Stats"]],
-                "console": [],
-            },
-        }
-    )
-
-
 def test_website_building_parent_keeps_its_own_subdirs_but_not_the_child_subtree() -> None:
     registry = skill_registry((sites_manifest.manifest(),))
     parent_files = {path for path, _ in registry.named("website-building").files}
@@ -618,13 +541,13 @@ async def test_start_server_stops_its_task_when_readiness_fails(tmp_path: Path) 
     assert sandbox.shells == [
         (
             sites_tools.SERVER_TASK_RESET,
-            (started[1], str(sites_tools.APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS)),
-            sites_tools.APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS + 5,
+            (started[1], str(sites_tools.SERVER_STOP_TIMEOUT_SECONDS)),
+            sites_tools.SERVER_STOP_TIMEOUT_SECONDS + 5,
         ),
         (
             sites_tools.SERVER_TASK_STOP,
             ("123", started[1]),
-            sites_tools.APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS,
+            sites_tools.SERVER_STOP_TIMEOUT_SECONDS,
         ),
     ]
 
@@ -782,7 +705,6 @@ def test_website_building_indexes_the_parent_and_the_webapp_route() -> None:
 
 def _seed_application_project(sandbox: FakeSandbox, project: str) -> None:
     sandbox.writes[f"{project}/app.tsx"] = APPLICATION_SOURCE.encode()
-    sandbox.writes[f"{project}/application-design.svg"] = APPLICATION_DESIGN.encode()
 
 
 def test_manifest_declares_the_tools_the_profiles_and_the_skills() -> None:
@@ -823,48 +745,6 @@ def test_manifest_declares_the_tools_the_profiles_and_the_skills() -> None:
     }
     (section,) = manifest.prompt_sections
     assert section.name == "sites" and "<sites>" in section.body
-
-
-def _audit_report(regions: tuple[dict[str, object], ...]) -> bytes:
-    """A clean browser report: both views, no failure, the design's own regions rendered."""
-
-    view = {
-        "textChecked": 12,
-        "text": [],
-        "documentWidth": 0,
-        "pageHeight": 900,
-        "clipped": [],
-        "overlaps": [],
-        "console": [],
-        "aboveFoldText": "queue detail",
-        "regions": list(regions),
-    }
-    return (
-        ApplicationAuditReport.model_validate(
-            {
-                "designHeight": 900,
-                "designRegions": list(regions),
-                "views": [
-                    {**view, "scheme": scheme, "width": width, "documentWidth": width}
-                    for scheme, width in MEASURED_VIEWS
-                ],
-                "interaction": {
-                    "controls": [
-                        {"selector": "button.a", "name": "Filter"},
-                        {"selector": "button.b", "name": "Sort"},
-                    ],
-                    "successes": [
-                        {"selector": "button.a", "name": "Filter"},
-                        {"selector": "button.b", "name": "Sort"},
-                    ],
-                    "states": [],
-                    "console": [],
-                },
-            }
-        )
-        .model_dump_json(by_alias=True)
-        .encode()
-    )
 
 
 def _gate(sandbox: FakeSandbox, tmp_path: Path, project: str = "/workspace/ufo-app"):
@@ -946,7 +826,7 @@ async def test_the_source_gate_refuses_before_the_build_is_paid_for(tmp_path: Pa
     ).encode()
     with pytest.raises(sites_tools.ApplicationPageRefused) as refused:
         await _gate(sandbox, tmp_path).built_page()
-    (issue,) = refused.value.verdict.issues
+    issue = refused.value.issue
     assert issue.code == "source"
     assert "may import only from ufo/kit" in issue.message
     assert not any("vite build" in script for script, _args, _timeout in sandbox.shells)
@@ -958,7 +838,7 @@ async def test_a_build_failure_is_a_repair_not_a_crash(tmp_path: Path) -> None:
     sandbox.scripted_shells["vite build"] = ExecResult("", "app.tsx:4 unexpected token", 1)
     with pytest.raises(sites_tools.ApplicationPageRefused) as refused:
         await _gate(sandbox, tmp_path).built_page()
-    (issue,) = refused.value.verdict.issues
+    issue = refused.value.issue
     assert issue.code == "build"
     assert "unexpected token" in issue.message
 
@@ -980,311 +860,31 @@ async def test_a_long_build_failure_keeps_the_error_and_drops_the_warnings(
     )
     with pytest.raises(sites_tools.ApplicationPageRefused) as refused:
         await _gate(sandbox, tmp_path).built_page()
-    (issue,) = refused.value.verdict.issues
+    issue = refused.value.issue
     assert issue.message.endswith('app.tsx:12:3: ERROR: Expected "}"')
     assert not issue.message.startswith("(!)")
     assert len(issue.message) <= sites_tools.MAX_MESSAGE_CHARS
 
 
-async def test_a_page_that_passes_is_built_loaded_and_answered_as_its_dist(
+@pytest.mark.parametrize("design", [None, APPLICATION_DESIGN, "invalid SVG"])
+async def test_a_page_builds_with_or_without_a_design(
     tmp_path: Path,
+    design: str | None,
 ) -> None:
-    """The gate loads the built page and reads one bit off it — did the lifecycle become ready."""
-
     sandbox = FakeSandbox()
     _seed_application_project(sandbox, "/workspace/ufo-app")
+    if design is not None:
+        sandbox.writes["/workspace/ufo-app/application-design.svg"] = design.encode()
     gate = _gate(sandbox, tmp_path)
     assert await gate.built_page() == "/workspace/ufo-app/dist"
     assert "/workspace/ufo-app/vite.config.ts" in sandbox.workspace_writes
-    assert "/workspace/ufo-app/preview.html" in sandbox.workspace_writes
     assert sandbox.writes[f"/workspace/ufo-app/{KIT_ARCHIVE}"] == KIT
     assert (
         UNPACK_KIT_PROG,
         (f"/workspace/ufo-app/{KIT_ARCHIVE}", f"/workspace/ufo-app/{KIT_MOUNT}"),
     ) in (sandbox.programs)
-    loaded = next(args for script, args, _timeout in sandbox.shells if "node" in script)
-    assert loaded[1] == "/workspace/ufo-app"
-    assert "/workspace/ufo-app/application-design.svg" not in loaded
-
-
-async def test_a_project_without_a_design_is_built_and_served_unaudited(tmp_path: Path) -> None:
-    """The audit drives the page in a preview whose every read answers with an empty workspace,
-    so it measures what a page draws on its own."""
-
-    sandbox = FakeSandbox()
-    _seed_application_project(sandbox, "/workspace/ufo-app")
-    del sandbox.writes["/workspace/ufo-app/application-design.svg"]
-    gate = _gate(sandbox, tmp_path)
-
-    assert await gate.built_page() == "/workspace/ufo-app/dist"
-
-    assert any("vite build" in script for script, _args, _timeout in sandbox.shells)
-    assert not any("node" in script for script, _args, _timeout in sandbox.shells)
-
-
-async def test_an_audit_that_cannot_run_is_not_a_repair(tmp_path: Path) -> None:
-    """Chromium dying is infrastructure. Telling the builder to edit `app.tsx` over it would send
-    it hunting a fault that is not in the page."""
-
-    sandbox = FakeSandbox()
-    _seed_application_project(sandbox, "/workspace/ufo-app")
-    sandbox.scripted_shells["node"] = ExecResult("", "chromium exited with 137", 1)
-    with pytest.raises(RuntimeError) as raised:
-        await _gate(sandbox, tmp_path).built_page()
-    assert not isinstance(raised.value, sites_tools.ApplicationPageRefused)
-    assert "chromium exited with 137" in str(raised.value)
-
-
-async def test_a_page_that_never_became_ready_is_a_repair(tmp_path: Path) -> None:
-    """The page's own lifecycle never signalled ready, which is the page's fault and says so."""
-
-    sandbox = FakeSandbox()
-    _seed_application_project(sandbox, "/workspace/ufo-app")
-    gate = _gate(sandbox, tmp_path)
-    root = f"{RUNTIME_ROOT}/{TOOL_OUTPUT_DIR}/application-audit/{gate.ctx.turn.id}"
-    sandbox.writes[f"{root}.json{sites_tools.APPLICATION_LIFECYCLE_SUFFIX}"] = json.dumps(
-        {
-            "code": "application_lifecycle",
-            "reason": "application lifecycle did not become ready",
-            "snapshot": None,
-        }
-    ).encode()
-    sandbox.scripted_shells["node"] = ExecResult("", "", sites_tools.APPLICATION_LIFECYCLE_EXIT)
-    with pytest.raises(sites_tools.ApplicationPageRefused) as refused:
-        await gate.built_page()
-    (issue,) = refused.value.verdict.issues
-    assert issue.code == "lifecycle"
-    assert "did not become ready" in issue.message
-
-
-async def test_a_refusal_names_the_work_that_never_drained(tmp_path: Path) -> None:
-    """The audit records which of six kinds of work is still outstanding, and a builder that
-    reads "interval 2" clears two timers."""
-
-    sandbox = FakeSandbox()
-    _seed_application_project(sandbox, "/workspace/ufo-app")
-    gate = _gate(sandbox, tmp_path)
-    root = f"{RUNTIME_ROOT}/{TOOL_OUTPUT_DIR}/application-audit/{gate.ctx.turn.id}"
-    sandbox.writes[f"{root}.json{sites_tools.APPLICATION_LIFECYCLE_SUFFIX}"] = json.dumps(
-        {
-            "code": "application_lifecycle",
-            "reason": "application lifecycle did not become ready",
-            "snapshot": {
-                "version": 1,
-                "generation": 1,
-                "epoch": 3,
-                "mounted": True,
-                "state": "active",
-                "revision": 9,
-                "blockingWork": 3,
-                "blocking": {
-                    "startup": 0,
-                    "observation": 0,
-                    "unary": 1,
-                    "stream": 0,
-                    "timeout": 0,
-                    "interval": 2,
-                },
-            },
-        }
-    ).encode()
-    sandbox.scripted_shells["node"] = ExecResult("", "", sites_tools.APPLICATION_LIFECYCLE_EXIT)
-    with pytest.raises(sites_tools.ApplicationPageRefused) as refused:
-        await gate.built_page()
-    (issue,) = refused.value.verdict.issues
-    assert issue.code == "lifecycle"
-    assert "state active, 3 blocking (unary 1, interval 2)" in issue.message
-
-
-async def test_a_page_that_never_mounted_names_what_threw(tmp_path: Path) -> None:
-    """The dominant lifecycle refusal is `the page never mounted`, and the throw that stopped the
-    mount is already on the page's console."""
-
-    sandbox = FakeSandbox()
-    _seed_application_project(sandbox, "/workspace/ufo-app")
-    gate = _gate(sandbox, tmp_path)
-    root = f"{RUNTIME_ROOT}/{TOOL_OUTPUT_DIR}/application-audit/{gate.ctx.turn.id}"
-    sandbox.writes[f"{root}.json{sites_tools.APPLICATION_LIFECYCLE_SUFFIX}"] = json.dumps(
-        {
-            "code": "application_lifecycle",
-            "reason": "application lifecycle did not become ready",
-            "snapshot": {
-                "version": 1,
-                "generation": 1,
-                "epoch": 0,
-                "mounted": False,
-                "state": "booting",
-                "revision": 0,
-                "blockingWork": 0,
-                "blocking": {
-                    "startup": 0,
-                    "observation": 0,
-                    "unary": 0,
-                    "stream": 0,
-                    "timeout": 0,
-                    "interval": 0,
-                },
-            },
-            "problems": ["pageerror: Segmented is not exported from ufo/kit"],
-        }
-    ).encode()
-    sandbox.scripted_shells["node"] = ExecResult("", "", sites_tools.APPLICATION_LIFECYCLE_EXIT)
-    with pytest.raises(sites_tools.ApplicationPageRefused) as refused:
-        await gate.built_page()
-    (issue,) = refused.value.verdict.issues
-    assert issue.code == "lifecycle"
-    assert "the page never mounted" in issue.message
-    assert "Segmented is not exported from ufo/kit" in issue.message
-
-
-async def test_a_refusal_that_names_every_console_line_still_validates(tmp_path: Path) -> None:
-    """A page can print four console errors of 500 characters each, which is five times what an
-    audit issue's message holds."""
-
-    sandbox = FakeSandbox()
-    _seed_application_project(sandbox, "/workspace/ufo-app")
-    gate = _gate(sandbox, tmp_path)
-    root = f"{RUNTIME_ROOT}/{TOOL_OUTPUT_DIR}/application-audit/{gate.ctx.turn.id}"
-    problems = [f"pageerror {index}: ".ljust(500, "x") for index in range(4)]
-    sandbox.writes[f"{root}.json{sites_tools.APPLICATION_LIFECYCLE_SUFFIX}"] = json.dumps(
-        {
-            "code": "application_lifecycle",
-            "reason": "application lifecycle did not become ready",
-            "snapshot": None,
-            "problems": problems,
-        }
-    ).encode()
-    sandbox.scripted_shells["node"] = ExecResult("", "", sites_tools.APPLICATION_LIFECYCLE_EXIT)
-    with pytest.raises(sites_tools.ApplicationPageRefused) as refused:
-        await gate.built_page()
-    (issue,) = refused.value.verdict.issues
-    assert issue.code == "lifecycle"
-    assert len(issue.message) <= MAX_MESSAGE_CHARS
-    assert issue.message.startswith("application lifecycle did not become ready: pageerror 0: ")
-    assert issue.message.endswith("; …")
-    assert "pageerror 1" not in issue.message
-
-
-def test_the_lifecycle_reason_keeps_whole_problems_up_to_the_message_cap() -> None:
-
-    reason = "application lifecycle did not become ready"
-    assert sites_tools._lifecycle_message(reason, ()) == reason
-    short = ("the page never mounted", "pageerror: Segmented is not exported")
-    assert sites_tools._lifecycle_message(reason, short) == f"{reason}: {'; '.join(short)}"
-    kept = sites_tools._lifecycle_message(reason, ("a" * 400, "b" * 400))
-    assert kept == f"{reason}: {'a' * 400}; {'b' * 51}; …"
-    assert len(kept) == MAX_MESSAGE_CHARS
-    cut = sites_tools._lifecycle_message(reason, ("c" * 480, "d" * 480))
-    assert cut == f"{reason}: {'c' * 453}; …"
-    assert len(cut) == MAX_MESSAGE_CHARS
-
-
-async def test_a_refusal_survives_a_diagnostic_it_cannot_read(tmp_path: Path) -> None:
-    """An issue message cannot be empty. A diagnostic too large for the gate's read leaves the
-    reason empty, and the refusal the exit code earned would raise a validation error instead."""
-
-    sandbox = FakeSandbox()
-    _seed_application_project(sandbox, "/workspace/ufo-app")
-    gate = _gate(sandbox, tmp_path)
-    sandbox.scripted_shells["node"] = ExecResult("", "", sites_tools.APPLICATION_LIFECYCLE_EXIT)
-    with pytest.raises(sites_tools.ApplicationPageRefused) as refused:
-        await gate.built_page()
-    (issue,) = refused.value.verdict.issues
-    assert issue.code == "lifecycle"
-    assert issue.message == sites_tools.APPLICATION_LIFECYCLE_UNREAD
-
-
-def test_the_audit_bounds_a_console_line_in_bytes() -> None:
-    """The gate reads the diagnostic under a byte cap, and one CJK character is three bytes."""
-
-    script = sites_tools.APPLICATION_AUDIT_SCRIPT_PATH.read_text()
-    assert "const APPLICATION_LIFECYCLE_PROBLEM_BYTES = 600;" in script
-    assert ".map(boundedProblem)" in script
-    assert "Buffer.from(text, 'utf8')" in script
-    bound = int(re.search(r"APPLICATION_LIFECYCLE_PROBLEM_BYTES = (\d+)", script).group(1))
-    lines = int(re.search(r"APPLICATION_LIFECYCLE_PROBLEM_MAX = (\d+)", script).group(1))
-    assert bound * lines < sites_tools.APPLICATION_LIFECYCLE_DIAGNOSTIC_MAX_BYTES
-
-
-def test_a_wireframe_the_browser_cannot_measure_is_scored_not_dropped() -> None:
-    """Both ends of `designFault`: the script records the measurement failure instead of exiting,
-    and the verdict raises a design issue on it."""
-
-    script = sites_tools.APPLICATION_AUDIT_SCRIPT_PATH.read_text()
-    assert "designFault = (error && error.message" in script
-    assert "process.exit(DESIGN_FAULT_EXIT)" not in script
-
-    base = {"views": [], "interaction": {"controls": [], "successes": [], "console": []}}
-    faulted = ApplicationAuditReport.model_validate(
-        {**base, "designFault": "region board overlaps text by 12px"}
-    )
-    assert faulted.design_fault == "region board overlaps text by 12px"
-    issue = next(item for item in audit_application(faulted).issues if item.code == "design")
-    assert "region board overlaps text by 12px" in issue.message
-
-    clean = ApplicationAuditReport.model_validate(base)
-    assert "design" not in {item.code for item in audit_application(clean).issues}
-
-
-def test_the_audit_hands_the_readiness_wait_the_page_console() -> None:
-    """Both ends of one field: the script collects console and pageerror lines on the page it is
-    waiting on, and the wait that gives up carries them into the diagnostic the gate reads."""
-
-    script = sites_tools.APPLICATION_AUDIT_SCRIPT_PATH.read_text()
-    assert "frame, timeoutMs = APPLICATION_LIFECYCLE_TIMEOUT_MS, problems = []" in script
-    assert (
-        script.count("waitForApplicationReady(frame, APPLICATION_LIFECYCLE_TIMEOUT_MS, problems)")
-        == 2
-    )
-    assert "problems: error.problems || []" in script
-    assert "problems.slice(0, APPLICATION_LIFECYCLE_PROBLEM_MAX)" in script
-
-
-def test_a_page_that_never_mounted_and_one_that_never_settled_read_apart() -> None:
-    """Three outcomes the check cannot tell apart in one word: nothing mounted, work outstanding,
-    and a page that mounts and idles but re-renders under the audit's own paint."""
-
-    def state(**fields: object) -> str:
-        blocking = {
-            "startup": 0,
-            "observation": 0,
-            "unary": 0,
-            "stream": 0,
-            "timeout": 0,
-            "interval": 0,
-        }
-        snapshot = {
-            "version": 1,
-            "generation": 1,
-            "epoch": 0,
-            "mounted": True,
-            "state": "idle",
-            "revision": 0,
-            "blockingWork": 0,
-            "blocking": blocking,
-            **fields,
-        }
-        return sites_tools._lifecycle_state(
-            sites_tools._ApplicationLifecycleSnapshot.model_validate(snapshot)
-        )
-
-    assert state(mounted=False) == "the page never mounted"
-    assert state() == "the page kept re-rendering"
-    assert state(state="booting") == "state booting"
-    assert (
-        state(
-            blockingWork=4,
-            blocking={
-                "startup": 1,
-                "observation": 0,
-                "unary": 0,
-                "stream": 3,
-                "timeout": 0,
-                "interval": 0,
-            },
-        )
-        == "4 blocking (startup 1, stream 3)"
-    )
+    assert all("node" not in script for script, _, _ in sandbox.shells)
+    assert all("application-design.svg" not in args[0] for _, args in sandbox.programs if args)
 
 
 def test_a_static_deploy_needs_no_entry_point_named() -> None:
@@ -1293,16 +893,6 @@ def test_a_static_deploy_needs_no_entry_point_named() -> None:
 
     deployed = sites_tools.DeployWebsiteInput(project_path="/workspace/site", site_name="s")
     assert deployed.entry_point == "index.html"
-
-
-def test_the_design_contract_is_one_1440_px_lane() -> None:
-    assert APPLICATION_DESIGN_WIDTH == DESKTOP_WIDTH
-    design = validate_application_design(APPLICATION_DESIGN)
-    assert design == ApplicationDesign(("queue", "detail"), 900)
-    with pytest.raises(ValueError, match='viewBox="0 0 1440 H"'):
-        validate_application_design(
-            APPLICATION_DESIGN.replace('"0 0 1440 900" width="1440"', '"0 0 1280 900" width="1280"')
-        )
 
 
 def test_a_page_may_read_one_file_beside_it_and_nothing_else() -> None:
@@ -1326,547 +916,6 @@ def test_a_page_may_read_one_file_beside_it_and_nothing_else() -> None:
         validate_application_source(page.replace(kit, f'{kit}import Kit from "ufo/kit";\n'))
 
 
-def test_the_interactive_capture_inlines_its_bundle() -> None:
-
-    audit = sites_tools.APPLICATION_AUDIT_SCRIPT_PATH.read_text()
-    loop = audit.split("querySelectorAll('script[src]')")[1].split("querySelectorAll('link")[0]
-    assert "setAttribute('src'" not in loop, "the capture still points a script at a data: URL"
-    assert "inlined.textContent" in loop
-    assert "'</script'" in loop, "an unescaped </script> in the bundle would close the tag early"
-
-
-def test_application_design_fidelity_compares_only_the_separating_axis() -> None:
-    design_regions = (
-        {
-            "name": "overdue-queue",
-            "left": 0.025,
-            "top": 0.1,
-            "width": 0.95,
-            "height": 0.2,
-            "aboveFold": True,
-        },
-        {
-            "name": "watch-list",
-            "left": 0.6,
-            "top": 0.6,
-            "width": 0.3,
-            "height": 0.3,
-            "aboveFold": True,
-        },
-    )
-    app_regions = (
-        {
-            "name": "overdue-queue",
-            "left": 0.01,
-            "top": 0.05,
-            "width": 0.98,
-            "height": 0.2,
-            "aboveFold": True,
-        },
-        {
-            "name": "watch-list",
-            "left": 0.35,
-            "top": 0.6,
-            "width": 0.3,
-            "height": 0.3,
-            "aboveFold": True,
-        },
-    )
-    report = ApplicationAuditReport.model_validate(
-        {
-            "designRegions": design_regions,
-            "views": [
-                {
-                    "scheme": scheme,
-                    "width": width,
-                    "textChecked": 1,
-                    "text": [],
-                    "documentWidth": width,
-                    "clipped": [],
-                    "overlaps": [],
-                    "console": [],
-                    "aboveFoldText": "Queue",
-                    "regions": app_regions,
-                }
-                for width in (DESKTOP_WIDTH,)
-                for scheme in ("light", "dark")
-            ],
-            "interaction": {"controls": [], "successes": [], "console": []},
-        }
-    )
-
-    fidelity = application_design_fidelity(report)
-
-    assert fidelity.failures == ()
-    assert fidelity.passed == fidelity.total
-
-
-def test_application_design_fidelity_preserves_design_fold_placement() -> None:
-    design_regions = (
-        {
-            "name": "summary",
-            "left": 0.05,
-            "top": 0.05,
-            "width": 0.9,
-            "height": 0.4,
-            "aboveFold": True,
-        },
-        {
-            "name": "details",
-            "left": 0.05,
-            "top": 0.55,
-            "width": 0.9,
-            "height": 0.4,
-            "aboveFold": False,
-        },
-    )
-
-    def report(summary_above_fold: bool) -> ApplicationAuditReport:
-        app_regions = (
-            {**design_regions[0], "aboveFold": summary_above_fold},
-            design_regions[1],
-        )
-        return ApplicationAuditReport.model_validate(
-            {
-                "designRegions": design_regions,
-                "views": [
-                    {
-                        "scheme": scheme,
-                        "width": width,
-                        "textChecked": 1,
-                        "text": [],
-                        "documentWidth": width,
-                        "clipped": [],
-                        "overlaps": [],
-                        "console": [],
-                        "aboveFoldText": "Summary",
-                        "regions": app_regions,
-                    }
-                    for width in (DESKTOP_WIDTH,)
-                    for scheme in ("light", "dark")
-                ],
-                "interaction": {"controls": [], "successes": [], "console": []},
-            }
-        )
-
-    accepted = application_design_fidelity(report(summary_above_fold=True))
-    rejected = application_design_fidelity(report(summary_above_fold=False))
-
-    assert accepted.failures == ()
-    assert accepted.passed == accepted.total
-    assert rejected.failures == (
-        "light 1440px renders summary below the fold, where the design puts it above",
-        "dark 1440px renders summary below the fold, where the design puts it above",
-    )
-
-
-def test_application_design_fidelity_rejects_overlapping_regions() -> None:
-    regions = (
-        {
-            "name": "queue",
-            "left": 0.0,
-            "top": 0.0,
-            "width": 1.0,
-            "height": 1.0,
-            "aboveFold": True,
-        },
-        {
-            "name": "detail",
-            "left": 0.0,
-            "top": 0.0,
-            "width": 1.0,
-            "height": 1.0,
-            "aboveFold": True,
-        },
-    )
-    report = ApplicationAuditReport.model_validate(
-        {
-            "designRegions": regions,
-            "views": [
-                {
-                    "scheme": scheme,
-                    "width": width,
-                    "textChecked": 1,
-                    "text": [],
-                    "documentWidth": width,
-                    "clipped": [],
-                    "overlaps": [],
-                    "console": [],
-                    "aboveFoldText": "Queue",
-                    "regions": regions,
-                }
-                for width in (DESKTOP_WIDTH,)
-                for scheme in ("light", "dark")
-            ],
-            "interaction": {"controls": [], "successes": [], "console": []},
-        }
-    )
-
-    fidelity = application_design_fidelity(report)
-
-    assert fidelity == ApplicationDesignFidelity(
-        passed=0,
-        total=1,
-        failures=("design regions queue and detail overlap",),
-    )
-    assert {issue.code for issue in audit_application(report).issues} == {
-        "controls",
-        "design",
-        "interaction",
-    }
-
-
-def test_application_design_fidelity_rejects_exact_text_token_regions() -> None:
-    report = ApplicationAuditReport.model_validate(
-        {
-            "designRegions": (
-                {
-                    "name": "queue",
-                    "left": 0,
-                    "top": 0,
-                    "width": 0.002,
-                    "height": 0.021,
-                },
-                {
-                    "name": "detail",
-                    "left": 0.03,
-                    "top": 0,
-                    "width": 0.001,
-                    "height": 0.021,
-                },
-            ),
-            "views": [],
-            "interaction": {"controls": [], "successes": [], "console": []},
-        }
-    )
-
-    assert application_design_fidelity(report) == ApplicationDesignFidelity(
-        passed=0,
-        total=1,
-        failures=("design region queue is too small",),
-    )
-
-
-@pytest.mark.parametrize(
-    ("width", "height", "accepted"),
-    (
-        (APPLICATION_REGION_MIN_WIDTH - 0.001, 0.4, False),
-        (0.4, APPLICATION_REGION_MIN_HEIGHT - 0.001, False),
-        (0.1, APPLICATION_REGION_MIN_AREA / 0.1 - 0.001, False),
-        (APPLICATION_REGION_MIN_WIDTH, 0.4, True),
-        (0.4, APPLICATION_REGION_MIN_HEIGHT, True),
-        (0.1, APPLICATION_REGION_MIN_AREA / 0.1, True),
-    ),
-)
-def test_application_design_fidelity_region_size_boundaries(
-    width: float,
-    height: float,
-    accepted: bool,
-) -> None:
-    design_regions = (
-        {
-            "name": "queue",
-            "left": 0,
-            "top": 0,
-            "width": width,
-            "height": height,
-        },
-        {
-            "name": "detail",
-            "left": 0.6,
-            "top": 0.6,
-            "width": 0.4,
-            "height": 0.4,
-        },
-    )
-    report = ApplicationAuditReport.model_validate(
-        {
-            "designRegions": design_regions,
-            "views": [
-                {
-                    "scheme": scheme,
-                    "width": 1440,
-                    "textChecked": 1,
-                    "text": [],
-                    "documentWidth": 1440,
-                    "clipped": [],
-                    "overlaps": [],
-                    "console": [],
-                    "aboveFoldText": "Queue",
-                    "regions": design_regions,
-                }
-                for scheme in ("light", "dark")
-            ],
-            "interaction": {"controls": [], "successes": [], "console": []},
-        }
-    )
-
-    fidelity = application_design_fidelity(report)
-
-    assert ("design region queue is too small" not in fidelity.failures) is accepted
-
-
-def test_application_design_fidelity_does_not_size_dom_regions() -> None:
-    application_regions = (
-        {**AUDIT_DESIGN_REGIONS[0], "height": 0.025},
-        {**AUDIT_DESIGN_REGIONS[1], "height": 0.025},
-    )
-    report = ApplicationAuditReport.model_validate(
-        {
-            "designRegions": AUDIT_DESIGN_REGIONS,
-            "views": [
-                {
-                    "scheme": scheme,
-                    "width": APPLICATION_DESIGN_WIDTH,
-                    "textChecked": 1,
-                    "text": [],
-                    "documentWidth": APPLICATION_DESIGN_WIDTH,
-                    "clipped": [],
-                    "overlaps": [],
-                    "console": [],
-                    "aboveFoldText": "Queue",
-                    "regions": application_regions,
-                }
-                for scheme in ("light", "dark")
-            ],
-            "interaction": {"controls": [], "successes": [], "console": []},
-        }
-    )
-
-    fidelity = application_design_fidelity(report)
-
-    assert fidelity.failures == ()
-    assert fidelity.passed == fidelity.total
-
-
-def test_application_design_fidelity_sizes_regions_against_the_design_page() -> None:
-    design_regions = (
-        {
-            "name": "queue",
-            "left": 0.05,
-            "top": 0.0,
-            "width": 0.9,
-            "height": 80 / APPLICATION_DESIGN_MAX_HEIGHT,
-        },
-        {"name": "detail", "left": 0.05, "top": 0.1, "width": 0.9, "height": 0.8},
-    )
-    report = ApplicationAuditReport.model_validate(
-        {
-            "designHeight": APPLICATION_DESIGN_MAX_HEIGHT,
-            "designRegions": design_regions,
-            "views": [
-                {
-                    "scheme": scheme,
-                    "width": APPLICATION_DESIGN_WIDTH,
-                    "textChecked": 1,
-                    "text": [],
-                    "documentWidth": APPLICATION_DESIGN_WIDTH,
-                    "clipped": [],
-                    "overlaps": [],
-                    "console": [],
-                    "aboveFoldText": "Queue",
-                    "regions": design_regions,
-                }
-                for scheme in ("light", "dark")
-            ],
-            "interaction": {"controls": [], "successes": [], "console": []},
-        }
-    )
-
-    assert application_design_fidelity(report).failures == ()
-
-
-def test_a_region_the_page_never_rendered_says_so() -> None:
-    """One message covered a region the page never rendered and one it rendered below the fold,
-    and a repair treats them differently: the first is written or unhidden, the second is moved."""
-
-    designed = ApplicationAuditRegion(name="summary", left=0.05, top=0.0, width=0.9, height=0.1)
-
-    missing = application_region_failure("light", "summary", None, designed)
-    assert missing is not None
-    assert "measured no summary" in missing
-    assert "hides it behind a control" in missing
-
-    below = ApplicationAuditRegion(
-        name="summary", left=0.05, top=0.9, width=0.9, height=0.05, above_fold=False
-    )
-    assert application_region_failure("light", "summary", below, designed) == (
-        "light 1440px renders summary below the fold, where the design puts it above"
-    )
-
-    assert application_region_failure("light", "summary", designed, designed) is None
-
-
-def test_application_design_region_floors_hold_one_pixel_size_at_every_page_height() -> None:
-    def band(page_height: int, pixels: int) -> ApplicationAuditRegion:
-        return ApplicationAuditRegion(
-            name="queue", left=0.05, top=0.0, width=0.9, height=pixels / page_height
-        )
-
-    assert application_design_region_size_failure((band(APPLICATION_DESIGN_FOLD, 80),)) is None
-    assert (
-        application_design_region_size_failure(
-            (band(APPLICATION_DESIGN_MAX_HEIGHT, 80),), APPLICATION_DESIGN_MAX_HEIGHT
-        )
-        is None
-    )
-    assert (
-        application_design_region_size_failure((band(APPLICATION_DESIGN_FOLD, 20),))
-        == "design region queue is too small"
-    )
-    assert (
-        application_design_region_size_failure(
-            (band(APPLICATION_DESIGN_MAX_HEIGHT, 20),), APPLICATION_DESIGN_MAX_HEIGHT
-        )
-        == "design region queue is too small"
-    )
-
-
-def test_application_design_regions_do_not_cross_the_first_screen_boundary() -> None:
-    page_height = 1050
-    fold = APPLICATION_DESIGN_FOLD / page_height
-    above = ApplicationAuditRegion(
-        name="above", left=0, top=0, width=1, height=fold, aboveFold=True
-    )
-    below = ApplicationAuditRegion(
-        name="below", left=0, top=fold, width=1, height=1 - fold, aboveFold=False
-    )
-    crossing = ApplicationAuditRegion(
-        name="crossing", left=0, top=fold - 0.01, width=1, height=0.02, aboveFold=True
-    )
-    spanning = ApplicationAuditRegion(
-        name="spanning", left=0, top=0.5, width=1, height=0.4, aboveFold=True
-    )
-
-    assert application_design_region_fold_failure((above, below), page_height) is None
-    assert application_design_region_fold_failure((crossing,), page_height) == (
-        "design region crossing crosses the first-screen boundary"
-    )
-    assert application_design_region_fold_failure((spanning,), page_height) == (
-        "design region spanning crosses the first-screen boundary"
-    )
-
-
-def _side_by_side_bands(page_height: int) -> tuple[dict[str, object], ...]:
-    """Two 60 px bands 100 px down one page, side by side in the 1440 px lane."""
-    return tuple(
-        {
-            "name": name,
-            "left": left,
-            "top": 100 / page_height,
-            "width": 0.4,
-            "height": 60 / page_height,
-            "aboveFold": True,
-        }
-        for name, left in (("stats", 0.05), ("filters", 0.55))
-    )
-
-
-def _side_by_side_report(design_height: int, application_height: int) -> ApplicationAuditReport:
-    return ApplicationAuditReport.model_validate(
-        {
-            "designHeight": design_height,
-            "designRegions": _side_by_side_bands(design_height),
-            "views": [
-                {
-                    "scheme": scheme,
-                    "width": width,
-                    "textChecked": 4,
-                    "text": [],
-                    "documentWidth": width,
-                    "pageHeight": application_height,
-                    "clipped": [],
-                    "overlaps": [],
-                    "console": [],
-                    "aboveFoldText": "Stats",
-                    "regions": _side_by_side_bands(application_height),
-                }
-                for width in (DESKTOP_WIDTH,)
-                for scheme in ("light", "dark")
-            ],
-            "interaction": {
-                "controls": [
-                    {"selector": "#first", "name": "First"},
-                    {"selector": "#second", "name": "Second"},
-                ],
-                "successes": [
-                    {"selector": "#first", "name": "First"},
-                    {"selector": "#second", "name": "Second"},
-                ],
-                "states": [["Stats"]],
-                "console": [],
-            },
-        }
-    )
-
-
-def test_application_design_keeps_side_by_side_bands_horizontal_on_a_tall_design_page() -> None:
-    tall_page = 3_000
-    stats, filters = (
-        ApplicationAuditRegion.model_validate(region) for region in _side_by_side_bands(tall_page)
-    )
-
-    assert application_region_relation(stats, filters, tall_page) == ("horizontal", -1)
-    report = _side_by_side_report(tall_page, 900)
-    fidelity = application_design_fidelity(report)
-    assert fidelity.failures == ()
-    assert fidelity.passed == fidelity.total
-    assert "design" not in {issue.code for issue in audit_application(report).issues}
-
-
-def test_application_audit_uses_the_quiet_floor_only_for_exact_kit_slots() -> None:
-    def report(text: dict[str, object]) -> ApplicationAuditReport:
-        return ApplicationAuditReport.model_validate(
-            {
-                "designRegions": AUDIT_DESIGN_REGIONS,
-                "views": [
-                    {
-                        "scheme": scheme,
-                        "width": width,
-                        "textChecked": 1,
-                        "text": [text],
-                        "documentWidth": width,
-                        "clipped": [],
-                        "overlaps": [],
-                        "console": [],
-                        "aboveFoldText": "Open issues 42",
-                        "regions": AUDIT_DESIGN_REGIONS,
-                    }
-                    for width in (DESKTOP_WIDTH,)
-                    for scheme in ("light", "dark")
-                ],
-                "interaction": {
-                    "controls": [
-                        {"selector": "#first", "name": "First"},
-                        {"selector": "#second", "name": "Second"},
-                    ],
-                    "successes": [
-                        {"selector": "#first", "name": "First"},
-                        {"selector": "#second", "name": "Second"},
-                    ],
-                    "console": [],
-                },
-            }
-        )
-
-    measured = {
-        "text": "Open issues",
-        "selector": "span.text-label",
-        "px": 13,
-        "weight": 500,
-        "ratio": KIT_QUIET_TEXT_MIN,
-    }
-    kit = report({**measured, "slot": "stat-label"})
-    authored = report(measured)
-    unreadable = report({**measured, "slot": "stat-label", "ratio": 2.0})
-
-    assert "contrast" not in {issue.code for issue in audit_application(kit).issues}
-    assert "contrast" in {issue.code for issue in audit_application(authored).issues}
-    assert "contrast" in {issue.code for issue in audit_application(unreadable).issues}
-    with pytest.raises(ValidationError):
-        report({**measured, "slot": "author-quiet"})
-
-
 @pytest.mark.parametrize(
     "data",
     [
@@ -1880,20 +929,3 @@ def test_application_source_reads_a_members_own_data_as_data(data: str) -> None:
     """An issue reference and a percentage are spelled exactly like a raw colour and a raw
     length, and a page carries them as its content."""
     validate_application_source(_page("<p>x</p>").replace("function App", data + "\nfunction App"))
-
-
-def test_application_design_keeps_side_by_side_bands_horizontal_on_a_tall_application_page() -> (
-    None
-):
-    tall_page = 3_000
-    stats, filters = (
-        ApplicationAuditRegion.model_validate(region) for region in _side_by_side_bands(tall_page)
-    )
-
-    assert application_region_relation(stats, filters, tall_page) == ("horizontal", -1)
-    report = _side_by_side_report(APPLICATION_DESIGN_FOLD, tall_page)
-    assert report.views[0].page_height == tall_page
-    fidelity = application_design_fidelity(report)
-    assert fidelity.failures == ()
-    assert fidelity.passed == fidelity.total
-    assert "design" not in {issue.code for issue in audit_application(report).issues}
