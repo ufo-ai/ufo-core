@@ -7,9 +7,11 @@ import os
 import secrets
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from hashlib import sha256
 from typing import Any
 from urllib.parse import urlparse
@@ -51,7 +53,7 @@ from ufo.db import (
     init_owner_db,
     verify_db_reachable,
 )
-from ufo.flags import init_flags
+from ufo.flags import init_flags, shutdown_flags
 from ufo.harness.document_renderer import DocumentRenderer
 from ufo.harness.durability import ReplaySafeSerializer, replay_safe_client
 from ufo.harness.models.catalog_skill import model_catalog_skill
@@ -179,7 +181,7 @@ from ufo.runtime.jobs import (
     bindings_from,
     core_jobs,
     model_key_slots,
-    register_job_queue,
+    register_job_queue_async,
 )
 from ufo.runtime.media.preview_renderer import (
     PREVIEW_SERVICE_URL_ENV,
@@ -190,7 +192,7 @@ from ufo.runtime.media.site_previewer import SitePreviewer
 from ufo.runtime.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
 from ufo.runtime.provisioning import Provisioning
-from ufo.runtime.queue import Runtime, init_runtime, register_turn_queues
+from ufo.runtime.queue import Runtime, init_runtime, register_turn_queues_async
 from ufo.runtime.runtime_instance import (
     CancelReconciler,
     ExecutorRecovery,
@@ -392,7 +394,8 @@ def run(fleet: Fleet) -> None:
     deploy_actions = validate_ext_tools(manifests, credentials)
     _validate_requires(config, manifests, credentials)
     init_workspace_credentials(credentials)
-    init_flags(_select_flag_provider(config, manifests))
+    flag_provider = _select_flag_provider(config, manifests)
+    init_flags(flag_provider)
     blob_backend = blob_store_for(config.blob)
     blob = WorkspaceBlobStore(backend=blob_backend)
     fleet_blob = FleetBlobStore(backend=blob_backend)
@@ -545,9 +548,6 @@ def run(fleet: Fleet) -> None:
         }
     )
     DBOS.listen_queues(fleet.queues)
-    DBOS.launch()
-    register_turn_queues()
-    register_job_queue()
     app.state.fleet = fleet
     app.state.hub = hub
     app.state.dbos = dbos_client
@@ -587,7 +587,7 @@ def run(fleet: Fleet) -> None:
         raise RuntimeError(f"[[sources]] names unknown backends: {', '.join(unknown_backends)}")
     app.state.configured_sources = config.sources
     page_feed = CorePageFeed(blob=blob)
-    _launch_jobs(runtime, invoker_for, sync_driver, page_feed, probes)
+    jobs = _job_runner(runtime, invoker_for, sync_driver, page_feed, probes)
     _mount_ext_routes(
         app, manifests, credentials, index, embed, config.connect.public_base_url, spend, ledger
     )
@@ -649,16 +649,58 @@ def run(fleet: Fleet) -> None:
     )
     _assert_no_reserved_routes(app, config.serve.gateway_prefixes)
     log("serve.started", fleet=fleet.name, host=config.serve.host, port=config.serve.port)
-    try:
-        uvicorn.run(
-            app,
-            host=config.serve.host,
-            port=config.serve.port,
-            log_level="warning",
-            timeout_graceful_shutdown=config.serve.request_shutdown_seconds,
-        )
-    finally:
-        _stop_executor(dbos, heartbeat, config.serve.graceful_shutdown_seconds)
+    asyncio.run(
+        ServeLoop(
+            app=app,
+            dbos=dbos,
+            heartbeat=heartbeat,
+            config=config,
+            jobs=jobs,
+            flag_provider=flag_provider,
+        ).run()
+    )
+
+
+@dataclass(frozen=True)
+class ServeLoop:
+    app: FastAPI
+    dbos: DBOS
+    heartbeat: Heartbeat
+    config: Config
+    jobs: JobRunner
+    flag_provider: FeatureProvider | None
+
+    async def run(self) -> None:
+        """Own the application loop from executor startup through provider shutdown."""
+        self.app.router.lifespan_context = self._lifespan
+        await uvicorn.Server(
+            uvicorn.Config(
+                self.app,
+                host=self.config.serve.host,
+                port=self.config.serve.port,
+                log_level="warning",
+                timeout_graceful_shutdown=self.config.serve.request_shutdown_seconds,
+            )
+        ).serve()
+
+    @asynccontextmanager
+    async def _lifespan(self, app: FastAPI) -> AsyncIterator[None]:
+        self.jobs.install()
+        try:
+            DBOS.launch()
+            await register_turn_queues_async()
+            await register_job_queue_async()
+            await self.jobs.launch()
+            async with _serve_lifespan(app):
+                yield
+        finally:
+            await _stop_executor(
+                self.dbos, self.heartbeat, self.config.serve.graceful_shutdown_seconds
+            )
+            try:
+                await shutdown_flags(self.flag_provider)
+            finally:
+                await dispose_loop_engines()
 
 
 def _one_shot[T](coro: Coroutine[Any, Any, T]) -> T:
@@ -673,15 +715,19 @@ def _one_shot[T](coro: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(step())
 
 
-def _stop_executor(dbos: DBOS, heartbeat: Heartbeat, graceful_shutdown_seconds: int) -> None:
+async def _stop_executor(dbos: DBOS, heartbeat: Heartbeat, graceful_shutdown_seconds: int) -> None:
     """`DBOS.destroy` bounds its force-cancel with a ten-second join, so a non-empty active set
     means work still runs here and retiring the seat would let a peer start a second execution."""
-    DBOS.destroy(workflow_completion_timeout_sec=graceful_shutdown_seconds)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        await asyncio.get_running_loop().run_in_executor(
+            executor,
+            partial(DBOS.destroy, workflow_completion_timeout_sec=graceful_shutdown_seconds),
+        )
     active = dbos._active_workflows_set.activeList()
     if active:
         log("serve.seat_kept_for_active_workflows", workflows=len(active))
-        return
-    _one_shot(heartbeat.retire())
+        os._exit(1)
+    await heartbeat.retire()
 
 
 def _shared_owner_dsn(config: Config) -> str:
@@ -697,13 +743,13 @@ def _shared_owner_dsn(config: Config) -> str:
     return dsn
 
 
-def _launch_jobs(
+def _job_runner(
     runtime: Runtime,
     invoker_for: InvokerFactory,
     sync_driver: SyncDriver,
     page_feed: CorePageFeed,
     probes: ConversationProbes,
-) -> None:
+) -> JobRunner:
     page_change_runner = PageChangeRunner(
         manifests=runtime.manifests,
         pages=page_feed,
@@ -741,7 +787,7 @@ def _launch_jobs(
         ),
         disabled=frozenset(runtime.config.serve.disabled_jobs),
     )
-    JobRunner(
+    return JobRunner(
         bindings=bindings,
         manifests=runtime.manifests,
         invoker_factory=invoker_for,
@@ -757,7 +803,7 @@ def _launch_jobs(
         ledger=runtime.ledger,
         public_base_url=runtime.config.connect.public_base_url,
         home_surface=home_surface(runtime.manifests),
-    ).launch()
+    )
 
 
 def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend]:

@@ -1,11 +1,4 @@
-"""Subprocess half of the executor-drain proof (driven by test_serve.py): serve's exact DBOS
-topology — constructed without fastapi, launched from a sync context — with two queued async
-workflows, one parked at an ordinary await and one that absorbs cancellation. Emits one JSON line
-of evidence for the contract `_stop_executor` retires the fleet seat on: workflows run off the
-main thread (DBOS's background loop, beyond any main-thread `asyncio.run` teardown), survive
-exactly such a teardown, the parked one is drained boundedly and released by `DBOS.destroy`, and
-the cancellation-resistant one outlives destroy with its active-set entry retained — the case the
-keep-seat branch exists for."""
+"""Probe DBOS shutdown with its private event loop and cancellation-resistant work."""
 
 import asyncio
 import json

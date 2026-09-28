@@ -791,9 +791,15 @@ async def test_a_job_that_needs_the_deploy_model_keeps_it(db: None) -> None:
     assert seen == ["claude-opus-5"]
 
 
+@pytest.fixture
+async def dbos_loop_executor(dbos_launched: object) -> AsyncIterator[None]:
+    yield
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+
+
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_recurring_core_job_registers_at_boot_and_fires(
-    db: None, dbos_launched: object
+    db: None, dbos_loop_executor: None
 ) -> None:
     workspace_id = await _workspace()
     key = f"{CORE_EXTENSION}:tick"
@@ -801,9 +807,10 @@ async def test_recurring_core_job_registers_at_boot_and_fires(
         name="tick", schedule="* * * * * *", handler=_write_marker, candidates=_every_workspace()
     )
     runner = _runner((spec,))
+    runner.install()
     scoped = ScopedStore(extension=CORE_EXTENSION)
     try:
-        runner.launch()
+        await runner.launch()
         schedule = next(s for s in DBOS.list_schedules() if s["schedule_name"] == key)
         assert schedule.get("queue_name") is None
         with ws(workspace_id):
@@ -835,13 +842,14 @@ async def test_tick_skips_a_key_this_process_registers_no_job_for(
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_one_shot_core_job_fires_once_at_boot(db: None, dbos_launched: object) -> None:
+async def test_one_shot_core_job_fires_once_at_boot(db: None, dbos_loop_executor: None) -> None:
     workspace_id = await _workspace()
     spec = JobSpec(name="boot", schedule=None, handler=_write_marker, candidates=_every_workspace())
     runner = _runner((spec,))
+    runner.install()
     scoped = ScopedStore(extension=CORE_EXTENSION)
     try:
-        runner.launch()
+        await runner.launch()
         with ws(workspace_id):
             assert await _await_marker(scoped) == MARKER_VALUE
     finally:
@@ -852,7 +860,7 @@ async def test_one_shot_core_job_fires_once_at_boot(db: None, dbos_launched: obj
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_job_recovery_replays_a_completed_handler_step_without_running_it_again(
     db: None,
-    dbos_launched: object,
+    dbos_loop_executor: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace_id = await _workspace()
@@ -907,7 +915,6 @@ async def test_job_recovery_replays_a_completed_handler_step_without_running_it_
         with ws(workspace_id):
             assert await scoped.get(RECOVERY_RUNS_KEY) == 1
     finally:
-        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
         jobs_module._firing = saved
 
 
@@ -940,7 +947,7 @@ def _skips(caplog: pytest.LogCaptureFixture, event: str, **fields: str) -> list[
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_tick_skips_while_predecessor_runs_and_resumes_after_terminal(
-    db: None, dbos_launched: object, caplog: pytest.LogCaptureFixture
+    db: None, dbos_loop_executor: None, caplog: pytest.LogCaptureFixture
 ) -> None:
     workspace_id = await _workspace()
     key = f"{CORE_EXTENSION}:slow"
@@ -949,9 +956,10 @@ async def test_tick_skips_while_predecessor_runs_and_resumes_after_terminal(
         name="slow", schedule="* * * * * *", handler=job.hold, candidates=_every_workspace()
     )
     runner = _runner((spec,))
+    runner.install()
     try:
         with caplog.at_level(logging.WARNING, logger="ufo"):
-            runner.launch()
+            await runner.launch()
             await job.await_started(1)
             await asyncio.sleep(3.5)
             assert job.started == 1
@@ -966,7 +974,7 @@ async def test_tick_skips_while_predecessor_runs_and_resumes_after_terminal(
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_one_shot_twin_boots_start_one_run(
-    db: None, dbos_launched: object, caplog: pytest.LogCaptureFixture
+    db: None, dbos_loop_executor: None, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Two replicas boot the same one-shot; the deduplication id collapses the twin enqueue while
     the first run is live — logged as `jobs.enqueue_skipped` — so exactly one execution starts."""
@@ -975,10 +983,11 @@ async def test_one_shot_twin_boots_start_one_run(
     job = _HeldJob()
     spec = JobSpec(name="twin", schedule=None, handler=job.hold, candidates=_every_workspace())
     runner = _runner((spec,))
+    runner.install()
     try:
         with caplog.at_level(logging.WARNING, logger="ufo"):
-            runner.launch()
-            runner.launch()
+            await runner.launch()
+            await runner.launch()
         assert _skips(caplog, "jobs.enqueue_skipped", key=key)
         await job.await_started(1)
         await asyncio.sleep(2)
@@ -990,7 +999,7 @@ async def test_one_shot_twin_boots_start_one_run(
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_slow_workspace_does_not_starve_its_neighbors(
-    db: None, dbos_launched: object
+    db: None, dbos_loop_executor: None
 ) -> None:
     """The dedup instance is (job, workspace): workspace A's still-running execution absorbs only
     A's ticks, so B's executions keep landing while A holds."""
@@ -1016,8 +1025,9 @@ async def test_slow_workspace_does_not_starve_its_neighbors(
         name="mixed", schedule="* * * * * *", handler=_hold_a, candidates=_every_workspace()
     )
     runner = _runner((spec,))
+    runner.install()
     try:
-        runner.launch()
+        await runner.launch()
         assert await asyncio.to_thread(a_started.wait, FIRE_TIMEOUT_SECONDS)
         assert await asyncio.to_thread(b_second.wait, FIRE_TIMEOUT_SECONDS)
         assert not release.is_set()

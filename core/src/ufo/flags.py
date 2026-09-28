@@ -19,6 +19,8 @@ time.
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from typing import Protocol, runtime_checkable
 
 from openfeature import api
 from openfeature.evaluation_context import EvaluationContext
@@ -38,6 +40,24 @@ def init_flags(provider: FeatureProvider | None) -> None:
     if provider is None:
         return
     api.set_provider(provider)
+
+
+@runtime_checkable
+class _AsyncProvider(Protocol):
+    async def shutdown_async(self) -> None: ...
+
+
+async def shutdown_flags(provider: FeatureProvider | None) -> None:
+    """Close the provider after its readers stop and before their event loop closes."""
+    if provider is None:
+        return
+    try:
+        match provider:
+            case _AsyncProvider():
+                await provider.shutdown_async()
+    finally:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            await asyncio.get_running_loop().run_in_executor(executor, provider.shutdown)
 
 
 async def flag_enabled(flag: str, *, default: bool) -> bool:

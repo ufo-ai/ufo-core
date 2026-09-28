@@ -584,22 +584,28 @@ async def _apply_provisions(runtime: "Runtime", workspace_id: UUID) -> None:
     _provisioned_workspaces.add(workspace_id)
 
 
+TURN_QUEUE_SETTINGS = (
+    (TURN_QUEUE_NAME, TURN_WORKER_CONCURRENCY),
+    (EXPRESS_QUEUE_NAME, None),
+    (UNSCOPED_TURN_QUEUE_NAME, TURN_WORKER_CONCURRENCY),
+    (UNSCOPED_EXPRESS_QUEUE_NAME, None),
+)
+
+
 def register_turn_queues() -> None:
-    """Declare the four turn queues in the system database, after `DBOS.launch`. Queue settings
-    live in that table, and a turn enqueued on a name no process has declared stays ENQUEUED, so
-    every process declares all four whatever fleet it dequeues from."""
-    DBOS.register_queue(
-        TURN_QUEUE_NAME,
-        worker_concurrency=TURN_WORKER_CONCURRENCY,
-        polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
-    )
-    DBOS.register_queue(EXPRESS_QUEUE_NAME, polling_interval_sec=TURN_QUEUE_POLL_SECONDS)
-    DBOS.register_queue(
-        UNSCOPED_TURN_QUEUE_NAME,
-        worker_concurrency=TURN_WORKER_CONCURRENCY,
-        polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
-    )
-    DBOS.register_queue(UNSCOPED_EXPRESS_QUEUE_NAME, polling_interval_sec=TURN_QUEUE_POLL_SECONDS)
+    """Declare every turn queue after DBOS starts, whatever fleet this process claims."""
+    for name, concurrency in TURN_QUEUE_SETTINGS:
+        DBOS.register_queue(
+            name, worker_concurrency=concurrency, polling_interval_sec=TURN_QUEUE_POLL_SECONDS
+        )
+
+
+async def register_turn_queues_async() -> None:
+    """Declare every turn queue from the application event loop."""
+    for name, concurrency in TURN_QUEUE_SETTINGS:
+        await DBOS.register_queue_async(
+            name, worker_concurrency=concurrency, polling_interval_sec=TURN_QUEUE_POLL_SECONDS
+        )
 
 
 @dataclass(frozen=True)

@@ -227,7 +227,7 @@ def test_serve_verifies_the_owner_database_before_it_seats_the_instance(
         asyncio.run(dispose_db())
 
 
-def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_job_runner_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     manifests = (Manifest(name="jobs", version="1"),)
     registry = SimpleNamespace(key_slot_for=lambda _model: None, specs={})
     page_runner = object()
@@ -276,12 +276,11 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
     )
 
     probes = object()
-    serve._launch_jobs(runtime, object(), object(), object(), probes)
+    serve._job_runner(runtime, object(), object(), object(), probes)
 
     assert captured["page"]["manifests"] is manifests
     assert captured["page"]["registry"] is registry
     assert captured["jobs"]["registry"] is registry
-    assert captured["launched"] is True
     assert captured["page"]["probes"] is probes
     assert captured["jobs"]["probes"] is probes
     assert captured["page"]["spend"] is captured["jobs"]["spend"] is runtime.spend
@@ -289,7 +288,7 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["disabled"] == frozenset()
 
 
-def test_launch_jobs_hands_both_runners_the_background_jobs_model(
+def test_job_runner_hands_both_runners_the_background_jobs_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Both jobs runners carry the configured background-jobs model, so a handler's own metered
@@ -329,7 +328,7 @@ def test_launch_jobs_hands_both_runners_the_background_jobs_model(
     monkeypatch.setattr(serve, "JobRunner", Runner)
 
     probes = object()
-    serve._launch_jobs(runtime, object(), object(), object(), probes)
+    serve._job_runner(runtime, object(), object(), object(), probes)
 
     assert captured["page"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL
     assert captured["jobs"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL
@@ -533,7 +532,7 @@ class StubDbosInstance:
         self._active_workflows_set = StubActiveWorkflows(active)
 
 
-def test_stop_executor_drains_before_retiring_heartbeat(
+async def test_stop_executor_drains_before_retiring_heartbeat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[object] = []
@@ -548,11 +547,11 @@ def test_stop_executor_drains_before_retiring_heartbeat(
             calls.append("retire")
 
     monkeypatch.setattr(serve, "DBOS", StubDbos)
-    serve._stop_executor(StubDbosInstance([]), StubHeartbeat(), 600)
+    await serve._stop_executor(StubDbosInstance([]), StubHeartbeat(), 600)
     assert calls == [("destroy", 600), "retire"]
 
 
-def test_stop_executor_keeps_the_seat_when_workflows_outlive_the_drain(
+async def test_stop_executor_keeps_the_seat_when_workflows_outlive_the_drain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[object] = []
@@ -567,11 +566,17 @@ def test_stop_executor_keeps_the_seat_when_workflows_outlive_the_drain(
             calls.append("retire")
 
     monkeypatch.setattr(serve, "DBOS", StubDbos)
-    serve._stop_executor(StubDbosInstance(["wf-live"]), StubHeartbeat(), 600)
+
+    def exit_process(code: int) -> None:
+        raise SystemExit(code)
+
+    monkeypatch.setattr(serve.os, "_exit", exit_process)
+    with pytest.raises(SystemExit, match="1"):
+        await serve._stop_executor(StubDbosInstance(["wf-live"]), StubHeartbeat(), 600)
     assert calls == [("destroy", 600)]
 
 
-def test_dbos_destroy_contract_for_the_executor_drain(tmp_path: Path) -> None:
+def test_dbos_private_loop_destroy_retains_unfinished_work(tmp_path: Path) -> None:
     probe = Path(__file__).parent / "executor_drain_probe.py"
     run = subprocess.run(
         [sys.executable, str(probe), str(tmp_path / "drain_sys.db")],

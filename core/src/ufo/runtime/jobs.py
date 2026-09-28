@@ -183,10 +183,13 @@ QUEUED: TurnStatus = "queued"
 
 
 def register_job_queue() -> None:
-    """Declare the jobs queue in the system database, after `DBOS.launch` and off the event loop.
-    Queue settings live in that table, and a tick enqueued on a name no process has declared stays
-    ENQUEUED."""
+    """Declare the jobs queue after DBOS starts."""
     DBOS.register_queue(JOB_QUEUE_NAME, worker_concurrency=JOB_WORKER_CONCURRENCY)
+
+
+async def register_job_queue_async() -> None:
+    """Declare the jobs queue from the application event loop."""
+    await DBOS.register_queue_async(JOB_QUEUE_NAME, worker_concurrency=JOB_WORKER_CONCURRENCY)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1213,15 +1216,18 @@ class JobRunner:
     home_surface: str | None = None
     provisioned_workspaces: set[UUID] = field(default_factory=set, compare=False, repr=False)
 
-    def launch(self) -> None:
+    def install(self) -> None:
+        """Bind recovered job ticks to this runner before DBOS starts."""
         global _firing
         _firing = self
+
+    async def launch(self) -> None:
         schedules: list[ScheduleInput] = []
         for binding in self.bindings:
             if binding.spec.schedule is None:
                 with SetEnqueueOptions(deduplication_id=binding.key):
                     try:
-                        DBOS.enqueue_workflow(
+                        await DBOS.enqueue_workflow_async(
                             JOB_QUEUE_NAME, job_tick, datetime.now(UTC), binding.key
                         )
                     except dbos_error.DBOSQueueDeduplicatedError:
@@ -1239,7 +1245,7 @@ class JobRunner:
                 )
                 log("jobs.scheduled", key=binding.key, schedule=binding.spec.schedule)
         if schedules:
-            DBOS.apply_schedules(schedules)
+            await DBOS.apply_schedules_async(schedules)
 
     async def tick(self, scheduled_time: datetime, key: str) -> None:
         """One fire of a job: fan out to the workspaces holding work, one queued execution per
