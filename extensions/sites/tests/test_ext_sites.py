@@ -1,5 +1,4 @@
 import json
-import re
 import subprocess
 import sys
 import tarfile
@@ -71,7 +70,6 @@ RUNTIME_ROOT = "/home/user/.ufo/runs/test"
 HOUSE_STYLE = "ufo-style"
 HOUSE_STYLE_TOKENS = "references/tokens.css"
 PLAYWRIGHT_GUIDANCE = "shared/12-playwright-interactive.md"
-APPLICATION_QA_GUIDANCE = "shared/13-ufo-application-qa.md"
 APPLICATION_DESIGN = """<svg viewBox="0 0 1440 900" width="1440" height="900">
 <g data-app-region="queue"><g data-kit-component="Card"><rect width="864" height="900" /></g></g>
 <g data-app-region="detail"><rect x="864" width="576" height="900" /></g>
@@ -89,25 +87,6 @@ function App() {
 
 mountApp(document.getElementById("root")!, () => <App />);
 """
-AUDIT_DESIGN_REGIONS = (
-    {
-        "name": "queue",
-        "left": 0.0,
-        "top": 0.0,
-        "width": 0.6,
-        "height": 1.0,
-        "aboveFold": True,
-    },
-    {
-        "name": "detail",
-        "left": 0.6,
-        "top": 0.0,
-        "width": 0.4,
-        "height": 1.0,
-        "aboveFold": True,
-    },
-)
-JS_CELL = re.compile(r"```javascript\n(.*?)```", re.S)
 KIT = b"the deploy's kit archive"
 APPLICATION_LISTING = {"app.tsx": {"size": 12, "sha256": "a" * 64}}
 
@@ -135,11 +114,6 @@ class _SkillSandbox:
 def _playwright_guidance() -> str:
     registry = skill_registry((sites_manifest.manifest(),))
     return dict(registry.named("website-building").files)[PLAYWRIGHT_GUIDANCE].decode()
-
-
-def _application_qa_guidance() -> str:
-    registry = skill_registry((sites_manifest.manifest(),))
-    return dict(registry.named("website-building").files)[APPLICATION_QA_GUIDANCE].decode()
 
 
 @dataclass

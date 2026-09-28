@@ -3,6 +3,7 @@ import { chmodSync, cpSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 const HERE = new URL("./", import.meta.url).pathname;
 const KIT = new URL("./sdk/kit.js", import.meta.url).pathname;
 const BLOCKS = new URL("./sdk/blocks.js", import.meta.url).pathname;
+const DEPLOY_WRITTEN = new Set(["vite.config.ts", "preview.html"]);
 const SOURCE_MODE = 0o644;
 
 export default {
@@ -22,7 +23,7 @@ export default {
         rmSync(`${HERE}dist/src`, { recursive: true, force: true });
         mkdirSync(`${HERE}dist/src`, { recursive: true });
         for (const entry of readdirSync(HERE, { withFileTypes: true })) {
-          if (entry.isFile() && entry.name !== "vite.config.ts") {
+          if (entry.isFile() && !DEPLOY_WRITTEN.has(entry.name)) {
             cpSync(`${HERE}${entry.name}`, `${HERE}dist/src/${entry.name}`);
             chmodSync(`${HERE}dist/src/${entry.name}`, SOURCE_MODE);
           }
