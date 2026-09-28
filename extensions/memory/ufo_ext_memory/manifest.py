@@ -246,10 +246,9 @@ class MemoryUpdateInput(BaseModel):
 
     body: str = Field(
         max_length=MEMORY_BODY_MAX_CHARS,
-        description="One row of the member's wiki, in the third person: a subject they recognise, "
-        "an em dash, then one sentence about it, inside 115 characters — 'Acme Corp — Moved the "
-        "billing migration to 4 March.' Write the full name of every person, company, and thing "
-        "you mention, because the reader sees this item alone, months later.",
+        description="A standalone memory row in the third person. State the current fact. For a "
+        "correction, quote each `deprecates` phrase unchanged after that fact and say the older "
+        "claims are outdated. A correction can use more than one sentence, up to 2,000 characters.",
     )
     item_class: RecordedClass = Field(
         default=FACT,
@@ -273,11 +272,14 @@ class MemoryUpdateInput(BaseModel):
     deprecates: tuple[Annotated[str, Field(min_length=1, max_length=NAME_MAX_CHARS)], ...] = Field(
         default=(),
         max_length=NAMES_MAX,
-        description="Names or claims copied verbatim from `body` that this correction makes out "
-        "of date. Choose text that also appears in the older memory. For example, if an older "
-        "item says 'homepage remains unusable', state that claim is out of date in `body` and "
-        "set `deprecates` to ['homepage remains unusable']. Empty only when no earlier memory "
-        "is contradicted.",
+        description="One exact phrase from each outdated old row. Include the subject or namespace "
+        "that identifies each claim; do not use only a generic suffix. Start and end at word "
+        "boundaries, not inside a word or hyphenated name. Copy each phrase unchanged into "
+        "this list and into `body`. Example: old rows contain 'SUBJECT_A CLAIM_A' and "
+        "'SUBJECT_B CLAIM_B'; body='SUBJECT — NEW_FACT. Earlier claims "
+        '"SUBJECT_A CLAIM_A" and "SUBJECT_B CLAIM_B" are outdated.\'; '
+        "deprecates=['SUBJECT_A CLAIM_A', 'SUBJECT_B CLAIM_B']. Replace placeholders with old "
+        "text. Empty only when no earlier memory is contradicted.",
     )
 
 
@@ -1155,11 +1157,13 @@ def manifest() -> Manifest:
                     "style. Record what a person would act on or repeat months from now: a "
                     "decision, an owner, a commitment, a date, a standing rule. Leave to the "
                     "system the values it reports about itself and can read again on demand — a "
-                    "last-updated time, a count, an identifier, a status flag. When an item you "
-                    "recalled contradicts what a live source just told you, record the corrected "
-                    "statement with `deprecates` naming the old subject or claim. Include that "
-                    "name in `body` too, so the old memory is marked out of date. If the tool "
-                    "rejects the name, retry with `deprecates` still set. Set `memory_kind` "
+                    "last-updated time, a count, an identifier, a status flag. When an older "
+                    "memory is wrong, save the current fact and quote an exact identifying "
+                    "phrase from each old row in `body`. Put the same phrases in `deprecates`. "
+                    "Each phrase must occur unchanged in the new `body`, or nothing is saved. "
+                    "Each must also match its old row to mark that row outdated; the tool does "
+                    "not verify that old-row match. "
+                    "Set `memory_kind` "
                     "(fact/preference/decision/event/task) so recency decay matches how fast the "
                     "item goes stale, and `confidence` (1-10) for how sure you are it is true. "
                     "A one-off instruction ('make it shorter') belongs in the turn, in-task "
