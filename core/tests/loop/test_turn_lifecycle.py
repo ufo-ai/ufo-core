@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import subprocess
+import threading
 import time
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
@@ -51,6 +52,7 @@ from ufo_testsupport.turn_rig import (
     RoundTripInput,
     RoundTripOutput,
     Seed,
+    StandInModel,
     Turns,
     _bodies,
     _bootstrap,
@@ -1217,13 +1219,30 @@ async def test_typed_subagent_round_trips_schema(surface: Turns) -> None:
     assert tool_result.is_error is False
 
 
-async def test_a_background_child_wakes_its_parent_with_its_own_result(surface: Turns) -> None:
+async def test_a_background_child_wakes_its_parent_with_its_own_result(
+    surface: Turns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_finished = threading.Event()
+    complete = StandInModel.complete
+
+    async def finish_after_parent(
+        model: StandInModel, request: ModelRequest
+    ) -> AsyncIterator[ModelEvent]:
+        if "ROUNDTRIP" in request.system:
+            await asyncio.to_thread(parent_finished.wait)
+        async for event in complete(model, request):
+            yield event
+
+    monkeypatch.setattr(StandInModel, "complete", finish_after_parent)
     runtime = loop_queue._runtime
     assert runtime is not None
     seed = await _bootstrap()
     parent_id = await surface.admit(seed, "spawn-background")
-    _, terminal = await surface.consume(seed, parent_id)
-    assert terminal["status"] == "done"
+    try:
+        _, terminal = await surface.consume(seed, parent_id)
+        assert terminal["status"] == "done"
+    finally:
+        parent_finished.set()
 
     _, conversation_id = await _turn_row(parent_id)
     async with workspace_tx() as connection:
