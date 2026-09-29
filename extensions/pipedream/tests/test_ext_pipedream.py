@@ -86,7 +86,6 @@ SECOND_PAGE_ACTION = "gmail-find-email"
 DISCOVERY_QUERY = "find an email from a sender"
 OAUTH_APP_ID = "oa_gmail_custom"
 GITHUB_OAUTH_APP_ENV = "PIPEDREAM_GITHUB_OAUTH_APP_ID"
-GITHUB_OAUTH_APP_ID = "oa_github_custom"
 
 
 @pytest.fixture(autouse=True)
@@ -209,7 +208,7 @@ def test_the_project_keys_are_read_under_their_ufo_scoped_names_first(
     assert (built.client_id, built.client_secret, built.project_id) == tuple(
         f"ufo-{key}" for key in PROJECT_KEYS
     )
-    assert pipedream_manifest.manifest().deploy_keys == PROJECT_KEYS
+    assert set(PROJECT_KEYS) <= set(pipedream_manifest.manifest().deploy_keys)
 
 
 def test_the_connect_environment_is_read_under_its_ufo_scoped_name_first(
@@ -363,13 +362,26 @@ def test_authorize_url_points_the_browser_at_the_oauth_bridge() -> None:
     assert query["callback"] == [EXPECTED_REDIRECT_URI]
 
 
+@pytest.mark.parametrize(
+    ("slug", "app", "env"),
+    [
+        ("gmail", "gmail", "PIPEDREAM_GMAIL_OAUTH_APP_ID"),
+        ("google_drive", "google_drive", "PIPEDREAM_GOOGLE_DRIVE_OAUTH_APP_ID"),
+        ("google_calendar", "google_calendar", "PIPEDREAM_GOOGLE_CALENDAR_OAUTH_APP_ID"),
+        ("google_sheets", "google_sheets", "PIPEDREAM_GOOGLE_SHEETS_OAUTH_APP_ID"),
+    ],
+)
 async def test_oauth_route_start_leg_redirects_to_connect_link(
     monkeypatch: pytest.MonkeyPatch,
+    slug: str,
+    app: str,
+    env: str,
 ) -> None:
+    monkeypatch.setenv(env, OAUTH_APP_ID)
     minted: list[dict[str, object]] = []
     _install_transport(monkeypatch, _pipedream_handler("ufo_ws", minted=minted))
     ctx = context_for(pipedream_manifest.NAME, frozenset())
-    query = f"provider={PROVIDER}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
+    query = f"provider={slug}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
     workspace_id = uuid4()
     with ws(workspace_id):
         response = await provider.oauth_route(ctx, _request(query))
@@ -377,7 +389,7 @@ async def test_oauth_route_start_leg_redirects_to_connect_link(
     location = urlparse(response.headers["location"])
     link_query = parse_qs(location.query)
     assert response.headers["location"].startswith(CONNECT_LINK)
-    assert link_query["app"] == ["gmail"]
+    assert link_query["app"] == [app]
     assert link_query["oauthAppId"] == [OAUTH_APP_ID]
     success = urlparse(str(minted[0]["success_redirect_uri"]))
     assert success.path == provider.OAUTH_ROUTE_MOUNT
@@ -431,21 +443,25 @@ async def test_oauth_route_start_leg_refuses_github_consent_on_the_shared_client
         await provider.oauth_route(ctx, _request(query))
 
 
-@pytest.mark.parametrize("name", [GITHUB_OAUTH_APP_ENV, f"UFO_{GITHUB_OAUTH_APP_ENV}"])
-async def test_oauth_route_start_leg_pins_github_consent_to_the_deploys_own_client(
-    name: str, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("connector", ["github", "linear", "attio"])
+@pytest.mark.parametrize("prefix", ["", "UFO_"])
+async def test_oauth_route_start_leg_pins_consent_to_the_deploys_own_client(
+    connector: str, prefix: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(name, GITHUB_OAUTH_APP_ID)
+    name = f"PIPEDREAM_{connector.upper()}_OAUTH_APP_ID"
+    monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv(f"UFO_{name}", raising=False)
+    monkeypatch.setenv(f"{prefix}{name}", OAUTH_APP_ID)
     _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
     ctx = context_for(pipedream_manifest.NAME, frozenset())
-    query = f"provider=github&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
+    query = f"provider={connector}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
     with ws(uuid4()):
         response = await provider.oauth_route(ctx, _request(query))
     assert response.status_code == provider.REDIRECT_STATUS
     assert response.headers["location"].startswith(CONNECT_LINK)
     link_query = parse_qs(urlparse(response.headers["location"]).query)
-    assert link_query["app"] == ["github"]
-    assert link_query["oauthAppId"] == [GITHUB_OAUTH_APP_ID]
+    assert link_query["app"] == [connector]
+    assert link_query["oauthAppId"] == [OAUTH_APP_ID]
 
 
 async def test_oauth_route_return_leg_resolves_the_state_scoped_account(

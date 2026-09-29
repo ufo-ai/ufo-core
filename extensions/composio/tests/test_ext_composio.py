@@ -182,7 +182,7 @@ def _composio_handler(
         if method == "POST" and path.endswith("/connected_accounts/link"):
             return httpx.Response(200, json={"redirect_url": COMPOSIO_CONSENT_URL})
         if method == "GET" and path.endswith("/auth_configs"):
-            return httpx.Response(200, json={"items": [{"id": "ac_test"}]})
+            return httpx.Response(200, json={"items": [{"id": "ac_test", "name": "notion-ufo"}]})
         if method == "GET" and "/connected_accounts/" in path:
             payload = {
                 "status": "ACTIVE",
@@ -313,7 +313,7 @@ def test_connectable_requires_managed_credentials_and_tools() -> None:
         ({"composio_managed_auth_schemes": ["OAUTH2"], "meta": {"tools_count": 6.1}}, False),
     )
     for toolkit, expected in cases:
-        assert composio.connectable("notion", toolkit) is expected
+        assert composio.connectable("github", toolkit) is expected
 
 
 def test_connectable_refuses_a_banned_toolkit_however_well_credentialed() -> None:
@@ -340,9 +340,13 @@ async def test_connectable_toolkit_claims_a_slug_an_operator_created_a_config_fo
     assert await _mock_client().connectable_toolkit(CUSTOM_CONFIG_SLUG) == "Granola MCP"
 
 
-async def test_connect_link_rides_the_named_config_of_a_custom_credential_toolkit() -> None:
-    """Granola's consent leg opens the config named in `CUSTOM_AUTH_CONFIGS` — the one holding the
-    member's own OAuth client — and never another config for the toolkit, and never creates one."""
+@pytest.mark.parametrize(
+    "toolkit,config_name",
+    [(CUSTOM_CONFIG_SLUG, CUSTOM_CONFIG_NAME), ("notion", "notion-ufo"), ("zoom", "zoom-ufo")],
+)
+async def test_connect_link_rides_the_named_config_of_a_custom_credential_toolkit(
+    toolkit: str, config_name: str
+) -> None:
     lookups: list[dict[str, str]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -352,8 +356,8 @@ async def test_connect_link_rides_the_named_config_of_a_custom_credential_toolki
                 200,
                 json={
                     "items": [
-                        {"id": "ac_stale", "name": "granola_mcp-old"},
-                        {"id": CUSTOM_CONFIG_ID, "name": CUSTOM_CONFIG_NAME},
+                        {"id": "ac_stale", "name": f"{toolkit}-managed"},
+                        {"id": CUSTOM_CONFIG_ID, "name": config_name},
                     ]
                 },
             )
@@ -364,12 +368,10 @@ async def test_connect_link_rides_the_named_config_of_a_custom_credential_toolki
 
     client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
     redirect = await client.connect_link(
-        toolkit=CUSTOM_CONFIG_SLUG, user_id="ufo_ws", callback_url="https://ufo.example.com/back"
+        toolkit=toolkit, user_id="ufo_ws", callback_url="https://ufo.example.com/back"
     )
     assert redirect == COMPOSIO_CONSENT_URL
-    assert lookups == [
-        {"toolkit_slug": CUSTOM_CONFIG_SLUG, "limit": str(composio.AUTH_CONFIG_PAGE_LIMIT)}
-    ]
+    assert lookups == [{"toolkit_slug": toolkit, "limit": str(composio.AUTH_CONFIG_PAGE_LIMIT)}]
 
 
 async def test_named_config_lookup_pages_within_composios_limit() -> None:
