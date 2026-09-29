@@ -1621,6 +1621,19 @@ def test_catalog_registers_opus_5_with_its_long_context_window(tmp_path: Path) -
     assert spec.price.output == 25_000_000
 
 
+def test_catalog_registers_sonnet_5_5_at_sonnet_pricing(tmp_path: Path) -> None:
+    registry = model_registry(_config(tmp_path), ())
+    spec = registry.spec("claude-sonnet-5-5")
+    assert spec.provider == "anthropic"
+    assert spec.knowledge_cutoff == "2026-05"
+    assert spec.price.input == 2_000_000
+    assert spec.price.output == 10_000_000
+    assert spec.price.cache_read == 200_000
+    assert spec.price.cache_write_5m == 2_500_000
+    assert spec.price.cache_write_1h == 4_000_000
+    assert spec.reasoning.default_on
+
+
 def test_catalog_registers_gpt_5_6_sol_on_the_responses_surface(tmp_path: Path) -> None:
     """Sol shares the family's refusal of `tools` beside `reasoning_effort` on
     `/v1/chat/completions` (#568), so it is called on Responses."""
@@ -1649,6 +1662,30 @@ def test_catalog_registers_gpt_6_astra_with_its_launch_facts(tmp_path: Path) -> 
     assert spec.price.output == 50_000_000
     assert spec.price.cache_read == 1_000_000
     assert spec.price.cache_write_30m == 12_500_000
+
+
+def test_catalog_registers_gpt_6_sol_and_luna_at_their_permanent_rates(tmp_path: Path) -> None:
+    """Sol and Luna joined the GPT-6 family on the Responses surface on September 22 at half their
+    GPT-5.6 predecessors' prices, permanent rates OpenAI confirmed; the family's 272,000 window
+    rule carries over."""
+    registry = model_registry(_config(tmp_path), ())
+    sol = registry.spec("gpt-6-sol")
+    assert sol.provider == "openai"
+    assert sol.api_surface == "responses"
+    assert sol.context_window == 272_000
+    assert sol.knowledge_cutoff == "2026-09"
+    assert sol.price.input == 2_000_000
+    assert sol.price.output == 10_000_000
+    assert sol.price.cache_read == 200_000
+    assert sol.price.cache_write_30m == 2_500_000
+    luna = registry.spec("gpt-6-luna")
+    assert luna.api_surface == "responses"
+    assert luna.context_window == 272_000
+    assert luna.knowledge_cutoff == "2026-09"
+    assert luna.price.input == 100_000
+    assert luna.price.output == 500_000
+    assert luna.price.cache_read == 10_000
+    assert luna.price.cache_write_30m == 125_000
 
 
 def test_registry_rejects_an_auto_model_no_spec_describes(tmp_path: Path) -> None:

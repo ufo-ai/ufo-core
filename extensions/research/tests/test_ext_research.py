@@ -258,6 +258,11 @@ def test_deep_research_lifts_its_round_budget_above_the_default() -> None:
     assert RESEARCH_PROFILE.max_rounds < DEEP_RESEARCH_PROFILE.max_rounds
 
 
+def test_deep_research_runs_on_sonnet_5_5_and_research_stays_on_terra() -> None:
+    assert DEEP_RESEARCH_PROFILE.model == "claude-sonnet-5-5"
+    assert RESEARCH_PROFILE.model == "gpt-5.6-terra"
+
+
 def test_research_skills_parse_and_index() -> None:
     index = dict(skill_registry((research_manifest.manifest(),)).index())
     for name in ("research-assistant", "research-report", "competitive-intel"):

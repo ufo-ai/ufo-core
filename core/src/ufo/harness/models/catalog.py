@@ -93,9 +93,12 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
     1.25x base input at 5m and 2x at 1h; cache reads are 0.1x of input, except `claude-opus-5-5`
     at 0.05x. `gpt-6-astra` is called on the same
     Responses surface, which is where OpenAI serves its tool and computer use, at $10/$50 per Mtok
-    with cache reads at 0.1x and 30-minute cache writes at 1.25x base input.
+    with cache reads at 0.1x and 30-minute cache writes at 1.25x base input. `gpt-6-sol` and
+    `gpt-6-luna` joined the same surface on September 22 at half their GPT-5.6 predecessors' prices:
+    Sol at $2/$10 per Mtok and Luna at $0.10/$0.50, both permanent rates, with the same cache-read
+    0.1x and 30-minute cache-write 1.25x multipliers.
 
-    The GPT-5.6 family and `gpt-6-astra` accept 1,050,000 tokens, but a request whose input passes
+    The GPT-5.6 family, the GPT-6 family, and `gpt-6-astra` accept 1,050,000 tokens, but a request whose input passes
     272,000 is billed at 2x input and 1.5x output for the whole request, which one rate per token
     class cannot express. `context_window` is what the turn loop compacts against, so these rows
     carry the 272,000 the registered rate is true at rather than the window the provider accepts: a
@@ -136,6 +139,13 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
             anthropic_key_env,
         ),
         _anthropic(
+            "claude-sonnet-5-5",
+            ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000),
+            "2026-05",
+            anthropic_key_env,
+            reasoning=DEFAULT_REASONS_WITH_TOOLS,
+        ),
+        _anthropic(
             "claude-sonnet-5",
             ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000),
             "2026-01",
@@ -158,6 +168,20 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
             "gpt-6-astra",
             ModelPrice(10_000_000, 50_000_000, 1_000_000, 0, 0, 12_500_000),
             "2026-04",
+            openai_key_env,
+            api_surface="responses",
+        ),
+        _openai(
+            "gpt-6-sol",
+            ModelPrice(2_000_000, 10_000_000, 200_000, 0, 0, 2_500_000),
+            "2026-09",
+            openai_key_env,
+            api_surface="responses",
+        ),
+        _openai(
+            "gpt-6-luna",
+            ModelPrice(100_000, 500_000, 10_000, 0, 0, 125_000),
+            "2026-09",
             openai_key_env,
             api_surface="responses",
         ),
