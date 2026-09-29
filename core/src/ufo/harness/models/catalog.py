@@ -98,11 +98,11 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
     Sol at $2/$10 per Mtok and Luna at $0.10/$0.50, both permanent rates, with the same cache-read
     0.1x and 30-minute cache-write 1.25x multipliers.
 
-    The GPT-5.6 family, the GPT-6 family, and `gpt-6-astra` accept 1,050,000 tokens, but a request whose input passes
-    272,000 is billed at 2x input and 1.5x output for the whole request, which one rate per token
-    class cannot express. `context_window` is what the turn loop compacts against, so these rows
-    carry the 272,000 the registered rate is true at rather than the window the provider accepts: a
-    larger number would let a turn grow into a tier this table bills at half price."""
+    The GPT-5.6 family, the GPT-6 family, and `gpt-6-astra` accept 1,050,000 tokens, but a request
+    past 272,000 input tokens is billed at 2x input and 1.5x output for the whole request, which one
+    rate per token class cannot express. `context_window` is what the turn loop compacts against, so
+    these rows carry the 272,000 the registered rate is true at rather than the window the provider
+    accepts: a larger number would let a turn grow into a tier this table bills at half price."""
     return (
         _anthropic(
             "claude-opus-5-5",

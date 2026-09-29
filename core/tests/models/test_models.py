@@ -1665,9 +1665,6 @@ def test_catalog_registers_gpt_6_astra_with_its_launch_facts(tmp_path: Path) -> 
 
 
 def test_catalog_registers_gpt_6_sol_and_luna_at_their_permanent_rates(tmp_path: Path) -> None:
-    """Sol and Luna joined the GPT-6 family on the Responses surface on September 22 at half their
-    GPT-5.6 predecessors' prices, permanent rates OpenAI confirmed; the family's 272,000 window
-    rule carries over."""
     registry = model_registry(_config(tmp_path), ())
     sol = registry.spec("gpt-6-sol")
     assert sol.provider == "openai"
