@@ -27,7 +27,7 @@ AuthorizationDecision = Literal["allow", "always", "deny", "revoke", "ask"]
 AuthorizationBasis = Literal["selected_message", "pending_answer", "standing", "none"]
 AuthorizationAccess = Literal["read", "write"]
 
-MEMBER_AUTHORIZATION_MODEL = "gpt-5.6-luna"
+MEMBER_AUTHORIZATION_MODEL = "gpt-6-luna"
 MEMBER_AUTHORIZATION_JOB = "core:member_authorization"
 MEMBER_AUTHORIZATION_TOOL = "decide_authorization"
 MEMBER_AUTHORIZATION_MAX_TOKENS = 512
