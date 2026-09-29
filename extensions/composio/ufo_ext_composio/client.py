@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 import httpx
+from pydantic import TypeAdapter
 
 from ufo.sdk.connectors import (
     WORKSPACE_FILE_KEY,
@@ -33,6 +34,7 @@ from ufo_ext_composio import mcp_session
 
 COMPOSIO_API_BASE = "https://backend.composio.dev/api/v3.1"
 COMPOSIO_API_KEY_ENV = "COMPOSIO_API_KEY"
+AUTH_CONFIG_NAMES = TypeAdapter(dict[str, str])
 EXTERNAL_USER_PREFIX = "ufo_"
 COMPOSIO_TIMEOUT_SECONDS = 30.0
 ACTIVE_STATUS = "ACTIVE"
@@ -124,6 +126,14 @@ Each name must exist on every Composio project a deploy uses — `_named_auth_co
 does not, so a config created against one project's key connects there and fails loud elsewhere."""
 
 
+def _custom_auth_config(slug: str) -> str | None:
+    raw = deploy_env("COMPOSIO_AUTH_CONFIGS")
+    configured = AUTH_CONFIG_NAMES.validate_json(raw, strict=True) if raw else {}
+    if any(not key or key != key.lower() or not value.strip() for key, value in configured.items()):
+        raise ValueError("COMPOSIO_AUTH_CONFIGS requires lowercase toolkit keys and nonempty names")
+    return configured.get(slug.lower(), CUSTOM_AUTH_CONFIGS.get(slug.lower()))
+
+
 def connectable(slug: str, toolkit: Mapping[str, object]) -> bool:
     """Whether a member can reach a toolkit's tools through this deploy: `slug` is the identifier
     the caller already trusts, `toolkit` the record Composio's catalog carries for it (either the
@@ -151,7 +161,7 @@ def connectable(slug: str, toolkit: Mapping[str, object]) -> bool:
     tools = meta.get(TOOLS_COUNT_KEY) if isinstance(meta, Mapping) else None
     if not (isinstance(tools, int) and tools > 0):
         return False
-    if slug.lower() in CUSTOM_AUTH_CONFIGS:
+    if _custom_auth_config(slug) is not None:
         return True
     return bool(isinstance(schemes, list) and schemes)
 
@@ -372,11 +382,7 @@ class ComposioClient:
         return ToolRouterSession(id=session_id, url=url)
 
     async def _auth_config(self, toolkit: str) -> str:
-        named = (
-            deploy_env("COMPOSIO_NOTION_AUTH_CONFIG_NAME")
-            if toolkit.lower() == "notion"
-            else CUSTOM_AUTH_CONFIGS.get(toolkit.lower())
-        )
+        named = _custom_auth_config(toolkit)
         if named:
             return await self._named_auth_config(toolkit, named)
         existing = await self._get("/auth_configs", params={"toolkit_slug": toolkit, "limit": "1"})

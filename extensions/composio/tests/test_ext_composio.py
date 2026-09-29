@@ -164,8 +164,8 @@ def _toolkit_record(slug: str) -> dict[str, object]:
 
 @pytest.fixture(autouse=True)
 def _reset_connect_flow(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.delenv("COMPOSIO_NOTION_AUTH_CONFIG_NAME", raising=False)
-    monkeypatch.delenv("UFO_COMPOSIO_NOTION_AUTH_CONFIG_NAME", raising=False)
+    monkeypatch.delenv("COMPOSIO_AUTH_CONFIGS", raising=False)
+    monkeypatch.delenv("UFO_COMPOSIO_AUTH_CONFIGS", raising=False)
     yield
     install_connect_flow(None)
 
@@ -350,7 +350,7 @@ async def test_connect_link_rides_the_named_config_of_a_custom_credential_toolki
     toolkit: str, config_name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     if toolkit == "notion":
-        monkeypatch.setenv("COMPOSIO_NOTION_AUTH_CONFIG_NAME", config_name)
+        monkeypatch.setenv("COMPOSIO_AUTH_CONFIGS", json.dumps({toolkit: config_name}))
     lookups: list[dict[str, str]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -378,14 +378,18 @@ async def test_connect_link_rides_the_named_config_of_a_custom_credential_toolki
     assert lookups == [{"toolkit_slug": toolkit, "limit": str(composio.AUTH_CONFIG_PAGE_LIMIT)}]
 
 
-@pytest.mark.parametrize("setting", [None, "", "notion-company", "scoped"])
-async def test_notion_config_is_opt_in(
-    setting: str | None, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("toolkit", ["notion", "zoom"])
+@pytest.mark.parametrize("setting", [None, "", "custom", "scoped"])
+async def test_configured_auth_is_opt_in(
+    toolkit: str, setting: str | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     if setting is not None:
-        monkeypatch.setenv("COMPOSIO_NOTION_AUTH_CONFIG_NAME", setting)
+        monkeypatch.setenv(
+            "COMPOSIO_AUTH_CONFIGS", json.dumps({toolkit: "company-app"}) if setting else ""
+        )
     if setting == "scoped":
-        monkeypatch.setenv("UFO_COMPOSIO_NOTION_AUTH_CONFIG_NAME", "notion-company")
+        monkeypatch.setenv("COMPOSIO_AUTH_CONFIGS", json.dumps({toolkit: "wrong-app"}))
+        monkeypatch.setenv("UFO_COMPOSIO_AUTH_CONFIGS", json.dumps({toolkit: "company-app"}))
     expected_id = "ac_custom" if setting else "ac_managed"
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -398,7 +402,7 @@ async def test_notion_config_is_opt_in(
                 json={
                     "items": [
                         {"id": "ac_managed", "name": "notion-managed"},
-                        {"id": "ac_custom", "name": "notion-company"},
+                        {"id": "ac_custom", "name": "company-app"},
                     ]
                 },
             )
@@ -410,9 +414,31 @@ async def test_notion_config_is_opt_in(
     client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
     assert (
         await client.connect_link(
-            toolkit="notion", user_id="ufo_ws", callback_url="https://ufo.example.com/back"
+            toolkit=toolkit, user_id="ufo_ws", callback_url="https://ufo.example.com/back"
         )
         == COMPOSIO_CONSENT_URL
+    )
+
+
+@pytest.mark.parametrize(
+    "value", ["invalid", "[]", '{"notion": 1}', '{"notion": " "}', '{"Notion": "app"}']
+)
+async def test_invalid_auth_config_settings_fail_before_connecting(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COMPOSIO_AUTH_CONFIGS", value)
+    with pytest.raises(ValueError):
+        await _mock_client().connect_link(
+            toolkit="notion", user_id="ufo_ws", callback_url="https://ufo.example.com/back"
+        )
+
+
+def test_configured_auth_makes_an_unmanaged_toolkit_connectable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMPOSIO_AUTH_CONFIGS", '{"notion": "company-app"}')
+    assert composio.connectable(
+        "notion", {"composio_managed_auth_schemes": [], "meta": {"tools_count": 1}}
     )
 
 

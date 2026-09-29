@@ -1791,7 +1791,7 @@ ENVIRON_KEY_METHODS = frozenset({"get", "pop", "setdefault"})
 ENV_SETTINGS = frozenset(
     {
         "BROWSERBASE_PROXIES",
-        "COMPOSIO_NOTION_AUTH_CONFIG_NAME",
+        "COMPOSIO_AUTH_CONFIGS",
         "PIPEDREAM_ATTIO_OAUTH_APP_ID",
         "PIPEDREAM_LINEAR_OAUTH_APP_ID",
         "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
