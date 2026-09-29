@@ -118,6 +118,24 @@ CONNECTORS: dict[str, ConnectorSpec] = {
     "gmail": ConnectorSpec(
         "Gmail", "gmail", "gmail.googleapis.com", custom_oauth_env="PIPEDREAM_GMAIL_OAUTH_APP_ID"
     ),
+    "google_calendar": ConnectorSpec(
+        "Google Calendar",
+        "google_calendar",
+        "www.googleapis.com",
+        custom_oauth_env="PIPEDREAM_GOOGLE_CALENDAR_OAUTH_APP_ID",
+    ),
+    "google_drive": ConnectorSpec(
+        "Google Drive",
+        "google_drive",
+        "www.googleapis.com",
+        custom_oauth_env="PIPEDREAM_GOOGLE_DRIVE_OAUTH_APP_ID",
+    ),
+    "google_sheets": ConnectorSpec(
+        "Google Sheets",
+        "google_sheets",
+        "sheets.googleapis.com",
+        custom_oauth_env="PIPEDREAM_GOOGLE_SHEETS_OAUTH_APP_ID",
+    ),
     "linear": ConnectorSpec(
         "Linear", "linear", "api.linear.app", custom_oauth_env="PIPEDREAM_LINEAR_OAUTH_APP_ID"
     ),
