@@ -208,7 +208,7 @@ def test_the_project_keys_are_read_under_their_ufo_scoped_names_first(
     assert (built.client_id, built.client_secret, built.project_id) == tuple(
         f"ufo-{key}" for key in PROJECT_KEYS
     )
-    assert set(PROJECT_KEYS) <= set(pipedream_manifest.manifest().deploy_keys)
+    assert pipedream_manifest.manifest().deploy_keys == PROJECT_KEYS
 
 
 def test_the_connect_environment_is_read_under_its_ufo_scoped_name_first(

@@ -111,13 +111,12 @@ for what earns one, is in docs/composio-provider-coverage.md."""
 
 CUSTOM_AUTH_CONFIGS: dict[str, str] = {
     "granola_mcp": "granola_mcp-8pqzpe",
-    "notion": "notion-ufo",
     "vercel": "vercel-ufo",
 }
 """Toolkits reached through an auth config an operator created on this deploy's Composio project,
 keyed by slug to that config's name.
 
-Notion uses UFO's public OAuth app. Granola uses a dynamically registered client, and Vercel uses
+Granola uses a dynamically registered client, and Vercel uses
 a registered Integration. The named config holds each client's credentials; the consent flow
 selects it explicitly even when the project also holds managed configs for the same toolkit.
 
@@ -373,8 +372,12 @@ class ComposioClient:
         return ToolRouterSession(id=session_id, url=url)
 
     async def _auth_config(self, toolkit: str) -> str:
-        named = CUSTOM_AUTH_CONFIGS.get(toolkit.lower())
-        if named is not None:
+        named = (
+            deploy_env("COMPOSIO_NOTION_AUTH_CONFIG_NAME")
+            if toolkit.lower() == "notion"
+            else CUSTOM_AUTH_CONFIGS.get(toolkit.lower())
+        )
+        if named:
             return await self._named_auth_config(toolkit, named)
         existing = await self._get("/auth_configs", params={"toolkit_slug": toolkit, "limit": "1"})
         config_id = _auth_config_id(existing)

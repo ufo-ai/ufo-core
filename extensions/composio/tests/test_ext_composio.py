@@ -163,7 +163,9 @@ def _toolkit_record(slug: str) -> dict[str, object]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_connect_flow() -> Iterator[None]:
+def _reset_connect_flow(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.delenv("COMPOSIO_NOTION_AUTH_CONFIG_NAME", raising=False)
+    monkeypatch.delenv("UFO_COMPOSIO_NOTION_AUTH_CONFIG_NAME", raising=False)
     yield
     install_connect_flow(None)
 
@@ -345,8 +347,10 @@ async def test_connectable_toolkit_claims_a_slug_an_operator_created_a_config_fo
     [(CUSTOM_CONFIG_SLUG, CUSTOM_CONFIG_NAME), ("notion", "notion-ufo")],
 )
 async def test_connect_link_rides_the_named_config_of_a_custom_credential_toolkit(
-    toolkit: str, config_name: str
+    toolkit: str, config_name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    if toolkit == "notion":
+        monkeypatch.setenv("COMPOSIO_NOTION_AUTH_CONFIG_NAME", config_name)
     lookups: list[dict[str, str]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -372,6 +376,44 @@ async def test_connect_link_rides_the_named_config_of_a_custom_credential_toolki
     )
     assert redirect == COMPOSIO_CONSENT_URL
     assert lookups == [{"toolkit_slug": toolkit, "limit": str(composio.AUTH_CONFIG_PAGE_LIMIT)}]
+
+
+@pytest.mark.parametrize("setting", [None, "", "notion-company", "scoped"])
+async def test_notion_config_is_opt_in(
+    setting: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if setting is not None:
+        monkeypatch.setenv("COMPOSIO_NOTION_AUTH_CONFIG_NAME", setting)
+    if setting == "scoped":
+        monkeypatch.setenv("UFO_COMPOSIO_NOTION_AUTH_CONFIG_NAME", "notion-company")
+    expected_id = "ac_custom" if setting else "ac_managed"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/auth_configs"):
+            assert request.url.params["limit"] == (
+                str(composio.AUTH_CONFIG_PAGE_LIMIT) if setting else "1"
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"id": "ac_managed", "name": "notion-managed"},
+                        {"id": "ac_custom", "name": "notion-company"},
+                    ]
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith("/connected_accounts/link"):
+            assert json.loads(request.content)["auth_config_id"] == expected_id
+            return httpx.Response(200, json={"redirect_url": COMPOSIO_CONSENT_URL})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
+    assert (
+        await client.connect_link(
+            toolkit="notion", user_id="ufo_ws", callback_url="https://ufo.example.com/back"
+        )
+        == COMPOSIO_CONSENT_URL
+    )
 
 
 async def test_named_config_lookup_pages_within_composios_limit() -> None:

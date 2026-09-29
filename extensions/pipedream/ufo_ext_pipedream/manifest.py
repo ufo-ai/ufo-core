@@ -63,7 +63,5 @@ def manifest() -> Manifest:
             PIPEDREAM_CLIENT_ID_ENV,
             PIPEDREAM_CLIENT_SECRET_ENV,
             PIPEDREAM_PROJECT_ID_ENV,
-            "PIPEDREAM_ATTIO_OAUTH_APP_ID",
-            "PIPEDREAM_LINEAR_OAUTH_APP_ID",
         ),
     )

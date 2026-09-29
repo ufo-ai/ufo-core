@@ -1077,8 +1077,6 @@ def _check_metric_and_deploy_key_gates_hold_over_the_tree() -> None:
         "PIPEDREAM_CLIENT_ID",
         "PIPEDREAM_CLIENT_SECRET",
         "PIPEDREAM_PROJECT_ID",
-        "PIPEDREAM_ATTIO_OAUTH_APP_ID",
-        "PIPEDREAM_LINEAR_OAUTH_APP_ID",
     }
 
 
