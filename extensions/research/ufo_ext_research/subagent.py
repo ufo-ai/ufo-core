@@ -9,7 +9,7 @@ reaches for — and their prompts are the ported instructions verbatim.
 
 `research` runs on `gpt-5.6-terra` at high reasoning: the Artificial Analysis Intelligence Index
 scores it 57 at $0.34 per task against `claude-sonnet-5`'s 48 at $1.22, so the focused child gets
-the better answer for a third of the cost. `deep_research` stays on `claude-sonnet-5`."""
+the better answer for a third of the cost. `deep_research` runs on `claude-sonnet-5-5`."""
 
 from pathlib import Path
 from typing import Literal
@@ -25,7 +25,7 @@ DEEP_RESEARCH_PROFILE_NAME = "deep_research"
 DEEP_RESEARCH_ROUND_LIMIT = 200
 RESEARCH_MODEL = "gpt-5.6-terra"
 RESEARCH_REASONING: Literal["high"] = "high"
-DEEP_RESEARCH_MODEL = "claude-sonnet-5"
+DEEP_RESEARCH_MODEL = "claude-sonnet-5-5"
 RESEARCH_TOOL_NAMES = (
     SEARCH_WEB_TOOL,
     FETCH_URL_TOOL,

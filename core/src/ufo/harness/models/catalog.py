@@ -136,6 +136,13 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
             anthropic_key_env,
         ),
         _anthropic(
+            "claude-sonnet-5-5",
+            ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000),
+            "2026-05",
+            anthropic_key_env,
+            reasoning=DEFAULT_REASONS_WITH_TOOLS,
+        ),
+        _anthropic(
             "claude-sonnet-5",
             ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000),
             "2026-01",

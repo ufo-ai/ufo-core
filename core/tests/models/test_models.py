@@ -1621,6 +1621,19 @@ def test_catalog_registers_opus_5_with_its_long_context_window(tmp_path: Path) -
     assert spec.price.output == 25_000_000
 
 
+def test_catalog_registers_sonnet_5_5_at_sonnet_pricing(tmp_path: Path) -> None:
+    registry = model_registry(_config(tmp_path), ())
+    spec = registry.spec("claude-sonnet-5-5")
+    assert spec.provider == "anthropic"
+    assert spec.knowledge_cutoff == "2026-05"
+    assert spec.price.input == 2_000_000
+    assert spec.price.output == 10_000_000
+    assert spec.price.cache_read == 200_000
+    assert spec.price.cache_write_5m == 2_500_000
+    assert spec.price.cache_write_1h == 4_000_000
+    assert spec.reasoning.default_on
+
+
 def test_catalog_registers_gpt_5_6_sol_on_the_responses_surface(tmp_path: Path) -> None:
     """Sol shares the family's refusal of `tools` beside `reasoning_effort` on
     `/v1/chat/completions` (#568), so it is called on Responses."""
