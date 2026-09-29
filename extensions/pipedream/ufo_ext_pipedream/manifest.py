@@ -64,9 +64,6 @@ def manifest() -> Manifest:
             PIPEDREAM_CLIENT_SECRET_ENV,
             PIPEDREAM_PROJECT_ID_ENV,
             "PIPEDREAM_ATTIO_OAUTH_APP_ID",
-            "PIPEDREAM_GOOGLE_CALENDAR_OAUTH_APP_ID",
-            "PIPEDREAM_GOOGLE_DRIVE_OAUTH_APP_ID",
-            "PIPEDREAM_GOOGLE_SHEETS_OAUTH_APP_ID",
             "PIPEDREAM_LINEAR_OAUTH_APP_ID",
         ),
     )

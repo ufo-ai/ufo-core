@@ -362,26 +362,13 @@ def test_authorize_url_points_the_browser_at_the_oauth_bridge() -> None:
     assert query["callback"] == [EXPECTED_REDIRECT_URI]
 
 
-@pytest.mark.parametrize(
-    ("slug", "app", "env"),
-    [
-        ("gmail", "gmail", "PIPEDREAM_GMAIL_OAUTH_APP_ID"),
-        ("google_drive", "google_drive", "PIPEDREAM_GOOGLE_DRIVE_OAUTH_APP_ID"),
-        ("google_calendar", "google_calendar", "PIPEDREAM_GOOGLE_CALENDAR_OAUTH_APP_ID"),
-        ("google_sheets", "google_sheets", "PIPEDREAM_GOOGLE_SHEETS_OAUTH_APP_ID"),
-    ],
-)
 async def test_oauth_route_start_leg_redirects_to_connect_link(
     monkeypatch: pytest.MonkeyPatch,
-    slug: str,
-    app: str,
-    env: str,
 ) -> None:
-    monkeypatch.setenv(env, OAUTH_APP_ID)
     minted: list[dict[str, object]] = []
     _install_transport(monkeypatch, _pipedream_handler("ufo_ws", minted=minted))
     ctx = context_for(pipedream_manifest.NAME, frozenset())
-    query = f"provider={slug}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
+    query = f"provider={PROVIDER}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
     workspace_id = uuid4()
     with ws(workspace_id):
         response = await provider.oauth_route(ctx, _request(query))
@@ -389,7 +376,7 @@ async def test_oauth_route_start_leg_redirects_to_connect_link(
     location = urlparse(response.headers["location"])
     link_query = parse_qs(location.query)
     assert response.headers["location"].startswith(CONNECT_LINK)
-    assert link_query["app"] == [app]
+    assert link_query["app"] == ["gmail"]
     assert link_query["oauthAppId"] == [OAUTH_APP_ID]
     success = urlparse(str(minted[0]["success_redirect_uri"]))
     assert success.path == provider.OAUTH_ROUTE_MOUNT

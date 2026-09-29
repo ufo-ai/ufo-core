@@ -342,7 +342,7 @@ async def test_connectable_toolkit_claims_a_slug_an_operator_created_a_config_fo
 
 @pytest.mark.parametrize(
     "toolkit,config_name",
-    [(CUSTOM_CONFIG_SLUG, CUSTOM_CONFIG_NAME), ("notion", "notion-ufo"), ("zoom", "zoom-ufo")],
+    [(CUSTOM_CONFIG_SLUG, CUSTOM_CONFIG_NAME), ("notion", "notion-ufo")],
 )
 async def test_connect_link_rides_the_named_config_of_a_custom_credential_toolkit(
     toolkit: str, config_name: str

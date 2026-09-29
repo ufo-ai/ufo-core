@@ -113,12 +113,11 @@ CUSTOM_AUTH_CONFIGS: dict[str, str] = {
     "granola_mcp": "granola_mcp-8pqzpe",
     "notion": "notion-ufo",
     "vercel": "vercel-ufo",
-    "zoom": "zoom-ufo",
 }
 """Toolkits reached through an auth config an operator created on this deploy's Composio project,
 keyed by slug to that config's name.
 
-Notion and Zoom use UFO's OAuth apps. Granola uses a dynamically registered client, and Vercel uses
+Notion uses UFO's public OAuth app. Granola uses a dynamically registered client, and Vercel uses
 a registered Integration. The named config holds each client's credentials; the consent flow
 selects it explicitly even when the project also holds managed configs for the same toolkit.
 
