@@ -96,7 +96,9 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
     with cache reads at 0.1x and 30-minute cache writes at 1.25x base input. `gpt-6-sol` and
     `gpt-6-luna` joined the same surface on September 22 at half their GPT-5.6 predecessors' prices:
     Sol at $2/$10 per Mtok and Luna at $0.10/$0.50, both permanent rates, with the same cache-read
-    0.1x and 30-minute cache-write 1.25x multipliers.
+    0.1x and 30-minute cache-write 1.25x multipliers. `gpt-6.1-sol` joined on September 29 at
+    GPT-6 Sol's $2/$10 per Mtok, with cached input at $0.10 (0.05x base input) and the same 1.25x
+    cache-write multiplier.
 
     The GPT-5.6 family, the GPT-6 family, and `gpt-6-astra` accept 1,050,000 tokens, but a
     request whose input passes 272,000 is billed at 2x input and 1.5x output for the whole
@@ -168,6 +170,13 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
         _openai(
             "gpt-6-astra",
             ModelPrice(10_000_000, 50_000_000, 1_000_000, 0, 0, 12_500_000),
+            "2026-04",
+            openai_key_env,
+            api_surface="responses",
+        ),
+        _openai(
+            "gpt-6.1-sol",
+            ModelPrice(2_000_000, 10_000_000, 100_000, 0, 0, 2_500_000),
             "2026-04",
             openai_key_env,
             api_surface="responses",

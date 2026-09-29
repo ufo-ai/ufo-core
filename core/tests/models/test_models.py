@@ -1685,6 +1685,21 @@ def test_catalog_registers_gpt_6_sol_and_luna_at_their_permanent_rates(tmp_path:
     assert luna.price.cache_write_30m == 125_000
 
 
+def test_catalog_registers_gpt_6_1_sol_at_its_launch_facts(tmp_path: Path) -> None:
+    """GPT-6.1 Sol bills GPT-6 Sol's input and output prices with cached input at 5% of base
+    input, per OpenAI's model page, on the same Responses surface the GPT-6 family uses."""
+    registry = model_registry(_config(tmp_path), ())
+    spec = registry.spec("gpt-6.1-sol")
+    assert spec.provider == "openai"
+    assert spec.api_surface == "responses"
+    assert spec.context_window == 272_000
+    assert spec.knowledge_cutoff == "2026-04"
+    assert spec.price.input == 2_000_000
+    assert spec.price.output == 10_000_000
+    assert spec.price.cache_read == 100_000
+    assert spec.price.cache_write_30m == 2_500_000
+
+
 def test_registry_rejects_an_auto_model_no_spec_describes(tmp_path: Path) -> None:
     """Every agent that defers its model resolves through `auto_model` on every turn, so a knob
     naming no registered spec is a boot failure — not one mid-turn failure per workspace."""
