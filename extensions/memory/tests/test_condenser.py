@@ -2799,6 +2799,21 @@ async def test_a_retired_row_stays_retired_when_the_next_derivation_commits_it_a
     assert row.embedding_digest is None
 
 
+@dataclass
+class ProseClient:
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield TextDelta(text="Nothing on this page repeats.")
+        yield Usage(input_tokens=10, output_tokens=5)
+
+
+async def test_a_page_pass_reply_without_the_curation_call_fails_loud(db: None) -> None:
+    workspace_id = await _workspace()
+    await _seed_wiki_page(workspace_id, await _seed_wiki_feed(workspace_id))
+
+    with ws(workspace_id), pytest.raises(ValueError, match=f"recorded no {PAGE_PASS_TOOL} call"):
+        await _page_pass(workspace_id, ProseClient()).run()
+
+
 async def test_the_pass_retires_the_rows_several_source_pages_wrote_about_one_claim(
     db: None,
 ) -> None:

@@ -274,6 +274,14 @@ async def test_prose_on_a_structured_run_forces_a_finish_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_forced_finish_round_that_answers_in_prose_fails_loud() -> None:
+    model = ScriptedModel([round_("draft"), round_("still prose")])
+
+    with pytest.raises(RuntimeError, match="did not return a lone finish call"):
+        await AgentEngine(definition(), model, Tools(), structured=output_contract()).run(())
+
+
+@pytest.mark.asyncio
 async def test_arrival_interrupts_the_tool_boundary_before_the_next_round() -> None:
     call = ToolCall("one", "echo", {"value": "one"})
     conversation = Conversation(interrupted=True)

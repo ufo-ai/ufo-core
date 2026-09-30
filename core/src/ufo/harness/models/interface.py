@@ -139,7 +139,8 @@ class ModelRequest(BaseModel):
     reasoning off, which each wire says in its own shape: Anthropic omits the thinking parameters,
     the OpenAI wire sends effort `none` and OpenRouter `enabled: false` — a wire that reads an
     absent parameter as its default effort has to state it. `tool_choice` compels the named tool as
-    the round's single act — it must name an offered tool. `conversation_cache_ttl` is
+    the round's single act — it must name an offered tool; on a spec without `forced_tool_choice`
+    it must be the only tool, and the reply may hold no call. `conversation_cache_ttl` is
     how long the changing conversation tail stays warm; the Anthropic client keeps the tools and
     system prefix for one hour, and clients whose provider caches on its own ignore it.
     `session_id` names the series this call shares a prompt prefix with — the conversation for a

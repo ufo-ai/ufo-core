@@ -971,10 +971,16 @@ class OpenRouterModelClient:
                 for tool in request.tools
             ]
         if request.tool_choice is not None:
-            kwargs["tool_choice"] = {
-                "type": "function",
-                "function": {"name": request.tool_choice},
-            }
+            if self.spec.forced_tool_choice:
+                kwargs["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": request.tool_choice},
+                }
+            elif len(request.tools) != 1:
+                raise ValueError(
+                    f"model {self.spec.id!r} cannot force tool_choice {request.tool_choice!r} "
+                    "beside other tools"
+                )
             kwargs["parallel_tool_calls"] = False
         return kwargs
 
@@ -996,6 +1002,7 @@ def _openrouter(
     accepts_image_input: bool = True,
     rollover_trigger_tokens: int | None = None,
     repeated_tool_rollover: RepeatedToolRollover | None = None,
+    forced_tool_choice: bool = True,
 ) -> ModelSpec:
     return ModelSpec(
         id=id,
@@ -1011,6 +1018,7 @@ def _openrouter(
         accepts_image_input=accepts_image_input,
         rollover_trigger_tokens=rollover_trigger_tokens,
         repeated_tool_rollover=repeated_tool_rollover,
+        forced_tool_choice=forced_tool_choice,
     )
 
 
@@ -1064,6 +1072,7 @@ OPENROUTER_MODEL_SPECS = (
         "2026-01",
         context_window=1_000_000,
         reasoning=_REQUIRED_REASONS,
+        forced_tool_choice=False,
     ),
     _openrouter(
         "anthropic/claude-fable-5",

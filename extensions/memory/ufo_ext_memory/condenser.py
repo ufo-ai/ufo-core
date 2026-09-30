@@ -222,7 +222,7 @@ PAGE_PASS_REASONING: Literal["off"] = "off"
 """What this pass buys is the deploy default's judgement over a page no other reader sees whole, not
 optional background thinking on top of it — and the round is one compelled tool call, which is what
 every forced call in this repo asks for. A model that requires reasoning uses its minimum adaptive
-effort, which supports forced tool use."""
+effort."""
 PAGE_PASS_TOOL = "curate_page"
 PAGE_PASS_TOOL_DESCRIPTION = (
     "Record each row another row on this page already states, one entry each, naming the row "
@@ -413,7 +413,7 @@ class FactDeriver:
 
     async def _extract(self, pages: tuple[PageChange, ...]) -> tuple[ExtractedFact, ...]:
         """JSON sliced from a completion loses the group to one unescaped character. A model
-        requiring reasoning uses minimum adaptive effort, which supports forced tool use."""
+        requiring reasoning uses minimum adaptive effort, and a reply without the call raises."""
         payload = {
             "pages": [
                 {
