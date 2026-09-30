@@ -306,7 +306,7 @@ class SpawnInput(BaseModel):
 
 class LoadSkillInput(BaseModel):
     name: str = Field(
-        description="The skill name, e.g. 'office/pptx', 'data/visualization'. Choose from the "
+        description="The skill name, e.g. 'office-pptx', 'data-visualization'. Choose from the "
         "system prompt's <available_skills> index, a <saved_skills> block, or a result of the "
         "skill kind's skill_search action."
     )

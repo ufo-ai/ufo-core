@@ -110,7 +110,7 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
         _anthropic(
             "claude-opus-5-5",
             ModelPrice(4_000_000, 20_000_000, 200_000, 5_000_000, 8_000_000),
-            "2026-05",
+            "2026-06",
             anthropic_key_env,
             context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
             reasoning=DEFAULT_REASONS_WITH_TOOLS,

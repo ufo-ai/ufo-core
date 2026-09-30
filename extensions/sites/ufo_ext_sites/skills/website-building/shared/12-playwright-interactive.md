@@ -4,7 +4,7 @@ Use this skill when a task needs interactive browser work driven from `js_repl`.
 
 ## How the REPL and the Browser Fit Together
 
-- `js_repl` runs one `node` process per call, and the call returns only when that process exits. A browser or context left open holds the process on the event loop, so the call burns its whole budget and is then killed. **Never launch a browser inside a cell and leave it open.**
+- `js_repl` runs one `node` process per call, and the call returns only when that process exits. A browser or context left open holds the process on the event loop, so the call outlives its budget and comes back as a still-running task instead of a result. **Never launch a browser inside a cell and leave it open.**
 - Start Chromium **once** with `bash` and `background: true`, with `--remote-debugging-port`. It outlives every cell, so the page, its URL, its scroll position, and the app state in it all persist.
 - Each cell connects with `chromium.connectOverCDP(...)`, does one burst of work, then drops the connection. Over CDP, `browser.close()` closes only the Playwright connection and the contexts that connection created — the Chromium you started with `bash` keeps running.
 - `js_repl` state is every block that exited 0, and each call re-runs that whole accumulated source. Keep browser cells self-contained and pass `reset: true`, so a cell never replays an earlier connect, click, or navigation.
@@ -131,9 +131,8 @@ Default posture:
 
 ### Reload Decision
 
-- After any code edit: just reload the page. The server reads files from disk — edits are visible immediately on reload.
-- NEVER restart the dev server after code changes. Restarting wastes steps and causes port conflicts.
-- Only restart the server if it has actually crashed (health check fails AND `lsof` shows nothing on the port).
+- After a frontend or static-file edit: reload the page. A static server and Vite read files from disk, so the edit shows on reload.
+- Restart the server only after a backend edit its process does not watch (the webapp template's `tsx` server) or after a crash (health check fails and `lsof` shows nothing on the port).
 - Never restart Chromium to recover from a failed cell. A cell fails on its own, and the browser is a separate process that is almost certainly still healthy — confirm with `curl` before you touch it.
 
 ### Functional QA
@@ -320,9 +319,8 @@ Only use `waitForTimeout` when real elapsed time must pass (e.g., holding a key 
 
 ## Common Failure Modes
 
-- `Cannot find module 'playwright'`: run the one-time setup in the current workspace and verify the import before using `js_repl`.
-- Playwright package is installed but the browser executable is missing: run `npx playwright install chromium`.
+- `Cannot find module 'playwright'`: the sandbox image ships Playwright and its Chromium globally; run the cell through `js_repl`, which resolves the global install, and do not install a copy.
 - `connect ECONNREFUSED 127.0.0.1:9222`: Chromium is not up. Read the background task's `log`, start it again, then re-check `/json/version` before the next cell. A browser left alive by an earlier run holds the port without answering on it, so sweep with the `pkill` in Cleanup first.
-- `js_repl` returned `exit_code: 124`: the cell's budget expired, the run was killed, and REPL state did not advance. The cause is nearly always a cell that opened a browser or a context and never closed it. Rewrite that cell around connect over CDP with `browser.close()` in `finally`; never re-run the same cell unchanged. Chromium is a separate process and is probably still fine — check `/json/version`.
+- `js_repl` returned task handles instead of an exit code: the cell outgrew its budget, is still running, and REPL state did not advance. The cause is nearly always a cell that opened a browser or a context and never closed it. Stop that task with its `stop` handle, then rewrite that cell around connect over CDP with `browser.close()` in `finally`; never re-run the same cell unchanged. Chromium is a separate process and is probably still fine — check `/json/version`.
 - `page.goto: net::ERR_CONNECTION_REFUSED`: the dev server may have crashed. Run `lsof -i :3000` — if nothing is listening, restart it with the same `start_server` call from the Dev Server section, then retry navigation.
 - `Identifier has already been declared`: an accumulated block already declared that binding, and every call replays the whole accumulation. Pass `reset: true` so the cell runs on its own.

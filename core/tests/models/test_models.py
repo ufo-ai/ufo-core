@@ -1602,7 +1602,7 @@ def test_catalog_registers_opus_5_5_with_its_launch_facts(tmp_path: Path) -> Non
     spec = registry.spec("claude-opus-5-5")
     assert spec.provider == "anthropic"
     assert spec.context_window == 1_000_000
-    assert spec.knowledge_cutoff == "2026-05"
+    assert spec.knowledge_cutoff == "2026-06"
     assert spec.price.input == 4_000_000
     assert spec.price.output == 20_000_000
     assert spec.price.cache_read == 200_000

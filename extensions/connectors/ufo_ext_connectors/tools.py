@@ -207,8 +207,8 @@ class DescribeExternalToolsInput(BaseModel):
     source_id: str = Field(description="The connector source ID, e.g. 'github', 'slack', 'gmail'.")
     tool_names: tuple[str, ...] = Field(
         default=(),
-        description="Exact tool names to get schemas for, from list_external_tools results. Omit "
-        "to discover the connector's tools via `query`.",
+        description="Exact tool slugs to get schemas for, from a prior describe_external_tools "
+        "'availableTools' list. Omit to discover the connector's tools via `query`.",
     )
     query: str = Field(
         default="", description="Discovery query to find matching tools when tool_names is omitted."

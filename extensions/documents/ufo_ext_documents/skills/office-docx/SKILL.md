@@ -47,4 +47,4 @@ pdftoppm -jpeg -r 150 document.pdf page
 ls page-*.jpg   # always ls to discover actual filenames — zero-padding varies by page count
 ```
 
-Validation runs automatically when the document is shared. If issues are found, fix the XML and re-share.
+Nothing validates the file when it is shared. Render it as above and check the pages before sharing.

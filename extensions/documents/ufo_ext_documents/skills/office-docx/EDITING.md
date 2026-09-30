@@ -183,4 +183,4 @@ To embed an image in an existing document:
 python scripts/pack.py working/ output.docx
 ```
 
-This compresses XML whitespace and assembles the final .docx file. Validation (schema compliance, tracked change correctness) runs automatically when the document is shared.
+This compresses XML whitespace and assembles the final .docx file. Nothing validates it on share: render it (SKILL.md, Image rendering) and check tracked changes and layout before sharing.

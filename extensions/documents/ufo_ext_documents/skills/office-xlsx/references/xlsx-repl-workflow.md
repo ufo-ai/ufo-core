@@ -40,9 +40,8 @@ wb.save(OUTPUT_PATH)
 # Recalculate formulas via LibreOffice
 import subprocess, json, os
 result = subprocess.run(
-    ["python3", "scripts/recalc.py", os.path.abspath(OUTPUT_PATH)],
-    capture_output=True, text=True, cwd="/home/user/workspace/skills/office/xlsx",
-    env={**os.environ, "PYTHONPATH": "/home/user/workspace/skills/office/xlsx/scripts"}
+    ["python3", f"{os.environ['UFO_HOME']}/skills/office-xlsx/scripts/recalc.py", os.path.abspath(OUTPUT_PATH)],
+    capture_output=True, text=True,
 )
 print(result.stdout)
 
@@ -68,9 +67,8 @@ openpyxl does NOT evaluate formulas — it only stores formula strings. After sa
 ```python
 import subprocess, json, os
 result = subprocess.run(
-    ["python3", "scripts/recalc.py", os.path.abspath(OUTPUT_PATH)],
-    capture_output=True, text=True, cwd="/home/user/workspace/skills/office/xlsx",
-    env={**os.environ, "PYTHONPATH": "/home/user/workspace/skills/office/xlsx/scripts"}
+    ["python3", f"{os.environ['UFO_HOME']}/skills/office-xlsx/scripts/recalc.py", os.path.abspath(OUTPUT_PATH)],
+    capture_output=True, text=True,
 )
 recalc_result = json.loads(result.stdout)
 print(recalc_result)

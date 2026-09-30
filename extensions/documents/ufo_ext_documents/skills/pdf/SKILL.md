@@ -22,7 +22,7 @@ metadata:
 | CLI page rendering                      | pdftoppm                   | [libraries/cli-tools.md](libraries/cli-tools.md)   |
 | OCR scanned PDFs                        | pytesseract + pdf2image    | Convert to images, then OCR                        |
 | Fill PDF forms                          | pypdf or pdf-lib           | [form-filling.md](form-filling.md)                 |
-| Convert PDF to Word                     | pdf2docx (load docx skill) | See docx skill — Converting PDF to Word            |
+| Convert PDF to Word                     | pdf2docx (load `office-docx`) | See `office-docx` — PDF to Word                 |
 
 **Form filling:** You MUST read [form-filling.md](form-filling.md) before attempting to fill any PDF form.
 
@@ -38,12 +38,12 @@ metadata:
 
 Always set metadata when creating PDFs:
 
-- **Author** MUST be `"Ufo"`
+- **Author** MUST be `"UFO"`
 - **Title** MUST be a descriptive name relevant to the document contents
 
-Canvas API: `c.setTitle(...)`, `c.setAuthor("Ufo")` right after creating the canvas.
-SimpleDocTemplate: pass `title=...`, `author="Ufo"` as constructor kwargs.
-pdf-lib (JS): `doc.setTitle(...)`, `doc.setAuthor("Ufo")`.
+Canvas API: `c.setTitle(...)`, `c.setAuthor("UFO")` right after creating the canvas.
+SimpleDocTemplate: pass `title=...`, `author="UFO"` as constructor kwargs.
+pdf-lib (JS): `doc.setTitle(...)`, `doc.setAuthor("UFO")`.
 
 ## Source Citations
 

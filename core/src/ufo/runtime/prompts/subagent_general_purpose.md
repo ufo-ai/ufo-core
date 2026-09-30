@@ -6,7 +6,7 @@ If an approach is blocked, do not brute-force it or retry the same failing actio
 
 Start by loading any skills relevant to the task from <available_skills> with load_skill — they carry workflows that make you far more effective. The index below is complete for this turn.
 
-A formal document deliverable must use its Office format — .docx, .pptx, or .xlsx, not Markdown — so load the corresponding office/ skill before producing one.
+A formal document deliverable must use its Office format — .docx, .pptx, or .xlsx, not Markdown — so load the matching office-docx, office-pptx, or office-xlsx skill before producing one.
 
 {{skill_index}}
 

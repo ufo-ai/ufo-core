@@ -36,6 +36,7 @@ A "claim" is a factual statement in the document that requires external verifica
 
 - `claim_id`: Unique identifier in the form `claim:<N>` where N is a positive integer (e.g., `claim:1`, `claim:2`).
 - `claim_type`: One of the two types defined below (`verify_public_data`, `numerical_consistency`)
+- `description`: A short statement of the fact being checked (required by `add-claims`).
 - `original_text`: The exact verbatim text from the document that makes the claim.
 - `section`: The document section name the claim was made in.
 - `location`: Where the claim is located — always a string. For PDF/DOCX/PPTX: the page or slide number (e.g., `"3"`). For XLSX: the sheet name (e.g., `"Revenue"`).
@@ -145,15 +146,15 @@ Before spawning, determine which **issue types** are relevant from the user's re
 
 ```
 spawn(
-  objective="""
+  target="general_purpose",
+  payload={"task": """
   Load load_skill(name="document-review") and execute its workflow to review the attached document.
 
   DOCUMENT DETAILS:
   - Filename: [filename from attachment context]
   - Issue types: [list the relevant issue types, e.g., "spelling_grammar, narrative_logic, non_public_info, verify_public_data, numerical_consistency"]
-  """,
-  task_name="document_review",
-  subagent_type="asset"
+  """},
+  name="Document review"
 )
 ```
 
@@ -197,7 +198,7 @@ Execute phases strictly in order — do not reorder. Skip phases only when their
 6. **Submit review** — Compile and submit final review
    - End: Review submitted
 
-**FORBIDDEN**: the web search tool, `bash`, `list_external_tools`, and `call_external_tool` are only for Phase 3 (fact-checking claims). Do not use them in any other phase.
+Use the web search tool, `list_external_tools`, and `call_external_tool` only in Phase 3 (fact-checking claims). Outside Phase 3, use `bash` only to run `manage_state.py` and the Phase 5 annotation steps.
 
 ## Processing Strategy
 
@@ -321,8 +322,8 @@ Create an annotated copy of the document with issues as comments. `{base_name}` 
 
   2. **Apply tracked changes** (best effort) when `new_text` differs from `original_text`: find the exact `<w:r>` in `document.xml` whose `<w:t>` contains `original_text` and replace that `<w:r>` with a `<w:del>` + `<w:ins>` pair. Copy the `<w:rPr>` from that specific `<w:r>` into both the `<w:del>` and `<w:ins>` runs — do NOT use `<w:rPr>` from any other run (e.g., the title or a different paragraph). Wrap the comment markers tightly around the `<w:del>` and `<w:ins>` so the comment is anchored to the change.
 
-  Before writing tracked changes, capture the current timestamp in the user's local timezone (from the User Timezone field in the context block):
-  `TZ="{user_timezone}" date +"%Y-%m-%dT%H:%M:%SZ"`
+  Before writing tracked changes, capture the current UTC timestamp:
+  `date -u +"%Y-%m-%dT%H:%M:%SZ"`
   Use this value for all `w:date` attributes in `<w:del>` and `<w:ins>` elements.
 
   The combined pattern for a comment with a tracked change:

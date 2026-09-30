@@ -89,7 +89,7 @@ Inside the sandbox `GH_TOKEN` holds a sentinel, never the token, and `gh`, `git 
 
 For GitHub-backed tasks, identify the repository URL and put it in the objective. If the user doesn't provide one directly:
 
-1. **Check memory** — the memory kind's `memory_search` action for the repo name, project name, or related keywords.
+1. **Check memory** — `memory_search` for the repo name, project name, or related keywords.
 2. **Ask the user** — if memory doesn't have it, just ask.
 
 ## Mixed Tasks

@@ -212,7 +212,7 @@ If the subject gives no clear color signal AND the user provided no direction af
 
 ## Running the Project
 
-Run `npm run dev` to start the development server. This starts Express for the backend and Vite for the frontend on the same port. After making edits, the server will automatically reload.
+Run `npm run dev` to start the development server. This starts Express for the backend and Vite for the frontend on the same port. Vite hot-reloads frontend edits; the server runs under `tsx` with no watcher, so restart it with the same `start_server` call after a backend edit.
 
 ## Installing Packages
 
@@ -237,12 +237,12 @@ Then deploy with the `site` collection's `deploy_website` action: `object_action
 
 **Apps with backend (most webapp projects):**
 
-The template's Express server serves the built client **and** the `/api/...` routes from one origin on port 5000. After building, run that server with `publish_website`:
+The template's Express server serves the built client **and** the `/api/...` routes from one origin on the port in `$PORT`, which `publish_website` sets. After building, run that server with `publish_website`:
 
 1. Build: `npm run build`
 2. Publish: `object_action(kind="site", action="publish_website", input={project_path="<project>", app_name="...", install_command="npm install", run_command="NODE_ENV=production node dist/index.cjs"})`
 
-`publish_website` installs dependencies, runs the production server, and returns the reachable `http://localhost:<port>` URL inside the sandbox. A website-building subagent does not hold `publish_website`: build and validate through step 1, then stop and report that the app is built and needs publishing — the agent that delegated to you reads these same files and publishes them. Because client and API share one origin, requests use relative `/api/...` paths — no URL rewriting. Read `$UFO_HOME/skills/website-building/shared/19-backend.md` for details.
+`publish_website` installs dependencies, runs the production server with `PORT` set, and returns `site_url`, the hosted link to give the member. A website-building subagent does not hold `publish_website`: build and validate through step 1, then stop and report that the app is built and needs publishing — the agent that delegated to you reads these same files and publishes them. Because client and API share one origin, requests use relative `/api/...` paths — no URL rewriting. Read `$UFO_HOME/skills/website-building/shared/19-backend.md` for details.
 
 ## Config File Guidance
 

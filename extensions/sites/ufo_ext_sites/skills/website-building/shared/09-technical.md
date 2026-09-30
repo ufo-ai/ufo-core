@@ -54,7 +54,7 @@ object_action(
 )
 ```
 
-Serves the folder at `http://localhost:8000` inside the sandbox — that URL is yours for validation and unreachable for the user — and hosts it at `site_url`, the link to give them. `share_file` the built output only when they want a copy to keep.
+Serves the folder at `http://localhost:<port>` inside the sandbox, on the conversation's own port — that URL is yours for validation and unreachable for the user — and hosts it at `site_url`, the link to give them. `share_file` the built output only when they want a copy to keep.
 
 ### Updating a Previewed Website
 
