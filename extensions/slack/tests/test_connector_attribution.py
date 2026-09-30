@@ -1,0 +1,278 @@
+"""The connector Slack send's mentioning footer across the two extensions it joins. The surface
+mirrors the bot-user id it proved."""
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import cast
+from uuid import UUID, uuid4
+
+import pytest
+import sqlalchemy as sa
+import ufo_ext_connectors.tools as connector_tools
+import ufo_ext_slack.surface as slack
+from ufo_ext_connectors.tools import ATTRIBUTION_MRKDWN, CallExternalToolInput
+from ufo_ext_slack.attribution import addressing_mention
+from ufo_ext_slack.hooks import CONNECTOR_CALL_TOOL, attribute_connector_send
+from ufo_ext_slack.manifest import manifest as slack_manifest
+
+from ufo.blob import BlobStore, FilesystemBlobStore, WorkspaceBlobStore
+from ufo.db import workspace_tx
+from ufo.runtime.ext.context import CredentialAccess, ExtensionContext, JsonValue, ScopedStore
+from ufo.runtime.ext.hooks import BoundHook, HookChain, HookResolution
+from ufo.runtime.ext.manifest import HookSpec, PreToolUse
+from ufo.runtime.ext.surface import SurfaceContext
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
+BOT_USER_ID = "U0BOTUFO"
+SLACK_SEND_SLUG = "SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL"
+SLACK_HISTORY_SLUG = "SLACK_FETCH_CONVERSATION_HISTORY"
+MARK = "beef"
+SENT_TEXT = "the plan is posted"
+SENT_MARKDOWN = "the **plan** is posted"
+SENT_BLOCKS: list[JsonValue] = [{"type": "section", "text": {"type": "mrkdwn", "text": SENT_TEXT}}]
+MENTION_FOOTER = ATTRIBUTION_MRKDWN.format(subject=f"<@{BOT_USER_ID}>")
+FOOTER_BLOCK: JsonValue = {
+    "type": "context",
+    "elements": [{"type": "mrkdwn", "text": MENTION_FOOTER}],
+}
+
+
+class _UnreadableStore(ScopedStore):
+    """A scoped store whose read fails — the transient database fault the footer must survive."""
+
+    async def get(self, key: str) -> JsonValue | None:
+        raise RuntimeError("ext_store unavailable")
+
+
+class _MirroredStore(ScopedStore):
+    """A scoped store holding the bot-user id the surface mirrored, read without a database."""
+
+    async def get(self, key: str) -> JsonValue | None:
+        return BOT_USER_ID if key == slack.SELF_USER_ID_STORE_KEY else None
+
+
+def _published(call: CallExternalToolInput) -> dict[str, JsonValue]:
+    """The internal-destination arguments after the connector applies the hook's identity."""
+    return connector_tools.slack_attributed(
+        connector_tools.SLACK_PROVIDER,
+        call.tool_name,
+        call.arguments,
+        destination_internal=True,
+        bot_user_id=call.attribution_bot_user_id,
+    )
+
+
+def _mention_attributed(arguments: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return connector_tools.slack_attributed(
+        connector_tools.SLACK_PROVIDER,
+        SLACK_SEND_SLUG,
+        arguments,
+        destination_internal=True,
+        bot_user_id=BOT_USER_ID,
+    )
+
+
+@dataclass
+class _IdentityReadContext:
+    """The two members `_identity` touches on a surface context: the workspace the route bound and
+    the blob holding the identity record. Its caller reads the bot token and hands it over."""
+
+    workspace_id: UUID
+    blob: BlobStore
+
+
+def _send(arguments: dict[str, JsonValue], slug: str = SLACK_SEND_SLUG) -> CallExternalToolInput:
+    return CallExternalToolInput(
+        tool_name=slug,
+        source_id=connector_tools.SLACK_PROVIDER,
+        arguments=arguments,
+    )
+
+
+def _attribution_spec() -> HookSpec:
+    """The manifest's attribution hook, named by its handler — the manifest declares others."""
+    (spec,) = [hook for hook in slack_manifest().hooks if hook.handler is attribute_connector_send]
+    return spec
+
+
+def _chain_over(store: ScopedStore) -> HookChain:
+    spec = _attribution_spec()
+    ext = ExtensionContext(
+        store=store,
+        credentials=CredentialAccess(declared=frozenset()),
+    )
+    return HookChain(hooks={"pre_tool_use": (BoundHook(spec=spec, ext=ext),)})
+
+
+async def _fire(chain: HookChain, call: CallExternalToolInput) -> HookResolution:
+    return await chain.fire(
+        "pre_tool_use",
+        PreToolUse(tool_name=CONNECTOR_CALL_TOOL, tool_input=call),
+        None,
+        None,
+        None,
+    )
+
+
+async def _seed_workspace() -> UUID:
+    workspace_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+    return workspace_id
+
+
+def test_the_manifest_declares_the_hook_on_the_connector_call() -> None:
+    spec = _attribution_spec()
+    assert (spec.event, spec.tools) == ("pre_tool_use", (CONNECTOR_CALL_TOOL,))
+    assert spec.handler is attribute_connector_send
+
+
+async def test_the_surfaces_own_identity_read_mirrors_the_id_into_the_store(
+    db: None, tmp_path: Path
+) -> None:
+    """The writer, exercised where it lives: every inbound event resolves the workspace's identity
+    through `_identity`, and that read is what lands the id the hook later reads."""
+    workspace_id = await _seed_workspace()
+    bot_token = "xoxb-mirrored"
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    with ws(workspace_id):
+        await blob.put(
+            slack.IDENTITY_BLOB_KEY,
+            slack.SlackIdentity(
+                bot_token_fingerprint=slack.bot_token_fingerprint(bot_token),
+                team_id="T01234567",
+                bot_user_id=BOT_USER_ID,
+            )
+            .model_dump_json()
+            .encode(),
+        )
+    ctx = _IdentityReadContext(workspace_id=workspace_id, blob=blob)
+
+    with ws(workspace_id):
+        identity = await slack._identity(cast(SurfaceContext, ctx), bot_token)
+        assert identity is not None and identity.bot_user_id == BOT_USER_ID
+        assert (
+            await ScopedStore(extension=slack.SLACK_EXTENSION).get(slack.SELF_USER_ID_STORE_KEY)
+            == BOT_USER_ID
+        )
+
+
+async def test_a_workspace_with_no_proved_id_keeps_the_generic_attribution() -> None:
+    """A deploy running the connector without a mirrored bot id degrades to the footer the tool
+    writes on its own — the destination is still proved internal, so the send is marked."""
+    arguments: dict[str, JsonValue] = {"channel": "C1", "text": SENT_TEXT}
+    resolution = await _fire(
+        _chain_over(_UnreadableStore(extension=slack.SLACK_EXTENSION)),
+        _send(arguments),
+    )
+
+    assert (resolution.denied, resolution.failed_closed) == (None, None)
+    assert isinstance(resolution.tool_input, CallExternalToolInput)
+    assert resolution.tool_input.arguments == arguments
+    generic = ATTRIBUTION_MRKDWN.format(subject=connector_tools.UFO_ATTRIBUTION_SUBJECT)
+    assert _published(resolution.tool_input) == {
+        "channel": "C1",
+        "text": SENT_TEXT,
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": SENT_TEXT}},
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": generic}]},
+        ],
+    }
+
+
+async def test_a_proved_id_selects_the_mentioning_footer() -> None:
+    """The hook supplies the id and the connector uses it after proving the audience."""
+    resolution = await _fire(
+        _chain_over(_MirroredStore(extension=slack.SLACK_EXTENSION)),
+        _send({"channel": "C1", "text": SENT_TEXT}),
+    )
+
+    assert (resolution.denied, resolution.failed_closed) == (None, None)
+    assert isinstance(resolution.tool_input, CallExternalToolInput)
+    assert resolution.tool_input.attribution_bot_user_id == BOT_USER_ID
+    assert _published(resolution.tool_input)["blocks"] == [*SENT_BLOCKS, FOOTER_BLOCK]
+
+
+async def test_an_unreadable_store_never_denies_the_members_send() -> None:
+    """The gating hazard, asserted where it would show: a read that raises leaves the resolution
+    undenied and the arguments as the model wrote them."""
+    call = _send({"channel": "C1", "text": SENT_TEXT})
+    resolution = await _fire(_chain_over(_UnreadableStore(extension=slack.SLACK_EXTENSION)), call)
+
+    assert (resolution.denied, resolution.failed_closed) == (None, None)
+    assert resolution.tool_input is call
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        _send({"channel": "C1"}, slug=SLACK_HISTORY_SLUG),
+        _send({"channel": "C1", "text": "  "}),
+        CallExternalToolInput(
+            tool_name=SLACK_SEND_SLUG,
+            source_id="gmail",
+            arguments={"to": "a@b.test", "text": SENT_TEXT},
+        ),
+    ],
+    ids=["read", "empty_text", "other_provider"],
+)
+async def test_only_a_slack_send_is_rewritten(call: CallExternalToolInput) -> None:
+    """A read, an empty body, and another provider's send are left alone — and the two that are not
+    Slack sends at all are decided before the id is read, over a store that would raise."""
+    resolution = await _fire(_chain_over(_UnreadableStore(extension=slack.SLACK_EXTENSION)), call)
+
+    assert (resolution.denied, resolution.failed_closed) == (None, None)
+    assert resolution.tool_input is not None
+    assert isinstance(resolution.tool_input, CallExternalToolInput)
+    assert resolution.tool_input.arguments == call.arguments
+
+
+def test_a_blocks_authored_send_is_not_an_address_when_slack_delivers_it_back() -> None:
+    """A `blocks`-authored send names no `text`, so the footer's mention has no home but a context
+    element — and the event Slack delivers back for it is an `app_mention` whose `text` is empty."""
+    published = _mention_attributed({"channel": "C1", "blocks": list(SENT_BLOCKS)})
+    event = {"type": "app_mention", "text": "", "blocks": published["blocks"]}
+    assert slack.slack_message_addressed(event, BOT_USER_ID, is_dm=False) is False
+
+    asked: list[JsonValue] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"<@{BOT_USER_ID}> what happened?"}}
+    ]
+    mentioning = _mention_attributed({"channel": "C1", "blocks": asked})
+    assert (
+        slack.slack_message_addressed(
+            {"type": "app_mention", "text": "", "blocks": mentioning["blocks"]},
+            BOT_USER_ID,
+            is_dm=False,
+        )
+        is True
+    )
+
+
+def test_a_footer_the_body_did_not_keep_a_line_for_is_not_an_address() -> None:
+    """The separator does not survive the send."""
+    for carried in (
+        f"{SENT_TEXT}  {MENTION_FOOTER}",
+        f"{SENT_TEXT}  {MENTION_FOOTER}  {MENTION_FOOTER}",
+        f"{SENT_TEXT} Sent using <@{BOT_USER_ID}>",
+        f"quoting: {MENTION_FOOTER} — posted an hour ago",
+    ):
+        assert (
+            slack.slack_message_addressed(
+                {"type": "app_mention", "text": carried}, BOT_USER_ID, is_dm=False
+            )
+            is False
+        )
+    assert (
+        addressing_mention(f"<@{BOT_USER_ID}> what happened here?  {MENTION_FOOTER}", BOT_USER_ID)
+        is True
+    )
