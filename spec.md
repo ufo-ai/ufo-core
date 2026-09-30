@@ -809,8 +809,9 @@ reads it only under `member_context_read`.
   from while it waits, and nowhere durable either: the reply's citations are the record. What a
   surface folds those frames into is the **turn record** (`ufo.sdk.record`: the steps in arrival
   order, the runs, the meter, the end) — one pydantic shape, rendered as the portal's TypeScript
-  and a fixture of every variant by `ufo_testsupport.contract`, so a frontend's model of a turn is
-  the contract's and never its own bookkeeping. The same terminal handoffs
+  and a fixture of every variant by ufo-hosted's `extensions/web/tests/contract.py`, so a
+  frontend's model of a turn is the contract's and never its own bookkeeping. The same terminal
+  handoffs
   ride the live stream that the writeback carries: a turn that ended by asking renders its options
   as the surface's own answer affordance under the same idempotent admit (first answer wins,
   `admitted_body` confirming which landed), credential prompts collect privately through the

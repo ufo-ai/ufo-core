@@ -1,8 +1,9 @@
 """The turn record: one turn as its stream told it — the steps in arrival order, the runs it
 spawned, the spend so far, and how it ended. Every surface folds live frames into this shape and a
 transcript read states it back, so what a member sees is a projection of one record rather than of
-each surface's own bookkeeping. `ufo_testsupport.contract` renders these models as the portal's
-TypeScript and a fixture holding every variant, so the two languages cannot drift."""
+each surface's own bookkeeping. ufo-hosted's `extensions/web/tests/contract.py` renders these
+models as the portal's TypeScript and a fixture holding every variant, so the two languages cannot
+drift."""
 
 from datetime import datetime
 from typing import Annotated, Literal, cast
@@ -297,9 +298,10 @@ def frame_payload(frame: LiveFrame) -> str:
 
 def fold(record: TurnRecord, frame: LiveFrame, at: datetime) -> TurnRecord:
     """The record after one live frame — the reference every surface's fold answers to, replayed
-    against the portal's by the conformance fixture `ufo_testsupport.contract` renders. `at` is the
-    moment a terminal frame lands. A frame after the turn's end, a run naming a parent the record
-    does not hold, and a reply with no words are faults: logged, and the record stands as it was."""
+    against the portal's by the conformance fixture ufo-hosted's `extensions/web/tests/contract.py`
+    renders. `at` is the moment a terminal frame lands. A frame after the turn's end, a run naming
+    a parent the record does not hold, and a reply with no words are faults: logged, and the record
+    stands as it was."""
     if record.end is not None:
         log_error(
             "record.frame_after_end",
