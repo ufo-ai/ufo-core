@@ -54,15 +54,15 @@ Font selection is fundamentally different depending on the output format. Each f
 | **Slides (PPTX)**    | System fonts only — Calibri, Trebuchet MS, Arial, Georgia.                                                                                                                      | PPTX cannot embed fonts. The viewer must have the font installed.    |
 | **Documents (DOCX)** | System fonts recommended — Arial, Calibri.                                                                                                                                      | Documents must render correctly on the viewer's machine.             |
 
-### Brand Fonts (Fallback Defaults)
+### House Fonts (Fallback Defaults)
 
-When no font direction is given:
+When no font direction is given, the house fonts the `ufo-style` skill's `tokens.css` declares apply:
 
-| Purpose   | Brand font           | Free web alt               | Free PDF alt (embed TTF)          | Free slide alt (system only) |
-| --------- | -------------------- | -------------------------- | --------------------------------- | ---------------------------- |
-| Headlines | FK Grotesk (500-700) | Satoshi / General Sans     | DM Sans Bold / Work Sans SemiBold | Calibri Bold / Trebuchet MS  |
-| Body      | FK Grotesk (400-500) | Satoshi / Inter            | Inter / DM Sans                   | Calibri / Arial              |
-| Code      | Berkeley Mono (400)  | JetBrains Mono / Fira Code | JetBrains Mono                    | Consolas / Courier New       |
+| Purpose | House font      | Free PDF alt (embed TTF)          | Free slide alt (system only) |
+| ------- | --------------- | --------------------------------- | ---------------------------- |
+| Display | Georgia         | DM Sans Bold / Work Sans SemiBold | Georgia / Calibri Bold       |
+| Body    | Inter (400-600) | Inter / DM Sans                   | Calibri / Arial              |
+| Code    | Roboto Mono     | JetBrains Mono                    | Consolas / Courier New       |
 
 ---
 

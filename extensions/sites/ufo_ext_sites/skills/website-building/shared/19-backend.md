@@ -15,7 +15,7 @@ The cleanest setup serves the frontend **and** the API from one server on one po
 
 1. Write a server that listens on the `PORT` environment variable (default 8000 for local testing) and serves both your static files and `/api/...` routes
 2. During the build, run it with `start_server(command=…, project_path=…, port=…)` to test
-3. Ship it with the `site` collection's `publish_website` action — `object_action(kind="site", action="publish_website", input={project_path=…, app_name=…, install_command=…, run_command=…})` — it installs dependencies, runs your server with `PORT` set to the port it probes, and returns the reachable URL. A server that ignores `PORT` never reports ready. A website-building subagent does not hold this tool: stop after step 2 and report that the app needs publishing, for the agent that delegated to you to do from these same files
+3. Ship it with the `site` collection's `publish_website` action — `object_action(kind="site", action="publish_website", input={project_path=…, app_name=…, install_command=…, run_command=…})` — it installs dependencies, runs your server with `PORT` set to the port it probes, and returns `site_url`, the hosted link. A server that ignores `PORT` never reports ready. A website-building subagent does not hold this tool: stop after step 2 and report that the app needs publishing, for the agent that delegated to you to do from these same files
 
 The server is reachable at `http://localhost:<port>` inside the sandbox. Bind to `0.0.0.0` so the readiness probe on `127.0.0.1` connects.
 
@@ -122,7 +122,7 @@ object_action(
 )
 ```
 
-Returns the reachable `http://localhost:<port>` URL inside the sandbox. Re-run to update.
+Returns `site_url`, the hosted link to give the member; `http://localhost:<port>` stays a sandbox-only address. Re-run to update.
 
 ## WebSocket Example
 
@@ -169,7 +169,8 @@ app.post('/api/items', (req, res) => {
   res.status(201).json(item);
 });
 
-app.listen(8000, '0.0.0.0', () => console.log('listening on 8000'));
+const port = Number(process.env.PORT || 8000);
+app.listen(port, '0.0.0.0', () => console.log(`listening on ${port}`));
 ```
 
 ```

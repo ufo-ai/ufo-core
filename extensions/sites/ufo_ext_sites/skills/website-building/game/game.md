@@ -1,6 +1,6 @@
 # Three.js Game Development Skill
 
-Build 3D browser games using Three.js. Use WebGL 2 rendering, Rapier for physics, ECS for architecture, and GLTF/GLB for assets. Games are static HTML/CSS/JS served at a `http://localhost:8000` URL inside the sandbox.
+Build 3D browser games using Three.js. Use WebGL 2 rendering, Rapier for physics, ECS for architecture, and GLTF/GLB for assets. Games are static HTML/CSS/JS served at `http://localhost:<port>` inside the sandbox and hosted at the site's `site_url`.
 
 **Mandatory shared files (read if not already loaded):** `shared/01-design-tokens.md`, `shared/02-typography.md`.
 

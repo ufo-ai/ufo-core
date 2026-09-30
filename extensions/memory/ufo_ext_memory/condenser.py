@@ -105,7 +105,8 @@ def _utc(moment: datetime) -> datetime:
 FACT_EXTRACT_MAX_TOKENS = 16_384
 FACT_EXTRACT_TOOL = "record_facts"
 FACT_EXTRACT_TOOL_DESCRIPTION = (
-    "Record every concrete, source-supported fact from the source pages, one entry per fact."
+    "Record the claims a member would keep from the source pages, one entry per fact, each "
+    "stated on the page its page_id names."
 )
 FACT_EXTRACT_SYSTEM = (
     DELIVERY_REGISTER_BLOCK + "\n\n" + (PROMPTS / "fact_extract.md").read_text().strip()
@@ -223,7 +224,10 @@ optional background thinking on top of it — and the round is one compelled too
 every forced call in this repo asks for. A model that requires reasoning uses its minimum adaptive
 effort, which supports forced tool use."""
 PAGE_PASS_TOOL = "curate_page"
-PAGE_PASS_TOOL_DESCRIPTION = "Record the rows this page reads better without, one entry each."
+PAGE_PASS_TOOL_DESCRIPTION = (
+    "Record each row another row on this page already states, one entry each, naming the row "
+    "that keeps its claim."
+)
 PAGE_PASS_SYSTEM = DELIVERY_REGISTER_BLOCK + "\n\n" + (PROMPTS / "page_pass.md").read_text().strip()
 MAX_BAND_RETIREMENT = 0.8
 """The most of one band's rows a single pass may retire. Every retirement admitted has named a
@@ -1561,19 +1565,21 @@ class _Band:
 
 
 class RetiredRow(BaseModel):
-    """One row the page pass judged the wiki reads better without — untrusted model output validated
+    """One row the page pass judged another row already states — untrusted model output validated
     at this boundary before anything is stamped. `id` is the index the payload gave that row and
     never a stored id: an index the model half-copied resolves to nothing and costs one row, where a
     uuid it half-copied does the same at forty times the tokens, over a page carrying hundreds."""
 
     id: int = Field(ge=1, description="The id this row was sent with.")
-    reason: str = Field(min_length=1, description="Why the page reads better without this row.")
+    reason: str = Field(
+        min_length=1, description="How the duplicate_of row states this row's claim."
+    )
     duplicate_of: int | None = Field(
         default=None,
         description=(
-            "Where another row states this row's claim, the id of that row. Name a row this page "
+            "The id of the row that states this row's claim. Name a row this page "
             "sent and one you are not retiring: where the rows carrying a claim only point at each "
-            "other, one of them stays. Leave this out where no row carries what this one said."
+            "other, one of them stays. An entry without it is dropped."
         ),
     )
 
@@ -1636,8 +1642,8 @@ def admitted_curation(
 
 @dataclass(frozen=True)
 class PagePass:
-    """Read a subject's whole wiki page at once on the deploy's own model, and retire the rows it
-    reads better without. A periodic job fed only by its own interval.
+    """Read a subject's whole wiki page at once on the deploy's own model, and retire the rows
+    another row already states. A periodic job fed only by its own interval.
 
     Retirement is all it does. It is the only reader that sees the page whole — extraction reads one
     source page and the section pass one band, so six rows written from six documents about one pull
@@ -1655,7 +1661,7 @@ class PagePass:
     is theirs to correct, and this pass exists for the rows several source pages wrote about one
     claim.
 
-    One metered pass per subject records the rows the page reads better without; each entry is
+    One metered pass per subject records the rows another row already states; each entry is
     validated on its own, so an entry the contract does not satisfy drops without taking the rest
     with it, and an id naming no row the payload sent is discarded rather than guessed at. The
     paragraph standing over each band travels with its rows because it says what the band already

@@ -330,12 +330,12 @@ Use `allowed_domains: ["sec.gov"]` when targeting SEC filings specifically.
 - **Proprietary market data**: Claims citing specific research firms (Gartner, McKinsey, IBISWorld) may not be publicly verifiable — mark inconclusive if the underlying report is paywalled
 - **Non-US companies**: Try local exchange filings and English-language press releases, but mark inconclusive if data is only available in local regulatory filings that aren't searchable
 
-## Evidence Examples
+## Verdict Examples
 
-- verify_public_data: Evidence=["KMB 2023 revenue was $20.4B per 10-K filing dated Feb 2024"], Sources=["web:9"]
-- verify_public_data: Evidence=["Google completed YouTube acquisition in November 2006 for $1.65B per 8-K filing"], Sources=["web:3"]
-- numerical_consistency: Evidence=["CAGR check: (125/80)^(1/3) - 1 = 16.1%, stated 16%, within rounding tolerance"], Sources=[]
-- numerical_consistency: Evidence=["Sources sum: $500M + $300M = $800M; Uses sum: $700M + $60M + $50M = $810M, does not match Sources"], Sources=[]
+- verify_public_data, `verified`: KMB 2023 revenue was $20.4B per the 10-K filed Feb 2024. `source_urls` holds the filing URL the search returned.
+- verify_public_data, `verified`: Google completed the YouTube acquisition in November 2006 for $1.65B per its 8-K. `source_urls` holds that URL.
+- numerical_consistency, `verified`: (125/80)^(1/3) - 1 = 16.1%, stated 16%, within rounding. `source_urls` is empty.
+- numerical_consistency, `refuted`: Sources sum to $800M ($500M + $300M); Uses sum to $810M ($700M + $60M + $50M). `source_urls` is empty.
 
 ## Output Tone
 

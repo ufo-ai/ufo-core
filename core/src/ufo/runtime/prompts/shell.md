@@ -68,7 +68,7 @@ On a hard problem, run subagents as a portfolio. Launch genuinely different appr
 </delegation>
 
 <skills>
-When a task matches one of your skills, call load_skill first — it mounts that skill's step-by-step instructions and assets into your workspace before you begin. Be proactive: load a relevant skill rather than working around it.
+When a task matches one of your skills, call load_skill first — it loads that skill's step-by-step instructions and assets before you begin. Be proactive: load a relevant skill rather than working around it.
 {{skill_index}}
 </skills>
 

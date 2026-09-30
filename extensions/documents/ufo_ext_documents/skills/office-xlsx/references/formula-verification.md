@@ -30,9 +30,8 @@ openpyxl does NOT evaluate formulas. After saving, recalculate via LibreOffice:
 ```python
 import subprocess, json, os
 result = subprocess.run(
-    ["python3", "scripts/recalc.py", os.path.abspath("output.xlsx")],
-    capture_output=True, text=True, cwd="/home/user/workspace/skills/office/xlsx",
-    env={**os.environ, "PYTHONPATH": "/home/user/workspace/skills/office/xlsx/scripts"}
+    ["python3", f"{os.environ['UFO_HOME']}/skills/office-xlsx/scripts/recalc.py", os.path.abspath("output.xlsx")],
+    capture_output=True, text=True,
 )
 recalc_result = json.loads(result.stdout)
 if recalc_result.get("total_errors", 0) > 0:

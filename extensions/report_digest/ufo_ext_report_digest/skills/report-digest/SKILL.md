@@ -105,15 +105,15 @@ line.
 
 ## Budgets
 
-Count words, and stay under. A field over its budget is cut where it runs out, so words past the
+Count characters, and stay under. A field over its budget is cut where it runs out, so words past the
 budget are words no reader sees.
 
 | Field | Budget |
 | --- | --- |
-| `title` | 10 words, one finding |
-| `summary` | 15 words, or empty |
-| `text` | 10 words |
-| `actor` | the person's name, nothing else |
+| `title` | 65 characters, one finding |
+| `summary` | 96 characters, or empty |
+| `text` | 80 characters |
+| `actor` | the person's name, nothing else (60 characters) |
 
 ## Every field is words, not markup
 

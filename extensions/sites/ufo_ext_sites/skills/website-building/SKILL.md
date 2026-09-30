@@ -40,7 +40,6 @@ Read only a reference that the build needs:
 | Empty, loading, or error states | `shared/05-taste.md` |
 | Accessibility and performance | `shared/08-standards.md` |
 | Charts or dense data | `shared/10-charts-and-dataviz.md` |
-| Complex or multi-page browser QA | `shared/12-playwright-interactive.md` |
 | Backend behavior | `shared/19-backend.md` |
 | Runtime model calls | `shared/20-llm-api.md` |
 

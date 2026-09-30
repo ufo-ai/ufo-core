@@ -10,7 +10,7 @@ Color is emphasis — every non-neutral color must answer: **what does this help
 
 ## The Default Palette
 
-**Use when the user gives no color direction.** Three surface steps, two text tones, two accents — the palette the product's own interface is painted from.
+**Use when the user gives no color direction.** Three surface steps, two text tones, one mark tone, two accents — the palette the `ufo-style` skill's `tokens.css` declares.
 
 **These are roles, not a mandate.** A typical output uses one surface + primary text + one accent. Add semantic colors (error, warning, success) only when the content requires them. Do not introduce color for decoration.
 
@@ -22,8 +22,8 @@ Color is emphasis — every non-neutral color must answer: **what does this help
 | `--bkgd-200`       | `#F4F3F2` | `#262929` | Cards, fields, anything filled on the page   |
 | `--bkgd-300`       | `#EBEAE9` | `#323535` | Dividers, card borders, hairlines            |
 | `--text-primary`   | `#191A1A` | `#F5F5F5` | Body text, headings                          |
-| `--text-secondary` | `#919090` | `#A7A9A9` | Secondary text                               |
-| `--text-tertiary` | `#919090` | `#7D7F7F` | Labels found, not read                       |
+| `--text-secondary` | `#676767` | `#A7A9A9` | Secondary text                               |
+| `--mark-secondary` | `#919090` | `#A7A9A9` | Hairlines, rules, dots — never a word        |
 
 The two accents are one hex each — they do not change with the surface.
 
@@ -65,7 +65,6 @@ Nothing outside this table is set as text. Body-size text clears 4.5:1; a row ma
 | Primary   | body  | `#191A1A` | `#F5F5F5` | 16.0:1   |
 | Secondary | body  | `#FAF9F7` | `#676767` | 5.4:1    |
 | Secondary | body  | `#191A1A` | `#A7A9A9` | 7.4:1    |
-| Secondary | 18px+ | `#FAF9F7` | `#919090` | 3.0:1    |
 | Link      | body  | `#FAF9F7` | `#0069B5` | 5.4:1    |
 | Link      | body  | `#191A1A` | `#0095FF` | 5.6:1    |
 | Warning   | body  | `#FAF9F7` | `#AE4600` | 5.4:1    |
@@ -77,7 +76,7 @@ Nothing outside this table is set as text. Body-size text clears 4.5:1; a row ma
 
 **How a text step is derived:** the fill's own hue and saturation, at the lightness that reads 5.4:1 on `#FAF9F7`. Nothing shifts hue.
 
-**How a faint tone is derived:** the secondary text tone at 50% over `--bkgd-100` — `#C6C4C4` on light, `#606262` on dark. A placeholder or a disabled control, never text the reader has to read.
+**How a faint tone is derived:** `--mark-secondary` at 50% over `--bkgd-100` — `#C6C4C4` on light, `#606262` on dark. A placeholder or a disabled control, never text the reader has to read.
 
 **How a pale tone is derived:** the same 50% over `--bkgd-100`, applied to a fill — `#7DC7FB` from the accent. A tint behind a mark, or the light end of a sequential chart ramp.
 

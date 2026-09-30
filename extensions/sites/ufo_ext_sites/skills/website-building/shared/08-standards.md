@@ -1,6 +1,6 @@
 # Standards — Accessibility, Performance, Anti-Patterns
 
-Non-negotiable quality standards. Attribution is mandatory on every page (see `SKILL.md`).
+Non-negotiable quality standards.
 
 ---
 

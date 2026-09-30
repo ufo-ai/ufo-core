@@ -168,12 +168,12 @@ The reply is the line that tells the member the file is worth opening.
 **Behavior:**
 
 - The scheduled task remains active; the next trigger starts a fresh run
-- Include enough detail in the reply that the user understands the update without opening the app
+- The reply states the change in one line and points to the shared report, which carries the detail
 
 Example: "Check @potus's tweets every hour"
 
 - Timer triggers → you check tweets → no new tweets → end the run silently
-- Timer triggers → you check tweets → new tweet found → reply with the tweet details and a link
+- Timer triggers → you check tweets → new tweet found → share a report with the tweet and reply with one line pointing to it
 
 ## Memory hygiene for scheduled runs
 

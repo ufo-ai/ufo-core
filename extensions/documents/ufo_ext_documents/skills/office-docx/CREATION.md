@@ -1,6 +1,6 @@
 # Generating Word Documents from Scratch
 
-Use JavaScript and the `docx` module to build .docx files programmatically, then run the validator to catch structural issues.
+Use JavaScript and the `docx` module to build .docx files programmatically, then render the result to check it (SKILL.md, Image rendering).
 
 ## Workflow
 
@@ -8,7 +8,7 @@ Use JavaScript and the `docx` module to build .docx files programmatically, then
 2. **Configure pages** -- dimensions, margins, portrait vs. landscape
 3. **Define typography** -- heading overrides, body font defaults
 4. **Assemble content** -- paragraphs, lists, tables, images, hyperlinks, tab stops, columns
-5. **Export** -- write the buffer to disk, run validation
+5. **Export** -- write the buffer to disk, render and check the pages
 
 ## Initialization
 
@@ -57,7 +57,7 @@ const report = new Document({
 Packer.toBuffer(report).then((buf) => fs.writeFileSync('deliverable.docx', buf));
 ```
 
-Validation runs automatically when you share the file. If issues are reported, unpack the file, correct the XML, and repack (see EDITING.md).
+Nothing validates the file on share. If the render shows a problem, unpack the file, correct the XML, and repack (see EDITING.md).
 
 ## Page configuration
 

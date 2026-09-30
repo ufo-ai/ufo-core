@@ -11,7 +11,7 @@ Build games in small steps and validate every change. Treat each iteration as: i
 3. **Ensure integration points.** Provide a single canvas and `window.render_game_to_text` so the test loop can read state.
 4. **Add `window.advanceTime(ms)`.** Strongly prefer a deterministic step hook so the Playwright script can advance frames reliably; without it, automated tests can be flaky.
 5. **Initialize progress.md.** If `progress.md` exists, read it first and confirm the original user prompt is recorded at the top (prefix with `Original prompt:`). Also note any TODOs and suggestions left by the previous agent. If missing, create it and write `Original prompt: <prompt>` at the top before appending updates.
-6. **Verify Playwright availability.** Ensure `playwright` is available (local dependency or global install). If unsure, check `npx` first.
+6. **Use the image's Playwright.** The sandbox image ships `playwright` and its Chromium; do not install either.
 7. **Run the Playwright test script.** You must run `game/scripts/web_game_playwright_client.js` after each meaningful change; do not invent a new client unless required.
 8. **Use the payload reference.** Base actions on `game/references/action_payloads.json` to avoid guessing keys.
 9. **Inspect state.** Capture screenshots and text state after each burst.
@@ -361,7 +361,7 @@ Pre-allocate vectors/objects outside the game loop. Avoid `map()`, `filter()`, s
 
 **Functional:** All actions work · AI/NPC correct · score/health tracked · game-over triggers · audio plays · no console errors
 
-**Sandbox:** Loads in iframe · no localStorage refs · all assets from CDN · controls work without Pointer Lock · fills viewport
+**Sandbox:** Loads in the site frame · assets load from the project or a CDN · fills viewport
 
 **Cleanup:** RAF IDs stored · listeners removable · Three.js resources disposed · no orphaned timers
 
@@ -374,15 +374,7 @@ At the end of your work, leave TODOs and suggestions for the next agent in `prog
 
 ## Playwright Prerequisites
 
-- Prefer a local `playwright` dependency if the project already has it.
-- If unsure whether Playwright is available, check for `npx`:
-  ```
-  command -v npx >/dev/null 2>&1
-  ```
-- If `npx` is missing, install Node/npm and then install Playwright globally:
-  ```
-  npm install -g @playwright/mcp@latest
-  ```
+- The sandbox image ships `playwright` and its Chromium; do not install either.
 - Do not switch to `@playwright/test` unless explicitly asked; stick to the client script.
 
 ## Scripts
