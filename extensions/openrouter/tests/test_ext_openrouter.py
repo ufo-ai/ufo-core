@@ -233,6 +233,36 @@ def test_forced_tool_choice_compels_the_named_tool() -> None:
     assert kwargs["parallel_tool_calls"] is False
 
 
+def test_fable_5_1_is_offered_the_named_tool_alone_without_a_forced_choice() -> None:
+    fable = next(
+        spec
+        for spec in openrouter.OPENROUTER_MODEL_SPECS
+        if spec.id == "anthropic/claude-fable-5.1"
+    )
+    finish = ToolSchema(name="finish", description="Return the result.", input_schema={})
+    request = REQUEST.model_copy(
+        update={"model": fable.id, "tools": (finish,), "tool_choice": "finish"}
+    )
+
+    kwargs = _client(ScriptedCreate(), fable)._create_kwargs(request, frozenset())
+
+    assert "tool_choice" not in kwargs
+    assert kwargs["parallel_tool_calls"] is False
+    assert [tool["function"]["name"] for tool in kwargs["tools"]] == ["finish"]
+    with pytest.raises(ValueError, match="cannot force tool_choice 'finish' beside other tools"):
+        _client(ScriptedCreate(), fable)._create_kwargs(
+            request.model_copy(
+                update={
+                    "tools": (
+                        finish,
+                        ToolSchema(name="bash", description="Run.", input_schema={}),
+                    )
+                }
+            ),
+            frozenset(),
+        )
+
+
 def test_openrouter_slug_maps_bare_ids_and_passes_slugs_through() -> None:
     assert openrouter.openrouter_slug("google/gemini-2.5-pro") == "google/gemini-2.5-pro"
     assert openrouter.openrouter_slug("gpt-5.4") == "openai/gpt-5.4"

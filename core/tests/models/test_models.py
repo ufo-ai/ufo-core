@@ -1455,26 +1455,81 @@ async def test_anthropic_reasoning_off_omits_the_thinking_block() -> None:
     assert "output_config" not in create.kwargs
 
 
-async def test_anthropic_required_reasoning_clamps_off_to_minimum() -> None:
+CORE_SPECS = {spec.id: spec for spec in core_model_specs("ANTHROPIC_API_KEY", "OPENAI_API_KEY")}
+ALWAYS_THINKING_UNFORCED = ("claude-opus-5-5", "claude-sonnet-5-5")
+FINISH_SCHEMA = ToolSchema(name="finish", description="one", input_schema={"type": "object"})
+
+
+async def _anthropic_kwargs(spec: ModelSpec, request: ModelRequest) -> dict[str, object]:
     create = CapturingCreate(
         ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
     )
-    spec = replace(
-        next(
-            spec
-            for spec in core_model_specs("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
-            if spec.id == "claude-opus-5"
-        ),
-        reasoning=ReasoningSupport(
-            supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
-        ),
-    )
     async for _ in AnthropicClient(client=anthropic_sdk(create), spec=spec).complete(
-        REQUEST.model_copy(update={"model": spec.id, "reasoning": "off"})
+        request.model_copy(update={"model": spec.id})
     ):
         pass
-    assert create.kwargs["thinking"] == {"type": "adaptive"}
-    assert create.kwargs["output_config"] == {"effort": "low"}
+    return create.kwargs
+
+
+def test_core_anthropic_rows_that_refuse_disabled_thinking_and_forced_choice() -> None:
+    anthropic_specs = [spec for spec in CORE_SPECS.values() if spec.provider == "anthropic"]
+    assert sorted(spec.id for spec in anthropic_specs if not spec.reasoning.can_disable) == sorted(
+        ALWAYS_THINKING_UNFORCED
+    )
+    assert sorted(spec.id for spec in anthropic_specs if not spec.forced_tool_choice) == sorted(
+        ALWAYS_THINKING_UNFORCED
+    )
+    for model in ALWAYS_THINKING_UNFORCED:
+        assert CORE_SPECS[model].reasoning.internal_effort() == "low"
+
+
+@pytest.mark.parametrize("model", ALWAYS_THINKING_UNFORCED)
+async def test_anthropic_off_on_an_always_thinking_model_sends_adaptive_low(model: str) -> None:
+    kwargs = await _anthropic_kwargs(
+        CORE_SPECS[model], REQUEST.model_copy(update={"reasoning": "off"})
+    )
+    assert kwargs["thinking"] == {"type": "adaptive"}
+    assert kwargs["output_config"] == {"effort": "low"}
+
+
+async def test_anthropic_off_on_opus_5_still_disables_thinking() -> None:
+    kwargs = await _anthropic_kwargs(
+        CORE_SPECS["claude-opus-5"], REQUEST.model_copy(update={"reasoning": "off"})
+    )
+    assert kwargs["thinking"] == {"type": "disabled"}
+    assert "output_config" not in kwargs
+
+
+@pytest.mark.parametrize("model", ALWAYS_THINKING_UNFORCED)
+async def test_anthropic_tool_choice_on_an_unforced_model_offers_the_tool_alone_under_auto(
+    model: str,
+) -> None:
+    kwargs = await _anthropic_kwargs(
+        CORE_SPECS[model],
+        REQUEST.model_copy(
+            update={"tools": (FINISH_SCHEMA,), "tool_choice": "finish", "reasoning": "off"}
+        ),
+    )
+    assert kwargs["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+    tools = kwargs["tools"]
+    assert isinstance(tools, list)
+    assert [tool["name"] for tool in tools] == ["finish"]
+    assert kwargs["thinking"] == {"type": "adaptive"}
+    assert kwargs["output_config"] == {"effort": "low"}
+
+
+async def test_anthropic_tool_choice_on_an_unforced_model_refuses_other_tools() -> None:
+    request = REQUEST.model_copy(
+        update={
+            "tools": (
+                FINISH_SCHEMA,
+                ToolSchema(name="bash", description="two", input_schema={"type": "object"}),
+            ),
+            "tool_choice": "finish",
+        }
+    )
+    with pytest.raises(ValueError, match="cannot force tool_choice 'finish' beside other tools"):
+        await _anthropic_kwargs(CORE_SPECS["claude-opus-5-5"], request)
 
 
 REASONING_REQUEST = ModelRequest(

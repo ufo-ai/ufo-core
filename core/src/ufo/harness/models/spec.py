@@ -87,6 +87,10 @@ class ModelSpec:
     compaction_keep_messages: int = DEFAULT_COMPACTION_KEEP_MESSAGES
     """How many trailing messages the compact strategy keeps verbatim behind its summary.
     Read only when `[context] strategy = "compact"`; the rollover strategy keeps no tail."""
+    forced_tool_choice: bool = True
+    """Whether the provider accepts a forced tool choice. A model that answers one with a 400 is
+    offered the named tool alone under `auto` with at most one call, so the reply holds that call or
+    none, and the caller raises on none."""
 
     def __post_init__(self) -> None:
         if not KNOWLEDGE_CUTOFF_RE.match(self.knowledge_cutoff):

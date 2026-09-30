@@ -398,15 +398,21 @@ class AnthropicClient:
                 for tool in request.tools
             ]
             create_kwargs["tools"][-1]["cache_control"] = system_cache
-            create_kwargs["tool_choice"] = (
-                {"type": "auto", "disable_parallel_tool_use": False}
-                if request.tool_choice is None
-                else {
+            if request.tool_choice is None:
+                create_kwargs["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": False}
+            elif self.spec.forced_tool_choice:
+                create_kwargs["tool_choice"] = {
                     "type": "tool",
                     "name": request.tool_choice,
                     "disable_parallel_tool_use": True,
                 }
-            )
+            elif len(request.tools) == 1:
+                create_kwargs["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
+            else:
+                raise ValueError(
+                    f"model {self.spec.id!r} cannot force tool_choice {request.tool_choice!r} "
+                    "beside other tools"
+                )
         return create_kwargs
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:

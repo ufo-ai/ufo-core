@@ -27,6 +27,9 @@ REASONS_WITH_TOOLS = ReasoningSupport(supported=True, tools_with_reasoning=True)
 DEFAULT_REASONS_WITH_TOOLS = ReasoningSupport(
     supported=True, tools_with_reasoning=True, default_on=True
 )
+REQUIRED_REASONS_WITH_TOOLS = ReasoningSupport(
+    supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
+)
 
 
 def _anthropic_client(spec: ModelSpec, key: str) -> AnthropicClient:
@@ -50,6 +53,7 @@ def _anthropic(
     *,
     context_window: int = ANTHROPIC_CONTEXT_WINDOW,
     reasoning: ReasoningSupport = REASONS_WITH_TOOLS,
+    forced_tool_choice: bool = True,
 ) -> ModelSpec:
     return ModelSpec(
         id=id,
@@ -62,6 +66,7 @@ def _anthropic(
         api_surface="chat",
         key_slot=ANTHROPIC_KEY_SLOT,
         key_env=key_env,
+        forced_tool_choice=forced_tool_choice,
     )
 
 
@@ -91,7 +96,9 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
     1M-token context window they ship with: Opus 5 at Opus-tier pricing unchanged from Opus 4.8,
     Opus 5.5 at $4/$20 per Mtok with cache reads at 0.05x base input. Anthropic cache writes are
     1.25x base input at 5m and 2x at 1h; cache reads are 0.1x of input, except `claude-opus-5-5`
-    at 0.05x. `gpt-6-astra` is called on the same
+    at 0.05x. `claude-opus-5-5` and `claude-sonnet-5-5` refuse both `thinking: disabled` and a
+    forced tool choice with a 400, so they declare reasoning they cannot disable and no forced
+    choice. `gpt-6-astra` is called on the same
     Responses surface, which is where OpenAI serves its tool and computer use, at $10/$50 per Mtok
     with cache reads at 0.1x and 30-minute cache writes at 1.25x base input. `gpt-6-sol` and
     `gpt-6-luna` joined the same surface on September 22 at half their GPT-5.6 predecessors' prices:
@@ -113,7 +120,8 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
             "2026-06",
             anthropic_key_env,
             context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
-            reasoning=DEFAULT_REASONS_WITH_TOOLS,
+            reasoning=REQUIRED_REASONS_WITH_TOOLS,
+            forced_tool_choice=False,
         ),
         _anthropic(
             "claude-opus-5",
@@ -146,7 +154,8 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
             ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000),
             "2026-05",
             anthropic_key_env,
-            reasoning=DEFAULT_REASONS_WITH_TOOLS,
+            reasoning=REQUIRED_REASONS_WITH_TOOLS,
+            forced_tool_choice=False,
         ),
         _anthropic(
             "claude-sonnet-5",
