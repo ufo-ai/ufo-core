@@ -21,10 +21,12 @@ watermark (`oldest`). A busy channel advancing never skips a quiet one.
 whole through `conversations.replies` and the replies land as messages and participants on the
 root's page; the walk's span stays the history page's, since a reply's `ts` is not the channel's
 order. A reply to an old thread moves neither the channel nor the root's `ts`, only its
-`latest_reply`, so a steady-state pass re-reads the roots of the last `THREAD_LOOKBACK_DAYS` below
-the watermark and reads again each one whose `latest_reply` differs from the partition's checkpoint
-`{root ts: latest_reply}`, landing them with no span. A partition with no checkpoint reads every
-root in the window once, which is how replies reach a channel synced before they were read at all.
+`latest_reply`, so a steady-state pass, after the channel's new messages, re-reads the roots of the
+last `THREAD_LOOKBACK_DAYS` below the watermark and reads again each one whose `latest_reply`
+differs from the partition's checkpoint `{root ts: latest_reply}`, landing each with no span and its
+own checkpoint, so a rate limit in the re-read keeps what it read and never holds back new messages.
+A partition with no checkpoint reads every root in the window once, which is how replies reach a
+channel synced before they were read at all.
 A grant that can't enumerate at all (`users.list`/`conversations.list` refused for a
 missing scope, `ok=false` or a 403) can read no stream, so the walk raises `StreamSkipped` and the
 run records a skip, not a failure; a per-channel refusal deeper in the history walk skips that
@@ -273,30 +275,6 @@ class SlackConnector(RestConnector):
         channel_id = target.params["channel"]
         stored = _stored_roots(bound.checkpoint)
         roots = {ts: latest for ts, latest in stored.items() if ts >= lookback}
-        if bound.after and lookback <= bound.after:
-            moved: list[dict[str, Any]] = []
-            async for raw_messages in self._history(
-                client,
-                target.path,
-                {"channel": channel_id, "oldest": lookback, "latest": bound.after},
-                inclusive=True,
-            ):
-                for raw in raw_messages:
-                    if _is_root(raw) and stored.get(raw["ts"]) != raw.get("latest_reply"):
-                        moved.append(raw)
-            if moved:
-                replies = await self._thread_replies(client, stream, channel_id, moved)
-                roots |= _root_entries(moved, lookback)
-                yield self._message_page(
-                    stream,
-                    channel_id,
-                    moved,
-                    replies,
-                    users,
-                    self_user_id,
-                    span=False,
-                    checkpoint=_checkpoint(roots, stored),
-                )
         params: dict[str, Any] = {"channel": channel_id}
         if bound.after:
             params["oldest"] = bound.after
@@ -321,6 +299,29 @@ class SlackConnector(RestConnector):
                 span=True,
                 checkpoint=_checkpoint(roots, stored),
             )
+        if not bound.after or lookback > bound.after:
+            return
+        async for raw_messages in self._history(
+            client,
+            target.path,
+            {"channel": channel_id, "oldest": lookback, "latest": bound.after},
+            inclusive=True,
+        ):
+            for root in raw_messages:
+                if not _is_root(root) or stored.get(root["ts"]) == root.get("latest_reply"):
+                    continue
+                replies = await self._thread_replies(client, stream, channel_id, [root])
+                roots |= _root_entries([root], lookback)
+                yield self._message_page(
+                    stream,
+                    channel_id,
+                    [root],
+                    replies,
+                    users,
+                    self_user_id,
+                    span=False,
+                    checkpoint=_checkpoint(roots, stored),
+                )
 
     async def _history(
         self,

@@ -683,3 +683,46 @@ async def test_a_steady_pass_rereads_only_the_roots_whose_latest_reply_moved(
     assert after[_walked("C1")] == watermark
     checkpoint = json.loads(json.loads(after["ufo_checkpoints"])[_walked("C1")])
     assert checkpoint == {moved["ts"]: late["ts"], still["ts"]: still["latest_reply"]}
+
+
+async def test_a_rate_limit_in_the_reread_keeps_new_messages_and_each_root_read(
+    parents_reader: ParentsReader,
+) -> None:
+    newer = {"ts": _days_ago(3), "user": "U1", "text": "one", "reply_count": 1}
+    older = {"ts": _days_ago(4), "user": "U1", "text": "two", "reply_count": 1}
+    reply = {"ts": _days_ago(0.4), "thread_ts": newer["ts"], "user": "U1", "text": "r1"}
+    newer["latest_reply"] = reply["ts"]
+    older["latest_reply"] = _days_ago(0.3)
+    fresh = {"ts": _days_ago(0.2), "user": "U1", "text": "new today"}
+    watermark = _days_ago(1)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/users.list":
+            return _ok({"members": [{"id": "U1", "name": "ann", "profile": {"email": "a@b.co"}}]})
+        body = json.loads(request.content)
+        if path == HISTORY_PATH:
+            return _ok({"messages": [newer, older] if "latest" in body else [fresh]})
+        if path == REPLIES_PATH and body["ts"] == older["ts"]:
+            return httpx.Response(429, headers={"retry-after": "30"}, json={"ok": False})
+        if path == REPLIES_PATH:
+            return _ok({"messages": [newer, reply]})
+        return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
+
+    result = await _fetch(
+        "messages",
+        handle,
+        cursor=json.dumps({_walked("C1"): watermark}),
+        parents=parents_reader(ONE_CHANNEL),
+    )
+
+    assert result.retry_after_seconds is not None
+    assert _refs(result) == {
+        f"messages/C1:{fresh['ts']}",
+        f"messages/C1:{newer['ts']}",
+        f"messages/C1:{reply['ts']}",
+    }
+    after = json.loads(result.next_cursor or "{}")
+    assert after[_walked("C1")] == fresh["ts"]
+    checkpoint = json.loads(json.loads(after["ufo_checkpoints"])[_walked("C1")])
+    assert checkpoint == {newer["ts"]: reply["ts"]}
