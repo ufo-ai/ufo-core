@@ -401,9 +401,8 @@ class SlackConnector(RestConnector):
         span: bool,
         checkpoint: str | None,
     ) -> WalkPage:
-        """One history page fanned into this stream's records. A `span` page carries the history
-        messages' `ts` range so the walk advances the channel's newest-first window over it; a
-        re-read of old roots carries none."""
+        """One history page fanned into this stream's records; a re-read of old roots carries no
+        `ts` range, so the channel's newest-first window does not move over it."""
         threads_by_id: dict[str, dict[str, Any]] = {}
         messages: list[dict[str, Any]] = []
         participants: list[dict[str, Any]] = []
@@ -516,7 +515,6 @@ def _stored_roots(stored: str | None) -> Mapping[str, str]:
 
 
 def _checkpoint(roots: Mapping[str, str], stored: Mapping[str, str]) -> str | None:
-    """None leaves the stored map standing, so a channel with no thread in the window writes none."""
     return None if roots == stored else json.dumps(roots, sort_keys=True)
 
 
