@@ -476,6 +476,8 @@ def _subagent_model(
         own = profile.own_key_models.get(connected or "")
         if own is not None:
             return runtime.registry.resolve(own)
+        if profile.own_key_fallback_model is not None:
+            return runtime.registry.resolve(profile.own_key_fallback_model)
         if _member_accounts_connectable(runtime):
             raise SubagentKeyWithdrawn(profile.name, runtime.config.connect.public_base_url)
         if profile.model is None:
@@ -503,7 +505,9 @@ def _own_account_alternates(
     the workspace, not the member, so it moves nowhere: the document is the choice, and no account
     of the member's was asked for. A deploy that can hold no member account runs the profile on its
     own key, so the model `_subagent_model` chose there is none the member's accounts serve: that
-    turn holds no accounts either, and a rate limit on it is the provider's fault like any other."""
+    turn holds no accounts either, and a rate limit on it is the provider's fault like any other.
+    A profile carrying `own_key_fallback_model` ends its alternates there: the last account's
+    rate limit moves the turn onto the deploy's cheaper fallback rather than failing it."""
     if not profile.needs_own_model_key or document is not None:
         return None
     own = tuple(
@@ -513,6 +517,10 @@ def _own_account_alternates(
     )
     if chosen not in own:
         return None
+    if profile.own_key_fallback_model is not None:
+        return tuple(
+            model for model in own if model != chosen
+        ) + (runtime.registry.resolve(profile.own_key_fallback_model),)
     return tuple(model for model in own if model != chosen)
 
 

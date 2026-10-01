@@ -794,7 +794,11 @@ class SubagentProfile:
     so skipping that step in onboarding takes the capability away rather than silently spending the
     deploy's key on it. `own_key_models` names the model to run per provider they may have
     connected, and it outranks `model` — a pin naming some third backend would spend the deploy's
-    account on the very work the member's key was asked for."""
+    account on the very work the member's key was asked for.
+    `own_key_fallback_model` names where the work moves when no account of theirs can serve it —
+    every connected account failed or rate-limited out, or none was connected — instead of failing
+    the turn: the deploy funds it there, on a model deliberately cheaper than the subscriptions
+    the profile prefers. `None` keeps the strict behaviour and fails the turn as before."""
 
     name: str
     prompt: str
@@ -810,6 +814,7 @@ class SubagentProfile:
     connector_read_only: bool = False
     needs_own_model_key: bool = False
     own_key_models: Mapping[str, str] = field(default_factory=dict)
+    own_key_fallback_model: str | None = None
 
     def __post_init__(self) -> None:
         if OBJECT_ACTION_TOOL in self.tool_names:

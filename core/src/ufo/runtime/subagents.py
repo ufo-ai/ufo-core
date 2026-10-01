@@ -318,7 +318,9 @@ class Subagents:
                         if provider in resolved.own_key_models
                     )
                     if self.member_accounts_connectable and not model_accounts:
-                        raise SpawnNeedsOwnModelKey(target, self.connect_url)
+                        if resolved.own_key_fallback_model is None:
+                            raise SpawnNeedsOwnModelKey(target, self.connect_url)
+                        model_accounts = ()
                 agent_id = self.parent.agent_id
                 profile_name: str | None = resolved.name
                 inherits_sandbox = True

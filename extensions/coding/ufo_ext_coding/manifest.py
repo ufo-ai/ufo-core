@@ -58,6 +58,11 @@ CODING_ROUND_LIMIT = 500
 key."""
 CODING_MODEL = "claude-opus-5"
 CODING_MODELS = {"anthropic": "claude-opus-5", "openai": "gpt-5.6-sol"}
+CODING_FALLBACK_MODEL = "z-ai/glm-5.3"
+"""Where coding runs when no member account can serve it: both connected accounts failed or
+rate-limited out, or the member connected neither. glm-5.3 rides the deploy's OpenRouter key —
+a cheaper model than either subscription's, so the fallback spends little rather than taking
+the work away."""
 FABLE_ESCALATION_PROFILE_NAME = "fable_escalation"
 FABLE_ESCALATION_MODEL = "anthropic/claude-fable-5.1"
 FABLE_ESCALATION_PROMPT = (
@@ -92,6 +97,7 @@ CODING_PROFILE = SubagentProfile(
     max_rounds=CODING_ROUND_LIMIT,
     model=CODING_MODEL,
     own_key_models=CODING_MODELS,
+    own_key_fallback_model=CODING_FALLBACK_MODEL,
     needs_own_model_key=True,
 )
 
