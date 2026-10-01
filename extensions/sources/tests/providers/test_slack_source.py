@@ -20,9 +20,9 @@ import httpx
 import pytest
 from ufo_ext_sources.providers.slack import (
     HISTORY_FETCH_BUDGET,
+    HISTORY_PAGE_SIZE,
     HISTORY_PATH,
     REPLIES_PATH,
-    REREAD_PAGE_SIZE,
     THREAD_REREAD_INTERVAL_SECONDS,
     SlackConnector,
     ThreadCheckpoint,
@@ -720,7 +720,7 @@ async def test_a_due_reread_reads_only_the_roots_whose_latest_reply_moved(
     assert _refs(result) == {f"messages/C1:{moved['ts']}", f"messages/C1:{late['ts']}"}
     assert [body["ts"] for path, body in asked if path == REPLIES_PATH] == [moved["ts"]]
     reread = [body for path, body in asked if path == HISTORY_PATH and "latest" in body]
-    assert [(body["latest"], body["limit"]) for body in reread] == [(watermark, REREAD_PAGE_SIZE)]
+    assert [(body["latest"], body["limit"]) for body in reread] == [(watermark, HISTORY_PAGE_SIZE)]
     assert json.loads(result.next_cursor or "{}")[_walked("C1")] == watermark
     state = _state(result)
     assert state.roots == {moved["ts"]: late["ts"], still["ts"]: still["latest_reply"]}
@@ -744,7 +744,7 @@ async def test_a_reread_that_is_not_due_reads_nothing_below_the_watermark(
     assert [body for path, body in asked if "latest" in body or path == REPLIES_PATH] == []
 
 
-async def test_a_rate_limited_reread_keeps_new_messages_and_resumes_below_its_last_root(
+async def test_a_rate_limited_reply_read_keeps_the_root_owed_for_the_next_pass(
     parents_reader: ParentsReader,
 ) -> None:
     newer = {"ts": _days_ago(3), "user": "U1", "text": "one", "reply_count": 1}
@@ -754,28 +754,25 @@ async def test_a_rate_limited_reread_keeps_new_messages_and_resumes_below_its_la
     newer["latest_reply"] = reply["ts"]
     older["latest_reply"] = older_reply["ts"]
     fresh = {"ts": _days_ago(0.2), "user": "U1", "text": "new today"}
-    watermark = _days_ago(1)
     threads = {newer["ts"]: [newer, reply], older["ts"]: [older, older_reply]}
     asked: list[tuple[str, dict[str, object]]] = []
 
     limited = await _fetch(
         "messages",
         _channel_handler([newer, older], [fresh], threads, asked, frozenset({older["ts"]})),
-        cursor=_cursor(watermark),
+        cursor=_cursor(_days_ago(1)),
         parents=parents_reader(ONE_CHANNEL),
     )
 
-    assert limited.retry_after_seconds is not None
+    assert limited.retry_after_seconds is None
     assert _refs(limited) == {
         f"messages/C1:{fresh['ts']}",
         f"messages/C1:{newer['ts']}",
+        f"messages/C1:{older['ts']}",
         f"messages/C1:{reply['ts']}",
     }
-    after = json.loads(limited.next_cursor or "{}")
-    assert after[_walked("C1")] == fresh["ts"]
-    state = _state(limited)
-    assert state.roots == {newer["ts"]: reply["ts"]}
-    assert state.below == newer["ts"]
+    assert json.loads(limited.next_cursor or "{}")[_walked("C1")] == fresh["ts"]
+    assert _state(limited).owed == [older["ts"]]
 
     asked.clear()
     resumed = await _fetch(
@@ -785,7 +782,67 @@ async def test_a_rate_limited_reread_keeps_new_messages_and_resumes_below_its_la
         parents=parents_reader(ONE_CHANNEL),
     )
 
-    assert _refs(resumed) == {f"messages/C1:{older['ts']}", f"messages/C1:{older_reply['ts']}"}
-    assert [body["latest"] for path, body in asked if "latest" in body] == [newer["ts"]]
+    assert _refs(resumed) == {f"messages/C1:{older_reply['ts']}"}
+    assert [body for path, body in asked if "latest" in body] == []
     assert [body["ts"] for path, body in asked if path == REPLIES_PATH] == [older["ts"]]
-    assert _state(resumed).below is None
+    assert _state(resumed).owed == []
+
+
+async def test_a_reply_rate_limit_closes_reply_reads_but_not_the_next_channels_history(
+    parents_reader: ParentsReader,
+) -> None:
+    first = {"ts": "1700000100.000100", "user": "U1", "text": "a", "reply_count": 1}
+    second = {"ts": "1700000200.000100", "user": "U1", "text": "b", "reply_count": 1}
+    asked: list[tuple[str, str]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/users.list":
+            return _ok({"members": []})
+        body = json.loads(request.content)
+        asked.append((request.url.path, body["channel"]))
+        if request.url.path == HISTORY_PATH:
+            return _ok({"messages": [first if body["channel"] == "C1" else second]})
+        return httpx.Response(429, headers={"retry-after": "60"}, json={"ok": False})
+
+    result = await _fetch("messages", handle, parents=parents_reader(TWO_CHANNELS))
+
+    assert result.retry_after_seconds is None
+    assert asked == [(HISTORY_PATH, "C1"), (REPLIES_PATH, "C1"), (HISTORY_PATH, "C2")]
+    assert _refs(result) == {f"messages/C1:{first['ts']}", f"messages/C2:{second['ts']}"}
+
+
+async def test_a_reread_reads_one_page_a_pass_and_resumes_below_it(
+    parents_reader: ParentsReader,
+) -> None:
+    upper = {"ts": _days_ago(2), "user": "U1", "text": "u", "reply_count": 1, "latest_reply": "1"}
+    lower = {"ts": _days_ago(3), "user": "U1", "text": "l", "reply_count": 1, "latest_reply": "2"}
+    watermark = _days_ago(1)
+    asked: list[dict[str, object]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/users.list":
+            return _ok({"members": []})
+        body = json.loads(request.content)
+        if request.url.path == REPLIES_PATH:
+            return _thread(request, [upper, lower])
+        if "latest" not in body:
+            return _ok({"messages": []})
+        asked.append(body)
+        if body["latest"] == watermark:
+            return _ok({"messages": [upper], "response_metadata": {"next_cursor": "more"}})
+        return _ok({"messages": [lower]})
+
+    first = await _fetch(
+        "messages", handle, cursor=_cursor(watermark), parents=parents_reader(ONE_CHANNEL)
+    )
+    assert [body["latest"] for body in asked] == [watermark]
+    assert _state(first).below == upper["ts"]
+    assert _state(first).due is None
+
+    second = await _fetch(
+        "messages", handle, cursor=first.next_cursor, parents=parents_reader(ONE_CHANNEL)
+    )
+    assert [body["latest"] for body in asked] == [watermark, upper["ts"]]
+    assert _state(second).below is None
+    assert _state(second).due is not None
+    assert set(_state(second).roots) == {upper["ts"], lower["ts"]}
