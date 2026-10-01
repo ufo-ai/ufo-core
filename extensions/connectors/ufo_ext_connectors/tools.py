@@ -453,7 +453,9 @@ def is_slack_send(provider: str, slug: str) -> bool:
     )
 
 
-async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> ToolResult:
+async def call_external_tool(
+    ctx: ToolContext, args: CallExternalToolInput, *, translated_json: bool = False
+) -> ToolResult:
     entry = _registry(ctx).entry(args.source_id)
     if ctx.connector_read_only:
         described = await entry.broker.schema(ctx.turn.workspace_id, entry.provider, args.tool_name)
@@ -482,7 +484,8 @@ async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> T
         else args.arguments
     )
     call = _ConnectorCall(ctx=ctx, entry=entry, slug=args.tool_name)
-    return ToolResult(content=(TextContent(text=await call.run(arguments, connection)),))
+    result = await call.run(arguments, connection, translated_json=translated_json)
+    return ToolResult(content=(TextContent(text=result),))
 
 
 async def call_external_tool_standing_authorization(
@@ -575,7 +578,13 @@ class _ConnectorCall:
     entry: ConnectorEntry
     slug: str
 
-    async def run(self, arguments: dict[str, JsonValue], connection: ConnectorConnection) -> str:
+    async def run(
+        self,
+        arguments: dict[str, JsonValue],
+        connection: ConnectorConnection,
+        *,
+        translated_json: bool = False,
+    ) -> str:
         staged = {key: await self._staged_value(item) for key, item in arguments.items()}
         authorization = self.ctx.connector_binding
         if authorization is not None:
@@ -606,6 +615,8 @@ class _ConnectorCall:
         files = await self._fetched_files(self.entry.broker.file_outputs(response))
         translated = await self._translated_node(response)
         payload = {**translated, WORKSPACE_FILES_RESULT_KEY: files} if files else translated
+        if translated_json:
+            return await asyncio.to_thread(json.dumps, payload)
         return await asyncio.to_thread(self._deduped, payload)
 
     async def _staged_value(self, value: object) -> object:

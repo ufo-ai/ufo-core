@@ -1627,6 +1627,67 @@ async def test_a_repeated_parent_object_crosses_once_and_expands_to_the_original
     assert json.dumps(_expanded(payload, payload)["arguments"]) == original
 
 
+async def test_trusted_connector_read_keeps_repeated_records_without_changing_authority() -> None:
+    broker = _ReadBoundaryBroker(read_only=True)
+    registry = ConnectorRegistry(
+        entries={
+            CONNECTOR_PROVIDER: ConnectorEntry(
+                provider=CONNECTOR_PROVIDER, label=CONNECTOR_LABEL, broker=broker
+            )
+        }
+    )
+    args = CallExternalToolInput(
+        tool_name="READ_RECORDS",
+        source_id=CONNECTOR_PROVIDER,
+        account_id="acct-one",
+        arguments={
+            **_code_search(3),
+            "attachment": {
+                "encoding": "base64",
+                "content": base64.b64encode(b"hello").decode(),
+            },
+        },
+    )
+    assert "translated_json" not in CallExternalToolInput.model_json_schema()["properties"]
+    ctx = _ctx(registry, accounts=("acct-one",), connector_read_only=True)
+    model_result = _payload(await call_external_tool(ctx, args))
+    assert model_result["arguments"]["items"][1]["repository"] == {
+        "same_as": "/arguments/items/0/repository"
+    }
+    code_result = _payload(await call_external_tool(ctx, args, translated_json=True))
+    assert [item["repository"] for item in code_result["arguments"]["items"]] == [_repository()] * 3
+    assert code_result["arguments"]["attachment"]["content"] == "hello"
+    assert "translated_json" not in code_result
+
+    writer = replace(broker, read_only=False)
+    write_registry = replace(
+        registry,
+        entries={
+            CONNECTOR_PROVIDER: ConnectorEntry(
+                provider=CONNECTOR_PROVIDER, label=CONNECTOR_LABEL, broker=writer
+            )
+        },
+    )
+    refused = await call_external_tool(
+        replace(ctx, connectors=write_registry), args, translated_json=True
+    )
+    assert refused.is_error
+    assert writer.executed == broker.executed
+
+    other_member = replace(
+        _ctx(
+            registry,
+            accounts=("acct-one",),
+            private_accounts=frozenset({"acct-one"}),
+            connector_read_only=True,
+        ),
+        speaker_member_id=uuid4(),
+    )
+    with pytest.raises(ValueError, match=r"no active .* account"):
+        await call_external_tool(other_member, args, translated_json=True)
+    assert broker.executed == ["READ_RECORDS", "READ_RECORDS"]
+
+
 async def test_a_cross_repo_search_still_offloads(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
