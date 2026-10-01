@@ -17,7 +17,12 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.providers.slack import HISTORY_FETCH_BUDGET, HISTORY_PATH, SlackConnector
+from ufo_ext_sources.providers.slack import (
+    HISTORY_FETCH_BUDGET,
+    HISTORY_PATH,
+    REPLIES_PATH,
+    SlackConnector,
+)
 
 from ufo.runtime.access.connectors import (
     Credential,
@@ -93,6 +98,18 @@ def _ok(body: dict[str, object]) -> httpx.Response:
     return httpx.Response(200, json={"ok": True, **body})
 
 
+def _thread(request: httpx.Request, messages: list[dict[str, object]]) -> httpx.Response:
+    """`conversations.replies` for a root: the root first, then its replies."""
+    root = json.loads(request.content)["ts"]
+    return _ok(
+        {
+            "messages": [
+                message for message in messages if message.get("thread_ts", message["ts"]) == root
+            ]
+        }
+    )
+
+
 async def test_users_snapshot_follows_cursor_pagination() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "slack.com"
@@ -153,6 +170,24 @@ def _message_handler(
     return handle
 
 
+BOT_MESSAGES: list[dict[str, object]] = [
+    {
+        "ts": "1700000002.000000",
+        "user": "U_UFO",
+        "bot_id": "B_UFO",
+        "text": "ufo answer",
+        "reply_count": 1,
+    },
+    {
+        "ts": "1700000003.000000",
+        "user": "U_THIRD",
+        "bot_id": "B_THIRD",
+        "text": "third-party bot answer",
+        "reply_count": 1,
+    },
+]
+
+
 def _bot_message_handler(request: httpx.Request) -> httpx.Response:
     if request.url.path == "/api/users.list":
         return _ok(
@@ -176,26 +211,9 @@ def _bot_message_handler(request: httpx.Request) -> httpx.Response:
     if request.url.path == "/api/conversations.list":
         return _ok({"channels": [{"id": "C1", "name": "general", "is_channel": True}]})
     if request.url.path == "/api/conversations.history":
-        return _ok(
-            {
-                "messages": [
-                    {
-                        "ts": "1700000002.000000",
-                        "user": "U_UFO",
-                        "bot_id": "B_UFO",
-                        "text": "ufo answer",
-                        "reply_count": 1,
-                    },
-                    {
-                        "ts": "1700000003.000000",
-                        "user": "U_THIRD",
-                        "bot_id": "B_THIRD",
-                        "text": "third-party bot answer",
-                        "reply_count": 1,
-                    },
-                ]
-            }
-        )
+        return _ok({"messages": BOT_MESSAGES})
+    if request.url.path == REPLIES_PATH:
+        return _thread(request, BOT_MESSAGES)
     return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
 
 
@@ -313,6 +331,8 @@ def _carry_handler(asked: list[str]) -> Callable[[httpx.Request], httpx.Response
             return _ok({"members": [{"id": "U1", "name": "ann", "profile": {"email": "a@b.co"}}]})
         if request.url.path == "/api/conversations.history":
             return _ok({"messages": CARRY_MESSAGES})
+        if request.url.path == REPLIES_PATH:
+            return _thread(request, CARRY_MESSAGES)
         return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
 
     return handle
@@ -330,7 +350,8 @@ async def test_the_rendered_body_is_pinned_byte_for_byte(
     )
 
     assert {page.source_identity: page.digest for page in result.pages} == RENDERED[stream]
-    assert asked == ["/api/users.list", HISTORY_PATH]
+    threads = [REPLIES_PATH] * len(CARRY_MESSAGES) if stream != "conversation_threads" else []
+    assert asked == ["/api/users.list", HISTORY_PATH, *threads]
 
 
 async def test_the_message_walk_enumerates_no_channel_of_its_own(
@@ -548,3 +569,117 @@ async def test_a_tick_reads_no_more_channels_than_the_history_budget(
         stream, _message_handler(seen), cursor=first.next_cursor, parents=parents_reader(channels)
     )
     assert len(seen) == 3
+
+
+def _threaded_handler(
+    history: list[dict[str, object]],
+    thread: list[dict[str, object]],
+    asked: list[tuple[str, dict[str, object]]],
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/users.list":
+            return _ok({"members": [{"id": "U1", "name": "ann", "profile": {"email": "a@b.co"}}]})
+        body = json.loads(request.content)
+        asked.append((path, body))
+        if path == HISTORY_PATH:
+            return _ok({"messages": history})
+        if path == REPLIES_PATH:
+            return _thread(request, thread)
+        return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
+
+    return handle
+
+
+ROOT = {
+    "ts": "1700000100.000100",
+    "user": "U1",
+    "text": "printer prints gray",
+    "reply_count": 2,
+    "latest_reply": "1700000300.000100",
+}
+REPLIES = [
+    {"ts": "1700000200.000100", "thread_ts": ROOT["ts"], "user": "U1", "text": "toner ordered"},
+    {"ts": "1700000300.000100", "thread_ts": ROOT["ts"], "user": "U1", "text": "paper upstairs"},
+]
+PLAIN = {"ts": "1700000150.000100", "user": "U1", "text": "lunch?"}
+
+
+@pytest.mark.parametrize(
+    ("stream", "expected"),
+    [
+        (
+            "messages",
+            {
+                "messages/C1:1700000100.000100",
+                "messages/C1:1700000150.000100",
+                "messages/C1:1700000200.000100",
+                "messages/C1:1700000300.000100",
+            },
+        ),
+        (
+            "message_participants",
+            {
+                "message_participants/C1:1700000100.000100:from:a@b.co",
+                "message_participants/C1:1700000150.000100:from:a@b.co",
+                "message_participants/C1:1700000200.000100:from:a@b.co",
+                "message_participants/C1:1700000300.000100:from:a@b.co",
+            },
+        ),
+        ("conversation_threads", {"conversation_threads/C1:1700000100.000100"}),
+    ],
+)
+async def test_a_thread_root_lands_its_replies_under_the_history_span(
+    stream: str, expected: set[str], parents_reader: ParentsReader
+) -> None:
+    asked: list[tuple[str, dict[str, object]]] = []
+    result = await _fetch(
+        stream,
+        _threaded_handler([PLAIN, ROOT], [ROOT, *REPLIES], asked),
+        parents=parents_reader(ONE_CHANNEL),
+    )
+
+    assert _refs(result) == expected
+    assert json.loads(result.next_cursor or "{}")[_walked("C1")] == PLAIN["ts"]
+    replies = [body["ts"] for path, body in asked if path == REPLIES_PATH]
+    assert replies == ([] if stream == "conversation_threads" else [ROOT["ts"]])
+    assert any("paper upstairs" in page.body for page in result.pages) == (stream == "messages")
+
+
+def _days_ago(days: float) -> str:
+    return f"{datetime.now(UTC).timestamp() - days * 86400:017.6f}"
+
+
+async def test_a_steady_pass_rereads_only_the_roots_whose_latest_reply_moved(
+    parents_reader: ParentsReader,
+) -> None:
+    moved = {"ts": _days_ago(3), "user": "U1", "text": "vpn token", "reply_count": 2}
+    still = {"ts": _days_ago(2), "user": "U1", "text": "font licence", "reply_count": 1}
+    late = {"ts": _days_ago(0.5), "thread_ts": moved["ts"], "user": "U1", "text": "new fix"}
+    moved["latest_reply"] = late["ts"]
+    still["latest_reply"] = _days_ago(1.9)
+    watermark = _days_ago(1)
+    stored = {moved["ts"]: _days_ago(2.5), still["ts"]: still["latest_reply"]}
+    cursor = json.dumps(
+        {
+            _walked("C1"): watermark,
+            "ufo_checkpoints": json.dumps({_walked("C1"): json.dumps(stored)}),
+        }
+    )
+    asked: list[tuple[str, dict[str, object]]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == HISTORY_PATH and "latest" not in json.loads(request.content):
+            return _ok({"messages": []})
+        return _threaded_handler([still, moved], [moved, late], asked)(request)
+
+    result = await _fetch("messages", handle, cursor=cursor, parents=parents_reader(ONE_CHANNEL))
+
+    assert _refs(result) == {f"messages/C1:{moved['ts']}", f"messages/C1:{late['ts']}"}
+    assert [body["ts"] for path, body in asked if path == REPLIES_PATH] == [moved["ts"]]
+    (reread,) = [body for path, body in asked if path == HISTORY_PATH]
+    assert reread["latest"] == watermark and reread["oldest"] < moved["ts"]
+    after = json.loads(result.next_cursor or "{}")
+    assert after[_walked("C1")] == watermark
+    checkpoint = json.loads(json.loads(after["ufo_checkpoints"])[_walked("C1")])
+    assert checkpoint == {moved["ts"]: late["ts"], still["ts"]: still["latest_reply"]}

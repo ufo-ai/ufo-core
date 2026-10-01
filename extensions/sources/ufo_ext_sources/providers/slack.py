@@ -17,6 +17,14 @@ returns newest-first, so a first backfill walks a channel downward as a `{high, 
 (bounded with `latest`) and a capped run resumes from `until` without the position drift that would
 drop messages posted between slices, while steady-state reads only what is newer than the channel
 watermark (`oldest`). A busy channel advancing never skips a quiet one.
+`conversations.history` returns a thread's root and not its replies, so a root with replies is read
+whole through `conversations.replies` and the replies land as messages and participants on the
+root's page; the walk's span stays the history page's, since a reply's `ts` is not the channel's
+order. A reply to an old thread moves neither the channel nor the root's `ts`, only its
+`latest_reply`, so a steady-state pass re-reads the roots of the last `THREAD_LOOKBACK_DAYS` below
+the watermark and reads again each one whose `latest_reply` differs from the partition's checkpoint
+`{root ts: latest_reply}`, landing them with no span. A partition with no checkpoint reads every
+root in the window once, which is how replies reach a channel synced before they were read at all.
 A grant that can't enumerate at all (`users.list`/`conversations.list` refused for a
 missing scope, `ok=false` or a 403) can read no stream, so the walk raises `StreamSkipped` and the
 run records a skip, not a failure; a per-channel refusal deeper in the history walk skips that
@@ -24,8 +32,9 @@ channel and the others still sync. Message streams reject the Slack surface's ex
 id before deriving message, thread, or participant records; another app's `bot_id` remains source
 material. The write path is intentionally absent — the source seam only reads."""
 
-from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+import json
+from collections.abc import AsyncIterator, Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -52,6 +61,10 @@ HISTORY_PAGE_SIZE = 15
 HISTORY_FETCH_BUDGET = 20
 HISTORY_TYPES = "public_channel,private_channel,mpim,im"
 HISTORY_PATH = "/api/conversations.history"
+REPLIES_PATH = "/api/conversations.replies"
+REPLIES_PAGE_SIZE = 200
+THREAD_LOOKBACK_DAYS = 7
+REPLY_STREAMS = frozenset({"messages", "message_participants"})
 SNIPPET_CAP = 240
 
 _SCOPE_REFUSAL_ERRORS = frozenset({"missing_scope", "no_permission", "not_allowed_token_type"})
@@ -154,11 +167,15 @@ class SlackConnector(RestConnector):
         if not stream.parents:
             raise StreamSkipped(f"slack: stream {stream.name!r} is not implemented")
         users = await self.user_index(client)
+        floor = _slack_ts(run.backfill_after)
+        window = f"{(datetime.now(UTC) - timedelta(days=THREAD_LOOKBACK_DAYS)).timestamp():017.6f}"
+        lookback = max(window, floor or window)
 
         def channel_pages(partition: Partition, bound: PartitionBound) -> AsyncIterator[WalkPage]:
-            return self._channel_pages(client, stream, partition, bound, users, run.self_user_id)
+            return self._channel_pages(
+                client, stream, partition, bound, users, run.self_user_id, lookback
+            )
 
-        floor = _slack_ts(run.backfill_after)
         async for stream_page in fanned_out(stream, run, channel_pages, floor):
             yield stream_page
 
@@ -248,25 +265,81 @@ class SlackConnector(RestConnector):
         bound: PartitionBound,
         users: dict[str, dict[str, Any]],
         self_user_id: str | None,
+        lookback: str,
     ) -> AsyncIterator[WalkPage]:
         """Slack's `oldest` is exclusive and `latest` inclusive, and Slack reads the channel from
         the POST body rather than the query."""
         target = httpx.URL(partition.path)
         channel_id = target.params["channel"]
+        stored = _stored_roots(bound.checkpoint)
+        roots = {ts: latest for ts, latest in stored.items() if ts >= lookback}
+        if bound.after and lookback <= bound.after:
+            moved: list[dict[str, Any]] = []
+            async for raw_messages in self._history(
+                client,
+                target.path,
+                {"channel": channel_id, "oldest": lookback, "latest": bound.after},
+                inclusive=True,
+            ):
+                for raw in raw_messages:
+                    if _is_root(raw) and stored.get(raw["ts"]) != raw.get("latest_reply"):
+                        moved.append(raw)
+            if moved:
+                replies = await self._thread_replies(client, stream, channel_id, moved)
+                roots |= _root_entries(moved, lookback)
+                yield self._message_page(
+                    stream,
+                    channel_id,
+                    moved,
+                    replies,
+                    users,
+                    self_user_id,
+                    span=False,
+                    checkpoint=_checkpoint(roots, stored),
+                )
+        params: dict[str, Any] = {"channel": channel_id}
+        if bound.after:
+            params["oldest"] = bound.after
+        else:
+            if bound.before:
+                params["latest"] = bound.before
+            if bound.since:
+                params["oldest"] = bound.since
+        async for raw_messages in self._history(
+            client, target.path, params, inclusive=not bound.after
+        ):
+            threaded = [raw for raw in raw_messages if _is_root(raw)]
+            replies = await self._thread_replies(client, stream, channel_id, threaded)
+            roots |= _root_entries(threaded, lookback)
+            yield self._message_page(
+                stream,
+                channel_id,
+                raw_messages,
+                replies,
+                users,
+                self_user_id,
+                span=True,
+                checkpoint=_checkpoint(roots, stored),
+            )
+
+    async def _history(
+        self,
+        client: httpx.AsyncClient,
+        path: str,
+        bounds: dict[str, Any],
+        *,
+        inclusive: bool,
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         cursor: str | None = None
         while True:
-            params: dict[str, Any] = {"channel": channel_id, "limit": HISTORY_PAGE_SIZE}
+            params = bounds | {
+                "limit": HISTORY_PAGE_SIZE,
+                "inclusive": "true" if inclusive else "false",
+            }
             if cursor:
                 params["cursor"] = cursor
-            if bound.after:
-                params |= {"oldest": bound.after, "inclusive": "false"}
-            else:
-                if bound.before:
-                    params |= {"latest": bound.before, "inclusive": "true"}
-                if bound.since:
-                    params |= {"oldest": bound.since, "inclusive": "true"}
             try:
-                data = await self._slack_post(client, target.path, json=params)
+                data = await self._slack_post(client, path, json=params)
             except SlackApiError as error:
                 if error.error in _CHANNEL_SKIP_ERRORS:
                     raise PartitionSkipped(f"slack: channel refused ({error.error})") from error
@@ -277,32 +350,65 @@ class SlackConnector(RestConnector):
                 if isinstance(raw, dict) and isinstance(raw.get("ts"), str)
             ]
             if raw_messages:
-                yield self._message_page(
-                    stream,
-                    channel_id,
-                    raw_messages,
-                    users,
-                    self_user_id,
-                )
+                yield raw_messages
             cursor = _next_cursor(data)
             if not cursor:
                 return
+
+    async def _thread_replies(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        channel_id: str,
+        roots: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Each root's replies, oldest first, without the root `conversations.replies` repeats."""
+        if stream.name not in REPLY_STREAMS:
+            return []
+        replies: list[dict[str, Any]] = []
+        for root in roots:
+            cursor: str | None = None
+            while True:
+                params: dict[str, Any] = {
+                    "channel": channel_id,
+                    "ts": root["ts"],
+                    "limit": REPLIES_PAGE_SIZE,
+                }
+                if cursor:
+                    params["cursor"] = cursor
+                data = await self._slack_post(client, REPLIES_PATH, json=params)
+                replies.extend(
+                    raw
+                    for raw in data.get("messages") or []
+                    if isinstance(raw, dict)
+                    and isinstance(raw.get("ts"), str)
+                    and raw["ts"] != root["ts"]
+                )
+                cursor = _next_cursor(data)
+                if not cursor:
+                    break
+        return replies
 
     def _message_page(
         self,
         stream: StreamSpec,
         channel_id: str,
         raw_messages: list[dict[str, Any]],
+        replies: list[dict[str, Any]],
         users: dict[str, dict[str, Any]],
         self_user_id: str | None,
+        *,
+        span: bool,
+        checkpoint: str | None,
     ) -> WalkPage:
-        """One history page fanned into this stream's records, carrying the raw-message `ts` span so
-        the walk advances the channel's newest-first window over it."""
+        """One history page fanned into this stream's records. A `span` page carries the history
+        messages' `ts` range so the walk advances the channel's newest-first window over it; a
+        re-read of old roots carries none."""
         threads_by_id: dict[str, dict[str, Any]] = {}
         messages: list[dict[str, Any]] = []
         participants: list[dict[str, Any]] = []
         deleted_message_ids: list[str] = []
-        for raw in raw_messages:
+        for raw in (*raw_messages, *replies):
             if raw.get("subtype") == "message_deleted":
                 deleted_ts = raw.get("deleted_ts")
                 if isinstance(deleted_ts, str) and deleted_ts:
@@ -328,14 +434,20 @@ class SlackConnector(RestConnector):
             if participant is not None:
                 participants.append(participant)
         values = [raw["ts"] for raw in raw_messages]
-        high, low = max(values), min(values)
+        high, low = (max(values), min(values)) if span else (None, None)
         if stream.name == "conversation_threads":
-            return WalkPage(records=list(threads_by_id.values()), high=high, low=low)
+            return WalkPage(
+                records=list(threads_by_id.values()), high=high, low=low, checkpoint=checkpoint
+            )
         if stream.name == "messages":
             return WalkPage(
-                records=messages, high=high, low=low, deletes=tuple(deleted_message_ids)
+                records=messages,
+                high=high,
+                low=low,
+                deletes=tuple(deleted_message_ids),
+                checkpoint=checkpoint,
             )
-        return WalkPage(records=participants, high=high, low=low)
+        return WalkPage(records=participants, high=high, low=low, checkpoint=checkpoint)
 
     async def _enumerate(
         self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any]
@@ -374,6 +486,38 @@ def _ok_or_raise(data: dict[str, Any]) -> dict[str, Any]:
         needed = data.get("needed")
         raise SlackApiError(error, needed=needed if isinstance(needed, str) else None)
     return data
+
+
+def _is_root(raw: dict[str, Any]) -> bool:
+    reply_count = raw.get("reply_count")
+    return (
+        raw.get("thread_ts", raw["ts"]) == raw["ts"]
+        and isinstance(reply_count, int)
+        and reply_count > 0
+    )
+
+
+def _root_entries(roots: list[dict[str, Any]], lookback: str) -> dict[str, str]:
+    return {raw["ts"]: str(raw.get("latest_reply") or "") for raw in roots if raw["ts"] >= lookback}
+
+
+def _stored_roots(stored: str | None) -> Mapping[str, str]:
+    """The roots this partition's last pass read. Anything but a map of strings reads as empty,
+    which costs one re-read of the window and never a lost reply."""
+    if stored is None:
+        return {}
+    try:
+        parsed = json.loads(stored)
+    except ValueError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {key: value for key, value in parsed.items() if isinstance(value, str)}
+
+
+def _checkpoint(roots: Mapping[str, str], stored: Mapping[str, str]) -> str | None:
+    """None leaves the stored map standing, so a channel with no thread in the window writes none."""
+    return None if roots == stored else json.dumps(roots, sort_keys=True)
 
 
 def _next_cursor(data: dict[str, Any]) -> str | None:
