@@ -79,6 +79,7 @@ _SCOPE_REFUSAL_STATUS = frozenset({403})
 _CHANNEL_SKIP_ERRORS = frozenset(
     {"missing_scope", "not_in_channel", "channel_not_found", "is_archived"}
 )
+_THREAD_GONE_ERRORS = _CHANNEL_SKIP_ERRORS | {"thread_not_found"}
 _CHANNEL_PATH = f"{HISTORY_PATH}?channel={{id}}"
 _LIVE = {"is_archived": (False,)}
 _UNDER_CHANNEL = ParentEdge(stream="conversations", path=_CHANNEL_PATH, where=_LIVE)
@@ -333,21 +334,31 @@ class SlackConnector(RestConnector):
                     checkpoint=state.model_dump_json(),
                 )
         for root_ts in list(state.owed):
-            if budget.limited:
-                return
-            replies = await self._thread_replies(client, channel_id, root_ts, budget)
-            if replies is None:
-                return
-            state.owed.remove(root_ts)
-            yield self._message_page(
-                stream,
-                channel_id,
-                replies,
-                users,
-                self_user_id,
-                span=False,
-                checkpoint=state.model_dump_json(),
-            )
+            more = True
+            while more:
+                if budget.limited:
+                    return
+                page = await self._replies_page(
+                    client, channel_id, root_ts, state.reading.get(root_ts), budget
+                )
+                if page is None:
+                    return
+                replies, more = page
+                if more and replies:
+                    state.reading[root_ts] = max(raw["ts"] for raw in replies)
+                else:
+                    more = False
+                    state.owed.remove(root_ts)
+                    state.reading.pop(root_ts, None)
+                yield self._message_page(
+                    stream,
+                    channel_id,
+                    replies,
+                    users,
+                    self_user_id,
+                    span=False,
+                    checkpoint=state.model_dump_json(),
+                )
 
     @staticmethod
     def _owe(
@@ -432,38 +443,34 @@ class SlackConnector(RestConnector):
             if not cursor:
                 return
 
-    async def _thread_replies(
+    async def _replies_page(
         self,
         client: httpx.AsyncClient,
         channel_id: str,
         root_ts: str,
+        after: str | None,
         budget: "RepliesBudget",
-    ) -> list[dict[str, Any]] | None:
-        """One root's replies without the root `conversations.replies` repeats; None when Slack
-        rate-limits the read, which closes the budget for the rest of the run."""
-        replies: list[dict[str, Any]] = []
-        cursor: str | None = None
-        while True:
-            params: dict[str, Any] = {
-                "channel": channel_id,
-                "ts": root_ts,
-                "limit": REPLIES_PAGE_SIZE,
-            }
-            if cursor:
-                params["cursor"] = cursor
-            try:
-                data = await self._slack_post(client, REPLIES_PATH, json=params)
-            except ProviderRateLimited:
-                budget.limited = True
-                return None
-            replies.extend(
-                raw
-                for raw in data.get("messages") or []
-                if isinstance(raw, dict) and isinstance(raw.get("ts"), str) and raw["ts"] != root_ts
-            )
-            cursor = _next_cursor(data)
-            if not cursor:
-                return replies
+    ) -> tuple[list[dict[str, Any]], bool] | None:
+        """A page of a root's replies after `after`, oldest first, and whether more follow; None on
+        a rate limit, which closes the run's budget. A thread Slack no longer serves reads empty."""
+        params: dict[str, Any] = {"channel": channel_id, "ts": root_ts, "limit": REPLIES_PAGE_SIZE}
+        if after:
+            params |= {"oldest": after, "inclusive": "false"}
+        try:
+            data = await self._slack_post(client, REPLIES_PATH, json=params)
+        except ProviderRateLimited:
+            budget.limited = True
+            return None
+        except SlackApiError as error:
+            if error.error in _THREAD_GONE_ERRORS:
+                return [], False
+            raise
+        replies = [
+            raw
+            for raw in data.get("messages") or []
+            if isinstance(raw, dict) and isinstance(raw.get("ts"), str) and raw["ts"] != root_ts
+        ]
+        return replies, _next_cursor(data) is not None
 
     def _message_page(
         self,
@@ -576,13 +583,14 @@ def _root_entries(roots: list[dict[str, Any]], lookback: str) -> dict[str, str]:
 
 
 class ThreadCheckpoint(BaseModel):
-    """One channel's thread reads: each root of the window's `latest_reply`, the roots whose replies
-    are unread, when the next re-read is due, and how far down an unfinished one reached."""
+    """One channel's thread reads: window roots' `latest_reply`, owed roots and the last reply read
+    of each part-read one, when the next re-read is due, and how far down an unfinished one got."""
 
     model_config = ConfigDict(extra="forbid")
 
     roots: dict[str, str] = {}
     owed: list[str] = []
+    reading: dict[str, str] = {}
     due: float | None = None
     below: str | None = None
 

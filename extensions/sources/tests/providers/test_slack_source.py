@@ -846,3 +846,66 @@ async def test_a_reread_reads_one_page_a_pass_and_resumes_below_it(
     assert _state(second).below is None
     assert _state(second).due is not None
     assert set(_state(second).roots) == {upper["ts"], lower["ts"]}
+
+
+async def test_an_owed_thread_slack_no_longer_serves_leaves_the_queue(
+    parents_reader: ParentsReader,
+) -> None:
+    gone = {"ts": "1700000100.000100", "user": "U1", "text": "x", "reply_count": 1}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/users.list":
+            return _ok({"members": []})
+        if request.url.path == HISTORY_PATH:
+            return _ok({"messages": [gone]})
+        return httpx.Response(200, json={"ok": False, "error": "thread_not_found"})
+
+    result = await _fetch("messages", handle, parents=parents_reader(ONE_CHANNEL))
+
+    assert _refs(result) == {f"messages/C1:{gone['ts']}"}
+    assert _state(result).owed == []
+
+
+async def test_a_thread_longer_than_a_page_resumes_after_its_last_read_reply(
+    parents_reader: ParentsReader,
+) -> None:
+    root = {"ts": "1700000100.000100", "user": "U1", "text": "long", "reply_count": 3}
+    replies = [
+        {"ts": f"17000002{i}0.000100", "thread_ts": root["ts"], "user": "U1", "text": f"r{i}"}
+        for i in range(3)
+    ]
+    asked: list[dict[str, object]] = []
+    limit_second = [True]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/users.list":
+            return _ok({"members": []})
+        body = json.loads(request.content)
+        if request.url.path == HISTORY_PATH:
+            return _ok({"messages": [root]} if "oldest" not in body else {"messages": []})
+        asked.append(body)
+        if "oldest" not in body:
+            return _ok(
+                {"messages": [root, *replies[:2]], "response_metadata": {"next_cursor": "c"}}
+            )
+        if limit_second[0]:
+            return httpx.Response(429, headers={"retry-after": "60"}, json={"ok": False})
+        later = [reply for reply in replies if reply["ts"] > body["oldest"]]
+        return _ok({"messages": [root, *later]})
+
+    first = await _fetch("messages", handle, parents=parents_reader(ONE_CHANNEL))
+
+    assert _refs(first) == {f"messages/C1:{m['ts']}" for m in (root, *replies[:2])}
+    assert _state(first).owed == [root["ts"]]
+    assert _state(first).reading == {root["ts"]: replies[1]["ts"]}
+
+    limit_second[0] = False
+    asked.clear()
+    second = await _fetch(
+        "messages", handle, cursor=first.next_cursor, parents=parents_reader(ONE_CHANNEL)
+    )
+
+    assert [body.get("oldest") for body in asked] == [replies[1]["ts"]]
+    assert _refs(second) == {f"messages/C1:{replies[2]['ts']}"}
+    assert _state(second).owed == []
+    assert _state(second).reading == {}
