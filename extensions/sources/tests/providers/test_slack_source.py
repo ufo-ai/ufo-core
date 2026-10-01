@@ -11,18 +11,28 @@ and resuming downward with `latest`, and a scope-refusal (`ok=false missing_scop
 surfacing as `StreamSkipped` so the run records a skip, not a failure."""
 
 import json
+import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.providers.slack import HISTORY_FETCH_BUDGET, HISTORY_PATH, SlackConnector
+from ufo_ext_sources.providers.slack import (
+    HISTORY_FETCH_BUDGET,
+    HISTORY_PAGE_SIZE,
+    HISTORY_PATH,
+    REPLIES_PATH,
+    THREAD_REREAD_INTERVAL_SECONDS,
+    SlackConnector,
+    ThreadCheckpoint,
+)
 
 from ufo.runtime.access.connectors import (
     Credential,
 )
 from ufo.runtime.sources import backend as backend_module
+from ufo.runtime.sources.connector import CHECKPOINTS_KEY
 from ufo.runtime.sources.sync import (
     SourceAuth,
     StreamSkipped,
@@ -93,6 +103,18 @@ def _ok(body: dict[str, object]) -> httpx.Response:
     return httpx.Response(200, json={"ok": True, **body})
 
 
+def _thread(request: httpx.Request, messages: list[dict[str, object]]) -> httpx.Response:
+    """`conversations.replies` for a root: the root first, then its replies."""
+    root = json.loads(request.content)["ts"]
+    return _ok(
+        {
+            "messages": [
+                message for message in messages if message.get("thread_ts", message["ts"]) == root
+            ]
+        }
+    )
+
+
 async def test_users_snapshot_follows_cursor_pagination() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "slack.com"
@@ -153,6 +175,24 @@ def _message_handler(
     return handle
 
 
+BOT_MESSAGES: list[dict[str, object]] = [
+    {
+        "ts": "1700000002.000000",
+        "user": "U_UFO",
+        "bot_id": "B_UFO",
+        "text": "ufo answer",
+        "reply_count": 1,
+    },
+    {
+        "ts": "1700000003.000000",
+        "user": "U_THIRD",
+        "bot_id": "B_THIRD",
+        "text": "third-party bot answer",
+        "reply_count": 1,
+    },
+]
+
+
 def _bot_message_handler(request: httpx.Request) -> httpx.Response:
     if request.url.path == "/api/users.list":
         return _ok(
@@ -176,26 +216,9 @@ def _bot_message_handler(request: httpx.Request) -> httpx.Response:
     if request.url.path == "/api/conversations.list":
         return _ok({"channels": [{"id": "C1", "name": "general", "is_channel": True}]})
     if request.url.path == "/api/conversations.history":
-        return _ok(
-            {
-                "messages": [
-                    {
-                        "ts": "1700000002.000000",
-                        "user": "U_UFO",
-                        "bot_id": "B_UFO",
-                        "text": "ufo answer",
-                        "reply_count": 1,
-                    },
-                    {
-                        "ts": "1700000003.000000",
-                        "user": "U_THIRD",
-                        "bot_id": "B_THIRD",
-                        "text": "third-party bot answer",
-                        "reply_count": 1,
-                    },
-                ]
-            }
-        )
+        return _ok({"messages": BOT_MESSAGES})
+    if request.url.path == REPLIES_PATH:
+        return _thread(request, BOT_MESSAGES)
     return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
 
 
@@ -313,6 +336,8 @@ def _carry_handler(asked: list[str]) -> Callable[[httpx.Request], httpx.Response
             return _ok({"members": [{"id": "U1", "name": "ann", "profile": {"email": "a@b.co"}}]})
         if request.url.path == "/api/conversations.history":
             return _ok({"messages": CARRY_MESSAGES})
+        if request.url.path == REPLIES_PATH:
+            return _thread(request, CARRY_MESSAGES)
         return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
 
     return handle
@@ -330,7 +355,8 @@ async def test_the_rendered_body_is_pinned_byte_for_byte(
     )
 
     assert {page.source_identity: page.digest for page in result.pages} == RENDERED[stream]
-    assert asked == ["/api/users.list", HISTORY_PATH]
+    threads = [REPLIES_PATH] * len(CARRY_MESSAGES) if stream != "conversation_threads" else []
+    assert asked == ["/api/users.list", HISTORY_PATH, *threads]
 
 
 async def test_the_message_walk_enumerates_no_channel_of_its_own(
@@ -548,3 +574,336 @@ async def test_a_tick_reads_no_more_channels_than_the_history_budget(
         stream, _message_handler(seen), cursor=first.next_cursor, parents=parents_reader(channels)
     )
     assert len(seen) == 3
+
+
+def _threaded_handler(
+    history: list[dict[str, object]],
+    thread: list[dict[str, object]],
+    asked: list[tuple[str, dict[str, object]]],
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/users.list":
+            return _ok({"members": [{"id": "U1", "name": "ann", "profile": {"email": "a@b.co"}}]})
+        body = json.loads(request.content)
+        asked.append((path, body))
+        if path == HISTORY_PATH:
+            return _ok({"messages": history})
+        if path == REPLIES_PATH:
+            return _thread(request, thread)
+        return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
+
+    return handle
+
+
+ROOT = {
+    "ts": "1700000100.000100",
+    "user": "U1",
+    "text": "printer prints gray",
+    "reply_count": 2,
+    "latest_reply": "1700000300.000100",
+}
+REPLIES = [
+    {"ts": "1700000200.000100", "thread_ts": ROOT["ts"], "user": "U1", "text": "toner ordered"},
+    {"ts": "1700000300.000100", "thread_ts": ROOT["ts"], "user": "U1", "text": "paper upstairs"},
+]
+PLAIN = {"ts": "1700000150.000100", "user": "U1", "text": "lunch?"}
+
+
+@pytest.mark.parametrize(
+    ("stream", "expected"),
+    [
+        (
+            "messages",
+            {
+                "messages/C1:1700000100.000100",
+                "messages/C1:1700000150.000100",
+                "messages/C1:1700000200.000100",
+                "messages/C1:1700000300.000100",
+            },
+        ),
+        (
+            "message_participants",
+            {
+                "message_participants/C1:1700000100.000100:from:a@b.co",
+                "message_participants/C1:1700000150.000100:from:a@b.co",
+                "message_participants/C1:1700000200.000100:from:a@b.co",
+                "message_participants/C1:1700000300.000100:from:a@b.co",
+            },
+        ),
+        ("conversation_threads", {"conversation_threads/C1:1700000100.000100"}),
+    ],
+)
+async def test_a_thread_root_lands_its_replies_under_the_history_span(
+    stream: str, expected: set[str], parents_reader: ParentsReader
+) -> None:
+    asked: list[tuple[str, dict[str, object]]] = []
+    result = await _fetch(
+        stream,
+        _threaded_handler([PLAIN, ROOT], [ROOT, *REPLIES], asked),
+        parents=parents_reader(ONE_CHANNEL),
+    )
+
+    assert _refs(result) == expected
+    assert json.loads(result.next_cursor or "{}")[_walked("C1")] == PLAIN["ts"]
+    replies = [body["ts"] for path, body in asked if path == REPLIES_PATH]
+    assert replies == ([] if stream == "conversation_threads" else [ROOT["ts"]])
+    assert any("paper upstairs" in page.body for page in result.pages) == (stream == "messages")
+
+
+def _days_ago(days: float) -> str:
+    return f"{datetime.now(UTC).timestamp() - days * 86400:017.6f}"
+
+
+def _cursor(watermark: str, state: ThreadCheckpoint | None = None) -> str:
+    entries: dict[str, str] = {_walked("C1"): watermark}
+    if state is not None:
+        entries[CHECKPOINTS_KEY] = json.dumps({_walked("C1"): state.model_dump_json()})
+    return json.dumps(entries)
+
+
+def _state(result: SyncResult) -> ThreadCheckpoint:
+    after = json.loads(result.next_cursor or "{}")
+    return ThreadCheckpoint.model_validate_json(json.loads(after[CHECKPOINTS_KEY])[_walked("C1")])
+
+
+def _channel_handler(
+    reread: list[dict[str, object]],
+    fresh: list[dict[str, object]],
+    threads: Mapping[str, list[dict[str, object]]],
+    asked: list[tuple[str, dict[str, object]]],
+    limited: frozenset[str] = frozenset(),
+) -> Callable[[httpx.Request], httpx.Response]:
+    """History answers `fresh` above the watermark and `reread` below it; a root in `limited`
+    answers its replies with a 429."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/users.list":
+            return _ok({"members": [{"id": "U1", "name": "ann", "profile": {"email": "a@b.co"}}]})
+        body = json.loads(request.content)
+        asked.append((path, body))
+        if path == HISTORY_PATH:
+            if "latest" not in body:
+                return _ok({"messages": fresh})
+            return _ok({"messages": [m for m in reread if str(m["ts"]) <= str(body["latest"])]})
+        if path == REPLIES_PATH and body["ts"] in limited:
+            return httpx.Response(429, headers={"retry-after": "30"}, json={"ok": False})
+        if path == REPLIES_PATH:
+            return _ok({"messages": threads[str(body["ts"])]})
+        return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
+
+    return handle
+
+
+async def test_a_due_reread_reads_only_the_roots_whose_latest_reply_moved(
+    parents_reader: ParentsReader,
+) -> None:
+    moved = {"ts": _days_ago(3), "user": "U1", "text": "vpn token", "reply_count": 2}
+    still = {"ts": _days_ago(2), "user": "U1", "text": "font licence", "reply_count": 1}
+    late = {"ts": _days_ago(0.5), "thread_ts": moved["ts"], "user": "U1", "text": "new fix"}
+    moved["latest_reply"] = late["ts"]
+    still["latest_reply"] = _days_ago(1.9)
+    watermark = _days_ago(1)
+    stored = ThreadCheckpoint(
+        roots={moved["ts"]: _days_ago(2.5), still["ts"]: still["latest_reply"]}
+    )
+    asked: list[tuple[str, dict[str, object]]] = []
+
+    result = await _fetch(
+        "messages",
+        _channel_handler([still, moved], [], {moved["ts"]: [moved, late]}, asked),
+        cursor=_cursor(watermark, stored),
+        parents=parents_reader(ONE_CHANNEL),
+    )
+
+    assert _refs(result) == {f"messages/C1:{moved['ts']}", f"messages/C1:{late['ts']}"}
+    assert [body["ts"] for path, body in asked if path == REPLIES_PATH] == [moved["ts"]]
+    reread = [body for path, body in asked if path == HISTORY_PATH and "latest" in body]
+    assert [(body["latest"], body["limit"]) for body in reread] == [(watermark, HISTORY_PAGE_SIZE)]
+    assert json.loads(result.next_cursor or "{}")[_walked("C1")] == watermark
+    state = _state(result)
+    assert state.roots == {moved["ts"]: late["ts"], still["ts"]: still["latest_reply"]}
+    assert state.below is None
+    assert state.due is not None and state.due > time.time() + THREAD_REREAD_INTERVAL_SECONDS - 60
+
+
+async def test_a_reread_that_is_not_due_reads_nothing_below_the_watermark(
+    parents_reader: ParentsReader,
+) -> None:
+    moved = {"ts": _days_ago(3), "user": "U1", "text": "x", "reply_count": 1, "latest_reply": "9"}
+    asked: list[tuple[str, dict[str, object]]] = []
+
+    await _fetch(
+        "messages",
+        _channel_handler([moved], [], {}, asked),
+        cursor=_cursor(_days_ago(1), ThreadCheckpoint(due=time.time() + 600)),
+        parents=parents_reader(ONE_CHANNEL),
+    )
+
+    assert [body for path, body in asked if "latest" in body or path == REPLIES_PATH] == []
+
+
+async def test_a_rate_limited_reply_read_keeps_the_root_owed_for_the_next_pass(
+    parents_reader: ParentsReader,
+) -> None:
+    newer = {"ts": _days_ago(3), "user": "U1", "text": "one", "reply_count": 1}
+    older = {"ts": _days_ago(4), "user": "U1", "text": "two", "reply_count": 1}
+    reply = {"ts": _days_ago(0.4), "thread_ts": newer["ts"], "user": "U1", "text": "r1"}
+    older_reply = {"ts": _days_ago(0.3), "thread_ts": older["ts"], "user": "U1", "text": "r2"}
+    newer["latest_reply"] = reply["ts"]
+    older["latest_reply"] = older_reply["ts"]
+    fresh = {"ts": _days_ago(0.2), "user": "U1", "text": "new today"}
+    threads = {newer["ts"]: [newer, reply], older["ts"]: [older, older_reply]}
+    asked: list[tuple[str, dict[str, object]]] = []
+
+    limited = await _fetch(
+        "messages",
+        _channel_handler([newer, older], [fresh], threads, asked, frozenset({older["ts"]})),
+        cursor=_cursor(_days_ago(1)),
+        parents=parents_reader(ONE_CHANNEL),
+    )
+
+    assert limited.retry_after_seconds is None
+    assert _refs(limited) == {
+        f"messages/C1:{newer['ts']}",
+        f"messages/C1:{older['ts']}",
+        f"messages/C1:{reply['ts']}",
+    }
+    assert _state(limited).owed == [older["ts"]]
+
+    asked.clear()
+    resumed = await _fetch(
+        "messages",
+        _channel_handler([newer, older], [fresh], threads, asked),
+        cursor=limited.next_cursor,
+        parents=parents_reader(ONE_CHANNEL),
+    )
+
+    assert _refs(resumed) == {f"messages/C1:{fresh['ts']}", f"messages/C1:{older_reply['ts']}"}
+    assert json.loads(resumed.next_cursor or "{}")[_walked("C1")] == fresh["ts"]
+    assert [body["ts"] for path, body in asked if path == REPLIES_PATH] == [older["ts"]]
+    assert _state(resumed).owed == []
+
+
+async def test_a_reply_rate_limit_closes_reply_reads_but_not_the_next_channels_history(
+    parents_reader: ParentsReader,
+) -> None:
+    first = {"ts": "1700000100.000100", "user": "U1", "text": "a", "reply_count": 1}
+    second = {"ts": "1700000200.000100", "user": "U1", "text": "b", "reply_count": 1}
+    asked: list[tuple[str, str]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/users.list":
+            return _ok({"members": []})
+        body = json.loads(request.content)
+        asked.append((request.url.path, body["channel"]))
+        if request.url.path == HISTORY_PATH:
+            return _ok({"messages": [first if body["channel"] == "C1" else second]})
+        return httpx.Response(429, headers={"retry-after": "60"}, json={"ok": False})
+
+    result = await _fetch("messages", handle, parents=parents_reader(TWO_CHANNELS))
+
+    assert result.retry_after_seconds is None
+    assert asked == [(HISTORY_PATH, "C1"), (REPLIES_PATH, "C1"), (HISTORY_PATH, "C2")]
+    assert _refs(result) == {f"messages/C1:{first['ts']}", f"messages/C2:{second['ts']}"}
+
+
+async def test_a_reread_takes_turns_with_new_messages_one_history_call_a_pass(
+    parents_reader: ParentsReader,
+) -> None:
+    upper = {"ts": _days_ago(2), "user": "U1", "text": "u", "reply_count": 1, "latest_reply": "1"}
+    lower = {"ts": _days_ago(3), "user": "U1", "text": "l", "reply_count": 1, "latest_reply": "2"}
+    watermark = _days_ago(1)
+    history: list[str | None] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/users.list":
+            return _ok({"members": []})
+        body = json.loads(request.content)
+        if request.url.path == REPLIES_PATH:
+            return _thread(request, [upper, lower])
+        history.append(body.get("latest"))
+        if "latest" not in body:
+            return _ok({"messages": []})
+        if body["latest"] == watermark:
+            return _ok({"messages": [upper], "response_metadata": {"next_cursor": "more"}})
+        return _ok({"messages": [lower]})
+
+    cursor: str | None = _cursor(watermark)
+    states: list[ThreadCheckpoint] = []
+    for _ in range(3):
+        result = await _fetch(
+            "messages", handle, cursor=cursor, parents=parents_reader(ONE_CHANNEL)
+        )
+        cursor = result.next_cursor
+        states.append(_state(result))
+
+    assert history == [watermark, None, upper["ts"]]
+    assert states[0].below == upper["ts"] and states[0].due is None
+    assert states[1].below == upper["ts"] and states[1].reread_turn
+    assert states[2].below is None and states[2].due is not None
+    assert set(states[2].roots) == {upper["ts"], lower["ts"]}
+
+
+async def test_an_owed_thread_slack_no_longer_serves_leaves_the_queue(
+    parents_reader: ParentsReader,
+) -> None:
+    gone = {"ts": "1700000100.000100", "user": "U1", "text": "x", "reply_count": 1}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/users.list":
+            return _ok({"members": []})
+        if request.url.path == HISTORY_PATH:
+            return _ok({"messages": [gone]})
+        return httpx.Response(200, json={"ok": False, "error": "thread_not_found"})
+
+    result = await _fetch("messages", handle, parents=parents_reader(ONE_CHANNEL))
+
+    assert _refs(result) == {f"messages/C1:{gone['ts']}"}
+    assert _state(result).owed == []
+
+
+async def test_a_thread_longer_than_a_page_resumes_after_its_last_read_reply(
+    parents_reader: ParentsReader,
+) -> None:
+    root = {"ts": "1700000100.000100", "user": "U1", "text": "long", "reply_count": 3}
+    replies = [
+        {"ts": f"17000002{i}0.000100", "thread_ts": root["ts"], "user": "U1", "text": f"r{i}"}
+        for i in range(3)
+    ]
+    asked: list[dict[str, object]] = []
+    limit_second = [True]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/users.list":
+            return _ok({"members": []})
+        body = json.loads(request.content)
+        if request.url.path == HISTORY_PATH:
+            return _ok({"messages": [root]} if "oldest" not in body else {"messages": []})
+        asked.append(body)
+        if "oldest" not in body:
+            return _ok(
+                {"messages": [root, *replies[:2]], "response_metadata": {"next_cursor": "c"}}
+            )
+        if limit_second[0]:
+            return httpx.Response(429, headers={"retry-after": "60"}, json={"ok": False})
+        later = [reply for reply in replies if reply["ts"] > body["oldest"]]
+        return _ok({"messages": [root, *later]})
+
+    first = await _fetch("messages", handle, parents=parents_reader(ONE_CHANNEL))
+
+    assert _refs(first) == {f"messages/C1:{m['ts']}" for m in (root, *replies[:2])}
+    assert _state(first).owed == [root["ts"]]
+    assert _state(first).reading == {root["ts"]: replies[1]["ts"]}
+
+    limit_second[0] = False
+    asked.clear()
+    second = await _fetch(
+        "messages", handle, cursor=first.next_cursor, parents=parents_reader(ONE_CHANNEL)
+    )
+
+    assert [body.get("oldest") for body in asked] == [replies[1]["ts"]]
+    assert _refs(second) == {f"messages/C1:{replies[2]['ts']}"}
+    assert _state(second).owed == []
+    assert _state(second).reading == {}
