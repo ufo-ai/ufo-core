@@ -24,10 +24,12 @@ holds an app outside its Marketplace to one call a minute of each method, 15 obj
 reply read never sits between a history page and its checkpoint. The first 429 from
 `conversations.replies` closes reading replies for the rest of the run, and the owed roots wait for
 the next one. A reply to an old thread moves neither the channel nor the root's `ts`, only its
-`latest_reply`, so once every `THREAD_REREAD_INTERVAL_SECONDS` a steady-state pass re-reads the
-roots of the last `THREAD_LOOKBACK_DAYS` below the watermark, one history page a pass resuming from
-`ThreadCheckpoint.below`, and owes each root whose `latest_reply` moved. A partition with no
-checkpoint is due at once, which is how replies reach a channel synced before they were read at all.
+`latest_reply`, so once every `THREAD_REREAD_INTERVAL_SECONDS` steady-state passes re-read the roots
+of the last `THREAD_LOOKBACK_DAYS` below the watermark, one history page a pass resuming from
+`ThreadCheckpoint.below`, and owe each root whose `latest_reply` moved. A pass makes one history
+call a channel, so while a re-read runs its pages take turns with the channel's new messages. A
+partition with no checkpoint is due at once, which is how replies reach a channel synced before they
+were read at all.
 A grant that can't enumerate at all (`users.list`/`conversations.list` refused for a
 missing scope, `ok=false` or a 403) can read no stream, so the walk raises `StreamSkipped` and the
 run records a skip, not a failure; a per-channel refusal deeper in the history walk skips that
@@ -286,33 +288,18 @@ class SlackConnector(RestConnector):
         stored = dict(state.roots)
         state.roots = {ts: latest for ts, latest in stored.items() if ts >= lookback}
         owes = stream.name in REPLY_STREAMS
-        params: dict[str, Any] = {"channel": channel_id}
-        if bound.after:
-            params["oldest"] = bound.after
-        else:
-            if bound.before:
-                params["latest"] = bound.before
-            if bound.since:
-                params["oldest"] = bound.since
-        async for raw_messages in self._history(
-            client, target.path, params, inclusive=not bound.after
-        ):
-            self._owe(state, stored, raw_messages, lookback, owes=owes)
-            yield self._message_page(
-                stream,
-                channel_id,
-                raw_messages,
-                users,
-                self_user_id,
-                span=True,
-                checkpoint=_changed(state, bound.checkpoint),
-            )
         now = time.time()
-        rereads = bool(bound.after) and lookback <= (bound.after or "")
-        if rereads and (state.below is not None or state.due is None or now >= state.due):
+        rereading = (
+            bool(bound.after)
+            and lookback <= str(bound.after)
+            and (state.below is not None or state.due is None or now >= state.due)
+        )
+        if rereading and state.reread_turn:
+            state.reread_turn = False
             page = await self._reread_page(
                 client, target.path, channel_id, lookback, state.below or str(bound.after)
             )
+            moved: list[dict[str, Any]] = []
             if page is not None:
                 messages, more = page
                 moved = [
@@ -324,15 +311,40 @@ class SlackConnector(RestConnector):
                 state.below = min(raw["ts"] for raw in messages) if more and messages else None
                 if state.below is None:
                     state.due = now + THREAD_REREAD_INTERVAL_SECONDS
+            yield self._message_page(
+                stream,
+                channel_id,
+                moved,
+                users,
+                self_user_id,
+                span=False,
+                checkpoint=state.model_dump_json(),
+            )
+        else:
+            state.reread_turn = rereading
+            params: dict[str, Any] = {"channel": channel_id}
+            if bound.after:
+                params["oldest"] = bound.after
+            else:
+                if bound.before:
+                    params["latest"] = bound.before
+                if bound.since:
+                    params["oldest"] = bound.since
+            async for raw_messages in self._history(
+                client, target.path, params, inclusive=not bound.after
+            ):
+                self._owe(state, stored, raw_messages, lookback, owes=owes)
                 yield self._message_page(
                     stream,
                     channel_id,
-                    moved,
+                    raw_messages,
                     users,
                     self_user_id,
-                    span=False,
-                    checkpoint=state.model_dump_json(),
+                    span=True,
+                    checkpoint=_changed(state, bound.checkpoint),
                 )
+            if rereading:
+                yield WalkPage(records=[], checkpoint=state.model_dump_json())
         for root_ts in list(state.owed):
             more = True
             while more:
@@ -592,6 +604,7 @@ class ThreadCheckpoint(BaseModel):
     owed: list[str] = []
     reading: dict[str, str] = {}
     due: float | None = None
+    reread_turn: bool = True
     below: str | None = None
 
 
