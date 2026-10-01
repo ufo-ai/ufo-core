@@ -21,12 +21,12 @@ watermark (`oldest`). A busy channel advancing never skips a quiet one.
 whole through `conversations.replies` and the replies land as messages and participants on the
 root's page; the walk's span stays the history page's, since a reply's `ts` is not the channel's
 order. A reply to an old thread moves neither the channel nor the root's `ts`, only its
-`latest_reply`, so a steady-state pass, after the channel's new messages, re-reads the roots of the
-last `THREAD_LOOKBACK_DAYS` below the watermark and reads again each one whose `latest_reply`
-differs from the partition's checkpoint `{root ts: latest_reply}`, landing each with no span and its
-own checkpoint, so a rate limit in the re-read keeps what it read and never holds back new messages.
-A partition with no checkpoint reads every root in the window once, which is how replies reach a
-channel synced before they were read at all.
+`latest_reply`, so once every `THREAD_REREAD_INTERVAL_SECONDS` a steady-state pass, after the
+channel's new messages, re-reads the roots of the last `THREAD_LOOKBACK_DAYS` below the watermark
+and reads again each one whose `latest_reply` differs from the partition's `ThreadCheckpoint`. Each
+re-read root and each re-read history page lands with no span and its own checkpoint, so a rate
+limit resumes the re-read where it stopped and never holds back new messages. A partition with no
+checkpoint is due at once, which is how replies reach a channel synced before they were read at all.
 A grant that can't enumerate at all (`users.list`/`conversations.list` refused for a
 missing scope, `ok=false` or a 403) can read no stream, so the walk raises `StreamSkipped` and the
 run records a skip, not a failure; a per-channel refusal deeper in the history walk skips that
@@ -34,12 +34,13 @@ channel and the others still sync. Message streams reject the Slack surface's ex
 id before deriving message, thread, or participant records; another app's `bot_id` remains source
 material. The write path is intentionally absent — the source seam only reads."""
 
-import json
-from collections.abc import AsyncIterator, Mapping
+import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ufo.sdk.sources import (
     CHAT_BACKFILL_WINDOW_DAYS,
@@ -65,7 +66,9 @@ HISTORY_TYPES = "public_channel,private_channel,mpim,im"
 HISTORY_PATH = "/api/conversations.history"
 REPLIES_PATH = "/api/conversations.replies"
 REPLIES_PAGE_SIZE = 200
+REREAD_PAGE_SIZE = 200
 THREAD_LOOKBACK_DAYS = 7
+THREAD_REREAD_INTERVAL_SECONDS = 3600.0
 REPLY_STREAMS = frozenset({"messages", "message_participants"})
 SNIPPET_CAP = 240
 
@@ -273,8 +276,9 @@ class SlackConnector(RestConnector):
         the POST body rather than the query."""
         target = httpx.URL(partition.path)
         channel_id = target.params["channel"]
-        stored = _stored_roots(bound.checkpoint)
-        roots = {ts: latest for ts, latest in stored.items() if ts >= lookback}
+        state = _thread_checkpoint(bound.checkpoint)
+        stored = dict(state.roots)
+        state.roots = {ts: latest for ts, latest in stored.items() if ts >= lookback}
         params: dict[str, Any] = {"channel": channel_id}
         if bound.after:
             params["oldest"] = bound.after
@@ -284,11 +288,11 @@ class SlackConnector(RestConnector):
             if bound.since:
                 params["oldest"] = bound.since
         async for raw_messages in self._history(
-            client, target.path, params, inclusive=not bound.after
+            client, target.path, params, inclusive=not bound.after, limit=HISTORY_PAGE_SIZE
         ):
             threaded = [raw for raw in raw_messages if _is_root(raw)]
             replies = await self._thread_replies(client, stream, channel_id, threaded)
-            roots |= _root_entries(threaded, lookback)
+            state.roots |= _root_entries(threaded, lookback)
             yield self._message_page(
                 stream,
                 channel_id,
@@ -297,21 +301,23 @@ class SlackConnector(RestConnector):
                 users,
                 self_user_id,
                 span=True,
-                checkpoint=_checkpoint(roots, stored),
+                checkpoint=_changed(state, bound.checkpoint),
             )
+        now = time.time()
         if not bound.after or lookback > bound.after:
             return
+        if state.below is None and state.due is not None and now < state.due:
+            return
+        reread = {"channel": channel_id, "oldest": lookback, "latest": state.below or bound.after}
         async for raw_messages in self._history(
-            client,
-            target.path,
-            {"channel": channel_id, "oldest": lookback, "latest": bound.after},
-            inclusive=True,
+            client, target.path, reread, inclusive=True, limit=REREAD_PAGE_SIZE
         ):
             for root in raw_messages:
                 if not _is_root(root) or stored.get(root["ts"]) == root.get("latest_reply"):
                     continue
                 replies = await self._thread_replies(client, stream, channel_id, [root])
-                roots |= _root_entries([root], lookback)
+                state.roots |= _root_entries([root], lookback)
+                state.below = root["ts"]
                 yield self._message_page(
                     stream,
                     channel_id,
@@ -320,8 +326,13 @@ class SlackConnector(RestConnector):
                     users,
                     self_user_id,
                     span=False,
-                    checkpoint=_checkpoint(roots, stored),
+                    checkpoint=state.model_dump_json(),
                 )
+            state.below = min(raw["ts"] for raw in raw_messages)
+            yield WalkPage(records=[], checkpoint=state.model_dump_json())
+        state.below = None
+        state.due = now + THREAD_REREAD_INTERVAL_SECONDS
+        yield WalkPage(records=[], checkpoint=state.model_dump_json())
 
     async def _history(
         self,
@@ -330,11 +341,12 @@ class SlackConnector(RestConnector):
         bounds: dict[str, Any],
         *,
         inclusive: bool,
+        limit: int,
     ) -> AsyncIterator[list[dict[str, Any]]]:
         cursor: str | None = None
         while True:
             params = bounds | {
-                "limit": HISTORY_PAGE_SIZE,
+                "limit": limit,
                 "inclusive": "true" if inclusive else "false",
             }
             if cursor:
@@ -501,22 +513,30 @@ def _root_entries(roots: list[dict[str, Any]], lookback: str) -> dict[str, str]:
     return {raw["ts"]: str(raw.get("latest_reply") or "") for raw in roots if raw["ts"] >= lookback}
 
 
-def _stored_roots(stored: str | None) -> Mapping[str, str]:
-    """The roots this partition's last pass read. Anything but a map of strings reads as empty,
-    which costs one re-read of the window and never a lost reply."""
+class ThreadCheckpoint(BaseModel):
+    """What one channel's thread re-read has seen: each root of the window's `latest_reply`, when
+    the next re-read is due, and how far down an unfinished one reached."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    roots: dict[str, str] = {}
+    due: float | None = None
+    below: str | None = None
+
+
+def _thread_checkpoint(stored: str | None) -> ThreadCheckpoint:
+    """An unreadable checkpoint costs one re-read of the window, never a lost reply."""
     if stored is None:
-        return {}
+        return ThreadCheckpoint()
     try:
-        parsed = json.loads(stored)
-    except ValueError:
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    return {key: value for key, value in parsed.items() if isinstance(value, str)}
+        return ThreadCheckpoint.model_validate_json(stored)
+    except ValidationError:
+        return ThreadCheckpoint()
 
 
-def _checkpoint(roots: Mapping[str, str], stored: Mapping[str, str]) -> str | None:
-    return None if roots == stored else json.dumps(roots, sort_keys=True)
+def _changed(state: ThreadCheckpoint, stored: str | None) -> str | None:
+    encoded = state.model_dump_json()
+    return None if encoded == stored or (stored is None and not state.roots) else encoded
 
 
 def _next_cursor(data: dict[str, Any]) -> str | None:
