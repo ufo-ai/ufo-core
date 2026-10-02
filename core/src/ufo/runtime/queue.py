@@ -7,7 +7,6 @@ from collections.abc import Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from functools import partial
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -21,7 +20,7 @@ from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import AUTO_MODEL
 from ufo.harness.models.pricing import ModelPrice, Pricing, pricing_from
-from ufo.harness.models.registry import MemberAccounts, ModelRegistry, ServingModel
+from ufo.harness.models.registry import ModelRegistry, ModelRoute, ModelRoutes, ServingModel
 from ufo.harness.o11y import (
     emit_histogram,
     emit_metric,
@@ -116,7 +115,7 @@ from ufo.runtime.subagents import (
     Subagents,
 )
 from ufo.runtime.tools.bridge import TOOL_BRIDGE_URL, TOOL_BRIDGE_URL_ENV
-from ufo.runtime.tools.context import SPAWN_CONNECT_PATH, UnknownSubagentProfile
+from ufo.runtime.tools.context import UnknownSubagentProfile
 from ufo.runtime.tools.registry import ACTION_READ_TOOLS, OBJECT_ACTION_TOOL, ToolDef, ToolRegistry
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.activity import (
@@ -137,6 +136,7 @@ from ufo.runtime.workspace import (
     ResolvedModelClient,
     model_credentials,
     ws,
+    ws_current,
 )
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -233,6 +233,9 @@ class _BillingIdentity(_Rates):
     funding: Funding | None = None
     payer: str | None = None
     alternates: dict[str, _Rates] = {}
+    alternate_order: tuple[str, ...] = ()
+    alternate_funding: dict[str, Funding] = {}
+    alternate_payers: dict[str, str] = {}
 
     def pricing(self) -> Pricing:
         return Pricing(
@@ -243,9 +246,20 @@ class _BillingIdentity(_Rates):
             digest=self.price_digest,
         )
 
-
-def _plan_pricing(models: tuple[str, ...]) -> Pricing:
-    return pricing_from(dict.fromkeys(models, PLAN_SERVED_PRICE))
+    def routes(self) -> tuple[ModelRoute, ...]:
+        if self.funding is None or self.payer is None:
+            raise ModelFundingChanged("model route has no frozen payer")
+        return (
+            ModelRoute(self.model, self.funding, self.payer),
+            *(
+                ModelRoute(
+                    model,
+                    self.alternate_funding.get(model, self.funding),
+                    self.alternate_payers.get(model, self.payer),
+                )
+                for model in self.alternate_order or tuple(self.alternates)
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -253,14 +267,17 @@ class _TurnBilling:
     registry: ModelRegistry
     turn_id: UUID
     attempt: str
-    candidate_model: str
-    alternates: tuple[str, ...] = ()
+    candidates: tuple[str, ...]
 
     async def resolve(self) -> tuple[_BillingIdentity, ResolvedModelClient, bool]:
         billing = await _stored_billing_identity(self.turn_id, self.attempt)
         if billing is None:
-            model = await self.registry.client_for(self.candidate_model)
-            candidate = self._identity(self.candidate_model, model)
+            model = await self.registry.client_for(self.candidates[0])
+            routes = [ModelRoute(self.candidates[0], model.funding, model.payer)]
+            for candidate_model in self.candidates[1:]:
+                payer = await self.registry.payer_for(candidate_model)
+                routes.append(ModelRoute(candidate_model, payer.funding, payer.payer))
+            candidate = self._identity(tuple(routes))
             billing = await _frozen_billing_identity(self.turn_id, candidate)
             if billing != candidate:
                 model = await self.registry.client_for(billing.model)
@@ -272,22 +289,37 @@ class _TurnBilling:
             raise ModelFundingChanged("model payer changed during turn attempt")
         return billing, model, byok
 
-    def _identity(self, model: str, resolved: ResolvedModelClient) -> _BillingIdentity:
-        card = (
-            _plan_pricing((model, *self.alternates))
-            if resolved.funding == PLAN_FUNDED
-            else self.registry.pricing
-        )
+    def _identity(self, routes: tuple[ModelRoute, ...]) -> _BillingIdentity:
+        models = tuple(route.model for route in routes)
+        if all(route.funding == PLAN_FUNDED for route in routes):
+            card = pricing_from(dict.fromkeys(models, PLAN_SERVED_PRICE))
+        elif all(route.funding != PLAN_FUNDED for route in routes):
+            card = self.registry.pricing
+        else:
+            card = pricing_from(
+                {
+                    route.model: (
+                        PLAN_SERVED_PRICE
+                        if route.funding == PLAN_FUNDED
+                        else self.registry.pricing.prices[route.model]
+                    )
+                    for route in routes
+                }
+            )
+        first, *alternates = routes
         return _BillingIdentity(
-            **_Rates.of(card.prices[model]).model_dump(),
+            **_Rates.of(card.prices[first.model]).model_dump(),
             attempt=self.attempt,
-            model=model,
+            model=first.model,
             price_digest=card.digest,
-            funding=resolved.funding,
-            payer=resolved.payer,
+            funding=first.funding,
+            payer=first.payer,
             alternates={
-                alternate: _Rates.of(card.prices[alternate]) for alternate in self.alternates
+                alternate.model: _Rates.of(card.prices[alternate.model]) for alternate in alternates
             },
+            alternate_order=tuple(alternate.model for alternate in alternates),
+            alternate_funding={alternate.model: alternate.funding for alternate in alternates},
+            alternate_payers={alternate.model: alternate.payer for alternate in alternates},
         )
 
     @staticmethod
@@ -296,9 +328,6 @@ class _TurnBilling:
             raise ModelFundingChanged("model funding changed during turn attempt")
         if billing.payer is not None and billing.payer != model.payer:
             raise ModelFundingChanged("model payer changed during turn attempt")
-        plan_digest = _plan_pricing((billing.model, *billing.alternates)).digest
-        if (billing.price_digest == plan_digest) != (model.funding == PLAN_FUNDED):
-            raise ModelFundingChanged("model funding changed during turn attempt")
 
 
 async def _without_workspace_skills(name: str) -> None:
@@ -399,97 +428,47 @@ def _agent_actions(
     return frozenset(action.canonical_id for action in declared if action.canonical_id in names)
 
 
-class SubagentKeyWithdrawn(Exception):
-    """A profile that runs on the speaking member's own provider account reached execution with no
-    account able to serve it. Either the member disconnected the account after the spawn gate
-    admitted the turn, or every account they connected is rate limited and the work has nowhere
-    left to move. The deploy's key is not a fallback for either: it is exactly what this profile
-    exists not to spend.
-
-    Both arms carry the same address the spawn refusal does, because the member reading either is
-    in the same position — no account of theirs can run the work, and the screen that connects or
-    replaces one is what they need. `rate_limited` names which arm they landed on, so the message
-    tells them what to fix without sending them to a second screen."""
-
-    def __init__(
-        self, profile: str, connect_url: str | None = None, rate_limited: bool = False
-    ) -> None:
-        connect = f"{connect_url.rstrip('/')}{SPAWN_CONNECT_PATH}" if connect_url else "the portal"
-        cause = (
-            "every account they connected is rate limited right now"
-            if rate_limited
-            else "that account is no longer connected"
-        )
-        super().__init__(
-            f"subagent profile {profile!r} runs the coding agent on the member's own ChatGPT or "
-            f"Claude account, and {cause}, so this task cannot run. "
-            f"Send them to {connect}"
-        )
-        self.profile = profile
-        self.rate_limited = rate_limited
-
-
-def _member_accounts_connectable(runtime: "Runtime") -> bool:
-    """Whether any installed extension can store a member's own provider account."""
-    return any(manifest.connects_member_accounts for manifest in runtime.manifests)
-
-
-def _subagent_model(
+def _subagent_models(
     profile: SubagentProfile,
-    connected: str | None,
     agent: Agent,
     runtime: "Runtime",
     pinned: str | None,
     document: str | None,
-) -> str:
-    """A bare pin cannot reach an own-account profile: the account was not bound to serve that id,
-    so the turn would fall through to the deploy's key."""
-    if profile.needs_own_model_key:
-        if document is not None:
-            return runtime.registry.resolve(document)
-        own = profile.own_key_models.get(connected or "")
-        if own is not None:
-            return runtime.registry.resolve(own)
-        if _member_accounts_connectable(runtime):
-            raise SubagentKeyWithdrawn(profile.name, runtime.config.connect.public_base_url)
-        if profile.model is None:
-            raise SubagentKeyWithdrawn(profile.name, runtime.config.connect.public_base_url)
-        return runtime.registry.resolve(profile.model)
-    if pinned is not None:
-        return pinned
-    return runtime.registry.resolve(profile.model or agent.model)
-
-
-def _own_account_alternates(
-    profile: SubagentProfile,
-    connected: tuple[str, ...],
-    chosen: str,
-    document: str | None,
-    runtime: "Runtime",
-) -> tuple[str, ...] | None:
-    if not profile.needs_own_model_key or document is not None:
-        return None
-    own = tuple(
+) -> tuple[str, ...]:
+    if document is not None or pinned is not None:
+        return (runtime.registry.resolve(document or pinned or ""),)
+    if not profile.models:
+        return (runtime.registry.resolve(agent.model),)
+    connected = tuple(
         runtime.registry.resolve(model)
-        for provider in connected
-        if (model := profile.own_key_models.get(provider)) is not None
+        for model in profile.models[:-1]
+        if ws_current().routed_model_call(runtime.registry.resolve(model))
     )
-    if chosen not in own:
-        return None
-    return tuple(model for model in own if model != chosen)
+    return (*connected, runtime.registry.resolve(profile.models[-1]))
 
 
-def _model_routes(
+async def _model_routes(
     profile: SubagentProfile | None,
     accounts: tuple[ModelAccountCapability, ...],
     runtime: "Runtime",
+    pinned: str | None,
 ) -> Mapping[str, str]:
-    if profile is None:
+    if profile is None and pinned is None:
         return {}
+    models = (
+        (runtime.registry.resolve(pinned),)
+        if pinned is not None
+        else tuple(
+            runtime.registry.resolve(model)
+            for model in (() if profile is None else profile.models[:-1])
+        )
+    )
     return {
-        runtime.registry.resolve(model): account.slot
+        model: account.slot
         for account in accounts
-        if (model := profile.own_key_models.get(account.provider)) is not None
+        if await ws_current().credential_is_stored(account.slot)
+        for model in models
+        if runtime.registry.provider_for(model) == account.provider
     }
 
 
@@ -750,6 +729,7 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                             tables.turn.c.parent_turn_id,
                             tables.turn.c.admission_source,
                             tables.turn.c.model_accounts,
+                            tables.turn.c.runtime_config,
                         ).where(
                             tables.turn.c.id == turn_uuid,
                             tables.turn.c.workspace_id == workspace_uuid,
@@ -762,6 +742,19 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                 if row.subagent_profile is not None
                 else None
             )
+            runtime_config = (
+                None
+                if row.runtime_config is None
+                else TurnRuntimeConfig.model_validate(row.runtime_config)
+            )
+            model_routes = await _model_routes(
+                profile,
+                tuple(
+                    ModelAccountCapability.model_validate(account) for account in row.model_accounts
+                ),
+                runtime,
+                None if runtime_config is None else runtime_config.model,
+            )
             gates = _turn_gates(row.parent_turn_id, row.admission_source)
             queued = time.monotonic()
             async with AsyncExitStack() as held:
@@ -772,16 +765,7 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                 await _apply_provisions(runtime, workspace_uuid)
                 with (
                     agent(row.agent_id),
-                    model_credentials(
-                        _model_routes(
-                            profile,
-                            tuple(
-                                ModelAccountCapability.model_validate(account)
-                                for account in row.model_accounts
-                            ),
-                            runtime,
-                        )
-                    ),
+                    model_credentials(model_routes),
                     turn_span(
                         turn_uuid,
                         row.conversation_id,
@@ -957,9 +941,10 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             hub=runtime.hub,
             invoker=runtime.invoker_for(turn.workspace_id),
             spend=runtime.spend,
-            connect_url=runtime.config.connect.public_base_url,
             models=tuple(runtime.registry.specs),
-            member_accounts_connectable=_member_accounts_connectable(runtime),
+            model_providers={
+                model: spec.provider for model, spec in runtime.registry.specs.items()
+            },
         )
 
         payload: dict[str, Any] = (
@@ -980,52 +965,31 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             if document_model is not None:
                 runtime.registry.spec(document_model)
                 pinned_model = document_model
+        candidates: tuple[str, ...]
         if profile is None:
-            resolved_model = (
-                pinned_model if pinned_model is not None else runtime.registry.resolve(agent.model)
+            candidates = (
+                pinned_model if pinned_model is not None else runtime.registry.resolve(agent.model),
             )
         else:
-            connected = tuple(account.provider for account in turn.model_accounts)
-            resolved_model = _subagent_model(
-                profile,
-                connected[0] if connected else None,
-                agent,
-                runtime,
-                pinned_model,
-                document_model,
-            )
-        alternates = (
-            None
-            if profile is None
-            else _own_account_alternates(
-                profile, connected, resolved_model, document_model, runtime
-            )
-        )
+            candidates = _subagent_models(profile, agent, runtime, pinned_model, document_model)
         billing, model, byok = await _TurnBilling(
             registry=runtime.registry,
             turn_id=turn.id,
             attempt=attempt,
-            candidate_model=resolved_model,
-            alternates=alternates or (),
+            candidates=candidates,
         ).resolve()
+        routes = billing.routes()
+        first, *remaining = routes
         serving = ServingModel(
             model=billing.model,
             spec=runtime.registry.spec(billing.model),
             client=model.client,
-            accounts=(
+            funding=first.funding,
+            payer=first.payer,
+            routes=(
                 None
-                if profile is None or alternates is None
-                else MemberAccounts(
-                    registry=runtime.registry,
-                    funding=model.funding,
-                    alternates=tuple(billing.alternates),
-                    exhausted=partial(
-                        SubagentKeyWithdrawn,
-                        profile.name,
-                        runtime.config.connect.public_base_url,
-                        rate_limited=True,
-                    ),
-                )
+                if not remaining
+                else ModelRoutes(registry=runtime.registry, remaining=tuple(remaining))
             ),
         )
         boundary = await flagged_context_boundary(runtime.config, runtime.manifests)

@@ -43,8 +43,10 @@ from ufo.runtime.ext.context import CredentialAccess, ExtensionContext, ScopedSt
 from ufo.runtime.workspace import (
     KEY_FUNDED,
     PLAN_FUNDED,
-    Funding,
+    PLATFORM_FUNDED,
+    PLATFORM_PAYER,
     ModelFundingChanged,
+    ModelPayer,
     ResolvedModelClient,
     ws,
 )
@@ -1631,6 +1633,20 @@ async def test_a_recovery_uses_the_model_and_prices_that_started_the_attempt(db:
         cache_write_5m=4,
         cache_write_30m=5,
         cache_write_1h=6,
+        funding=PLATFORM_FUNDED,
+        payer=PLATFORM_PAYER,
+        alternates={
+            model: loop_queue._Rates(
+                input=1,
+                output=2,
+                cache_read=3,
+                cache_write_5m=4,
+                cache_write_30m=5,
+                cache_write_1h=6,
+            )
+            for model in ("claude-sonnet-5", "claude-opus-5")
+        },
+        alternate_order=("claude-sonnet-5", "claude-opus-5"),
     )
     changed = first.model_copy(
         update={
@@ -1648,6 +1664,11 @@ async def test_a_recovery_uses_the_model_and_prices_that_started_the_attempt(db:
 
     assert frozen == first
     assert recovered == first
+    assert tuple(route.model for route in recovered.routes()) == (
+        "claude-opus-4-8",
+        "claude-sonnet-5",
+        "claude-opus-5",
+    )
     assert resumed == changed.model_copy(update={"attempt": "attempt-2"})
 
 
@@ -1672,7 +1693,7 @@ async def test_a_recovery_cannot_move_the_frozen_model_to_another_payer(db: None
         registry=cast(ModelRegistry, first_registry),
         turn_id=turn_id,
         attempt="attempt-1",
-        candidate_model="claude-opus-4-8",
+        candidates=("claude-opus-4-8",),
     ).resolve()
 
     recovered_registry = Registry("anthropic_api_key")
@@ -1681,7 +1702,7 @@ async def test_a_recovery_cannot_move_the_frozen_model_to_another_payer(db: None
             registry=cast(ModelRegistry, recovered_registry),
             turn_id=turn_id,
             attempt="attempt-1",
-            candidate_model="gpt-5.4",
+            candidates=("gpt-5.4",),
         ).resolve()
 
     assert (billing.funding, billing.payer, byok) == (
@@ -1694,46 +1715,66 @@ async def test_a_recovery_cannot_move_the_frozen_model_to_another_payer(db: None
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_an_attempt_freezes_a_rate_for_every_account_it_may_move_onto(db: None) -> None:
-    """A turn on the member's own account may move onto their other account mid-attempt."""
+async def test_an_attempt_freezes_a_rate_and_payer_for_every_model_route(db: None) -> None:
     async with workspace_tx() as connection:
         _, keyed_turn = await _seed_turn(connection)
         _, plan_turn = await _seed_turn(connection)
+        _, mixed_turn = await _seed_turn(connection)
 
     class Registry:
         pricing = CORE_PRICING
 
-        def __init__(self, funding: str) -> None:
-            self.funding = funding
+        def __init__(self, payers: dict[str, ModelPayer]) -> None:
+            self.payers = payers
 
         async def client_for(self, model: str) -> ResolvedModelClient:
+            payer = self.payers[model]
             return ResolvedModelClient(
                 cast(ModelClient, object()),
-                cast(Funding, self.funding),
-                "openai_api_key:member:first",
+                payer.funding,
+                payer.payer,
             )
 
+        async def payer_for(self, model: str) -> ModelPayer:
+            return self.payers[model]
+
+    models = ("gpt-5.6-sol", "claude-opus-5")
+    keyed_registry = Registry({model: ModelPayer(KEY_FUNDED, "workspace-key") for model in models})
     keyed, _, keyed_byok = await loop_queue._TurnBilling(
-        registry=cast(ModelRegistry, Registry(KEY_FUNDED)),
+        registry=cast(ModelRegistry, keyed_registry),
         turn_id=keyed_turn,
         attempt="attempt-1",
-        candidate_model="gpt-5.6-sol",
-        alternates=("claude-opus-5",),
+        candidates=models,
     ).resolve()
-    plan_registry = cast(ModelRegistry, Registry(PLAN_FUNDED))
+    plan_registry = cast(
+        ModelRegistry,
+        Registry({model: ModelPayer(PLAN_FUNDED, f"member/{model}") for model in models}),
+    )
     plan, _, plan_byok = await loop_queue._TurnBilling(
         registry=plan_registry,
         turn_id=plan_turn,
         attempt="attempt-1",
-        candidate_model="gpt-5.6-sol",
-        alternates=("claude-opus-5",),
+        candidates=models,
     ).resolve()
     recovered, _, _ = await loop_queue._TurnBilling(
         registry=plan_registry,
         turn_id=plan_turn,
         attempt="attempt-1",
-        candidate_model="gpt-5.6-sol",
-        alternates=("claude-opus-5",),
+        candidates=models,
+    ).resolve()
+    mixed, _, mixed_byok = await loop_queue._TurnBilling(
+        registry=cast(
+            ModelRegistry,
+            Registry(
+                {
+                    "gpt-5.6-sol": ModelPayer(PLAN_FUNDED, "member/openai"),
+                    "claude-opus-5": ModelPayer(PLATFORM_FUNDED, PLATFORM_PAYER),
+                }
+            ),
+        ),
+        turn_id=mixed_turn,
+        attempt="attempt-1",
+        candidates=models,
     ).resolve()
 
     assert keyed.pricing().prices == {
@@ -1746,8 +1787,16 @@ async def test_an_attempt_freezes_a_rate_for_every_account_it_may_move_onto(db: 
         "claude-opus-5": loop_queue.PLAN_SERVED_PRICE,
     }
     assert plan.pricing().digest != keyed.pricing().digest
+    assert mixed.pricing().prices == {
+        "gpt-5.6-sol": loop_queue.PLAN_SERVED_PRICE,
+        "claude-opus-5": CORE_PRICES["claude-opus-5"],
+    }
+    assert [(route.model, route.funding, route.payer) for route in mixed.routes()] == [
+        ("gpt-5.6-sol", PLAN_FUNDED, "member/openai"),
+        ("claude-opus-5", PLATFORM_FUNDED, PLATFORM_PAYER),
+    ]
     assert recovered == plan
-    assert (keyed_byok, plan_byok) == (True, True)
+    assert (keyed_byok, plan_byok, mixed_byok) == (True, True, True)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

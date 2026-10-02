@@ -207,7 +207,7 @@ PINNED_PROFILE = SubagentProfile(
     tool_names=(),
     input_model=RoundTripInput,
     output_model=RoundTripOutput,
-    model=PINNED_MODEL,
+    models=(PINNED_MODEL,),
     reasoning="high",
 )
 

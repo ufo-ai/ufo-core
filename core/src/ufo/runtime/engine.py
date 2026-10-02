@@ -248,6 +248,7 @@ from ufo.runtime.turns.transcript import (
     ParkedTurn,
 )
 from ufo.runtime.turns.workspace_changes import WorkspaceChangeRecorder, change_targets
+from ufo.runtime.workspace import PLATFORM_FUNDED
 from ufo.schema import tables
 from ufo.schema.records import (
     CANCELLED,
@@ -730,29 +731,32 @@ class _RoundWindow:
 
 @dataclass(frozen=True)
 class _Segment:
-    """One account's share of an attempt's burn: the model that served it, the ledger series it
+    """One route's share of an attempt's burn: the model that served it, the ledger series it
     bills under, and the usage it consumed."""
 
     model: str
     attempt: str
     usage: Usage
+    byok: bool
 
 
 @dataclass
 class _Burn:
-    """The starting account keeps the attempt's ledger series: a rolling deploy's recovery advances
+    """The starting route keeps the attempt's ledger series: a rolling deploy's recovery advances
     the row the outgoing image wrote at shutdown."""
 
-    left: list[tuple[str, int]] = field(default_factory=list)
+    left: list[tuple[str, int, bool]] = field(default_factory=list)
 
     def segments(
-        self, serving: str, attempt: str, usage_events: Sequence[Usage]
+        self, serving: str, attempt: str, usage_events: Sequence[Usage], serving_byok: bool
     ) -> tuple[_Segment, ...]:
         cut: list[_Segment] = []
         start = 0
-        for index, (model, end) in enumerate((*self.left, (serving, len(usage_events)))):
+        for index, (model, end, byok) in enumerate(
+            (*self.left, (serving, len(usage_events), serving_byok))
+        ):
             series = attempt if index == 0 else f"{attempt}/{model}"
-            cut.append(_Segment(model, series, _total_usage(usage_events[start:end])))
+            cut.append(_Segment(model, series, _total_usage(usage_events[start:end]), byok))
             start = end
         return tuple(cut)
 
@@ -2954,7 +2958,7 @@ class TurnEngine:
         while True:
             result = await self._stream_once(round_input)
             usage_events.extend(result.usages)
-            if result.error_class == ModelAccountRateLimited.__name__ and await self._move_account(
+            if result.error_class == ModelAccountRateLimited.__name__ and await self._move_route(
                 usage_events
             ):
                 continue
@@ -2981,25 +2985,43 @@ class TurnEngine:
                 attempt=interruptions,
             )
 
-    async def _move_account(self, usage_events: list[Usage]) -> bool:
+    async def _move_route(self, usage_events: list[Usage]) -> bool:
         left = self.serving.model
+        funding = self.serving.funding
         if not await self.serving.move():
             return False
-        self._burn.left.append((left, len(usage_events)))
+        self._burn.left.append((left, len(usage_events), funding != PLATFORM_FUNDED))
         log(
-            "model.account_failover",
+            "model.route_failover",
             turn_id=str(self.turn.id),
             model=left,
             moved_to=self.serving.model,
         )
+        if self.serving.routes is not None and not self.serving.routes.remaining:
+            await self._publish(Activity(text=f"Continuing on {self.serving.model}."))
         return True
 
     def _priced(self, usage_events: Sequence[Usage]) -> int:
-        """This attempt's burn in micro-USD, each account's share at the rate of the model that
+        """This attempt's burn in micro-USD, each route's share at the rate of the model that
         served it."""
         return sum(
             self.pricing.micro_usd(segment.model, segment.usage)
-            for segment in self._burn.segments(self.serving.model, self.attempt, usage_events)
+            for segment in self._segments(usage_events)
+        )
+
+    def _platform_priced(self, usage_events: Sequence[Usage]) -> int:
+        return sum(
+            self.pricing.micro_usd(segment.model, segment.usage)
+            for segment in self._segments(usage_events)
+            if not segment.byok
+        )
+
+    def _segments(self, usage_events: Sequence[Usage]) -> tuple[_Segment, ...]:
+        return self._burn.segments(
+            self.serving.model,
+            self.attempt,
+            usage_events,
+            self.serving.funding != PLATFORM_FUNDED,
         )
 
     async def _enforce_spend(
@@ -3007,8 +3029,7 @@ class TurnEngine:
         usage_events: list[Usage],
         requesters: dict[UUID, ActiveMessage],
     ) -> None:
-        """BYOK spend weighs zero: holding a BYOK turn against spend it never takes parks it, the
-        dispatcher resumes it, and it parks again at the same point forever."""
+        """Caps weigh every route's price; spend gates weigh only platform-paid segments."""
         await self._enforce_seats(requesters)
         member_id = self.turn.speaker_member_id
         if not applicable_caps_absent(self.turn.workspace_id, member_id, self.turn.agent_id):
@@ -3025,7 +3046,7 @@ class TurnEngine:
                 connection,
                 self.turn.workspace_id,
                 self.turn.id,
-                0 if self.byok else self._priced(usage_events),
+                self._platform_priced(usage_events),
             )
         if sustained.outcome != ALLOW:
             raise TurnParked(sustained.message)
@@ -4688,9 +4709,9 @@ class TurnEngine:
     async def _record_usage(
         self, connection: AsyncConnection, usage_events: Sequence[Usage]
     ) -> None:
-        """Bill this attempt's burn: one cumulative ledger row per account that served it, each
+        """Bill this attempt's burn: one cumulative ledger row per route that served it, each
         under the model that burned the tokens and at that model's rate."""
-        for segment in self._burn.segments(self.serving.model, self.attempt, usage_events):
+        for segment in self._segments(usage_events):
             await self.ledger.record_turn_usage(
                 connection,
                 self.turn.workspace_id,
@@ -4699,7 +4720,7 @@ class TurnEngine:
                 segment.usage,
                 segment.attempt,
                 pricing=self.pricing,
-                byok=self.byok,
+                byok=segment.byok,
             )
 
     async def _bill_cancelled(self, usage_events: list[Usage]) -> None:

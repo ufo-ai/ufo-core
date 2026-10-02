@@ -5,7 +5,7 @@ fails loud at `spec`, rather than across a mid-turn 400, a render crash, and a s
 provider resolves its own api key when the turn selects it, so a serve missing one key runs fine
 until an agent pinned to that backend actually runs."""
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from ufo.config import Config
@@ -27,6 +27,7 @@ from ufo.runtime.workspace import (
     PLATFORM_PAYER,
     Funding,
     ModelFundingChanged,
+    ModelPayer,
     ResolvedModelClient,
     ws_current,
 )
@@ -61,36 +62,30 @@ class _RebuiltOnRejection:
             yield event
 
 
-@dataclass
-class MemberAccounts:
-    """The member's own connected accounts behind one turn: the funding class the attempt's billing
-    froze against the account it began on, the models the other accounts serve in the order the
-    first was chosen by, and the fault the turn raises once every account is spent.
+@dataclass(frozen=True)
+class ModelRoute:
+    """One model and the exact funding identity an attempt froze for it."""
 
-    A member who connected both a Claude and a ChatGPT account bought two subscriptions, so the
-    provider rate-limiting the one in hand is not the end of the work: `next` resolves the account
-    the work moves onto. It holds the move to the rule `_RebuiltOnRejection` holds a rebuild to. The
-    funding class must be the one the attempt froze, and the payer must be the exact capability
-    slot for the moved model — never the workspace's row or the deploy's key, because that spend is
-    exactly what a profile on the member's account exists to prevent, and the frozen `byok` verdict
-    and rate card would record it as costing nothing."""
+    model: str
+    funding: Funding
+    payer: str
+
+
+@dataclass
+class ModelRoutes:
+    """The ordered models remaining after the route currently serving a turn."""
 
     registry: "ModelRegistry"
-    funding: Funding
-    alternates: tuple[str, ...]
-    exhausted: Callable[[], Exception]
+    remaining: tuple[ModelRoute, ...]
 
-    async def next(self) -> tuple[ModelSpec, ModelClient]:
-        if not self.alternates:
-            raise self.exhausted()
-        model, self.alternates = self.alternates[0], self.alternates[1:]
-        spec = self.registry.spec(model)
-        resolved = await self.registry.client_for(model)
-        if resolved.funding != self.funding or resolved.payer != ws_current().routed_model_payer(
-            model
-        ):
-            raise ModelFundingChanged("model payer changed during account failover")
-        return spec, resolved.client
+    async def next(self) -> tuple[ModelSpec, ModelClient, ModelRoute] | None:
+        if not self.remaining:
+            return None
+        route, self.remaining = self.remaining[0], self.remaining[1:]
+        resolved = await self.registry.client_for(route.model)
+        if resolved.funding != route.funding or resolved.payer != route.payer:
+            raise ModelFundingChanged("model payer changed during route failover")
+        return self.registry.spec(route.model), resolved.client, route
 
 
 @dataclass
@@ -100,28 +95,31 @@ class ServingModel:
     fact the turn derives from a model id reads off this holder, so a move leaves nothing keyed to
     the model the turn began on.
 
-    A turn on the member's own account also holds `accounts`; `move` swaps the holder onto the next
-    of them when the provider rate-limits the one in hand. The engine moves only on a round the
+    A turn with alternate routes also holds `routes`; `move` swaps the holder onto the next one
+    when the provider rate-limits the one in hand. The engine moves only on a round the
     provider refused before its first event — the one shape a rate-limit fault takes, since a
     stream that already delivered fails as an interrupted stream instead — so the moved round
     replays the same canonical messages under the new model id, and a crash-recovery replay of the
     recorded rounds moves at the same round the first run did. A transcript carries one thing the
     second provider cannot read — the first one's reasoning blocks — and each client drops the
-    other's. A turn the workspace or the deploy pays for holds no accounts and never moves: its
-    rate-limited round is the provider's fault like any other."""
+    other's."""
 
     model: str
     spec: ModelSpec
     client: ModelClient
-    accounts: MemberAccounts | None = None
+    funding: Funding = PLATFORM_FUNDED
+    payer: str = PLATFORM_PAYER
+    routes: ModelRoutes | None = None
 
     async def move(self) -> bool:
-        """Move onto the member's next account, or say that this turn has none to move to. With
-        accounts but none left, raises the fault their caller named."""
-        if self.accounts is None:
+        """Move onto the next model route, or say that this turn has none left."""
+        if self.routes is None:
             return False
-        self.spec, self.client = await self.accounts.next()
-        self.model = self.spec.id
+        moved = await self.routes.next()
+        if moved is None:
+            return False
+        self.spec, self.client, route = moved
+        self.model, self.funding, self.payer = route.model, route.funding, route.payer
         return True
 
 
@@ -190,6 +188,13 @@ class ModelRegistry:
             )
         return ResolvedModelClient(built, credential.funding, credential.payer)
 
+    async def payer_for(self, model: str) -> ModelPayer:
+        """Resolve the funding identity `client_for` will bind without constructing its client."""
+        spec = self.spec(model)
+        if not spec.key_slot and not spec.key_env:
+            return ModelPayer(PLATFORM_FUNDED, PLATFORM_PAYER)
+        return await ws_current().model_payer(spec.key_slot, spec.key_env or None, model)
+
     def provider_for(self, model: str) -> str:
         """The provider that serves `model` — the `provider` metric dimension its calls are metered
         under, so an off-turn call splits by backend the way a turn's round does. Loud on an id no
@@ -227,9 +232,10 @@ def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegi
     price table their entries build. A duplicate id — two specs claiming one slug — fails loud, so a
     contributed model never silently shadows a core one, and so does a configured model naming no
     registered spec: an agent that defers its model resolves through `auto_model` every turn, every
-    ambient reply decision resolves through `ambient_reply_model`, and every background job's own
-    model call resolves through `background_jobs_model`, so a typo in any of the three is one boot
-    failure rather than a mid-turn failure per workspace."""
+    ambient reply decision resolves through `ambient_reply_model`, every background job's own model
+    call resolves through `background_jobs_model`, and every subagent route names its models
+    directly, so a typo in any of them is one boot failure rather than a mid-turn failure per
+    workspace."""
     core = core_model_specs(config.models.anthropic_api_key_env, config.models.openai_api_key_env)
     specs: dict[str, ModelSpec] = {}
     for spec in (*core, *(spec for manifest in manifests for spec in manifest.models)):
@@ -251,6 +257,15 @@ def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegi
             f"models.background_jobs_model {config.models.background_jobs_model!r} is not a "
             "registered model id — every background job's model call resolves through it"
         )
+    for manifest in manifests:
+        for profile in manifest.subagents:
+            for model in profile.models:
+                resolved = config.models.auto_model if model == AUTO_MODEL else model
+                if resolved not in specs:
+                    raise ValueError(
+                        f"subagent profile {profile.name!r} model {model!r} is not a registered "
+                        "model id"
+                    )
     return ModelRegistry(
         specs=specs,
         pricing=pricing_from({model: spec.price for model, spec in specs.items()}),

@@ -112,12 +112,11 @@ from ufo.runtime.jobs import TurnDispatcher
 from ufo.runtime.seats import create_member
 from ufo.runtime.subagents import FINISH_CONTRACT, SubagentProfile, SubagentRegistry, Subagents
 from ufo.runtime.surfaces.admission import Admission
-from ufo.runtime.tools.context import SPAWN_CONNECT_PATH
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.turns.transcript import Conversation, ParkedTurn
 from ufo.runtime.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
-from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
+from ufo.runtime.workspace import init_workspace_credentials, model_credentials, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
     INTENT_ADMISSION,
@@ -706,8 +705,7 @@ OWN_ACCOUNT_PROFILE = SubagentProfile(
     tool_names=(),
     input_model=RoundTripInput,
     output_model=RoundTripOutput,
-    own_key_models={"openai": OWN_ACCOUNT_MODEL},
-    needs_own_model_key=True,
+    models=(OWN_ACCOUNT_MODEL, BACKGROUND_MODEL),
 )
 
 
@@ -758,7 +756,10 @@ async def test_only_a_turn_that_needs_the_members_account_runs_on_it(
         SimpleNamespace(
             hub=InProcessHub(),
             subagents=SubagentRegistry((OWN_ACCOUNT_PROFILE,)),
-            registry=SimpleNamespace(resolve=lambda model: model),
+            registry=SimpleNamespace(
+                resolve=lambda model: model,
+                provider_for=lambda model: "openai",
+            ),
         ),
     )
 
@@ -805,6 +806,7 @@ class ConnectedAccountModel:
 
 
 PLAN_ACCOUNT_MODEL = "claude-opus-4-8"
+PLAN_FALLBACK_MODEL = "claude-sonnet-5"
 
 
 PLAN_ACCOUNT_PROFILE = SubagentProfile(
@@ -813,8 +815,7 @@ PLAN_ACCOUNT_PROFILE = SubagentProfile(
     tool_names=(),
     input_model=RoundTripInput,
     output_model=RoundTripOutput,
-    own_key_models={"anthropic": PLAN_ACCOUNT_MODEL},
-    needs_own_model_key=True,
+    models=(PLAN_ACCOUNT_MODEL, PLAN_FALLBACK_MODEL),
 )
 
 
@@ -1561,7 +1562,7 @@ async def test_subagent_bills_under_its_profile_model_not_the_parents(
             )
         ).scalar_one()
     assert sibling.subagent_profile == "roundtrip"
-    assert ROUNDTRIP_PROFILE.model is None
+    assert ROUNDTRIP_PROFILE.models == ()
     assert PINNED_PROFILE.output_model is ROUNDTRIP_PROFILE.output_model
     assert sibling_model == "claude-opus-4-8"
 
@@ -2111,168 +2112,58 @@ async def test_profile_only_tools_stay_out_of_main_agent_turns(surface: Turns) -
     assert all("spawn" not in names for names in child_offers)
 
 
-def test_a_profile_on_the_members_account_has_no_deploy_model_to_fall_back_to() -> None:
+def test_profile_model_route_uses_connected_models_then_its_fallback() -> None:
     agent = SimpleNamespace(model="workspace-model")
-    runtime = SimpleNamespace(
-        registry=SimpleNamespace(resolve=lambda model: model),
-        config=SimpleNamespace(connect=SimpleNamespace(public_base_url="https://ufo.example")),
-        manifests=(SimpleNamespace(connects_member_accounts=True),),
+    runtime = SimpleNamespace(registry=SimpleNamespace(resolve=lambda model: model))
+    profile = replace(
+        OWN_ACCOUNT_PROFILE,
+        models=("claude-opus-5", OWN_ACCOUNT_MODEL, "z-ai/glm-5.3"),
     )
 
-    assert (
-        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, "openai", agent, runtime, None, None)
-        == OWN_ACCOUNT_MODEL
-    )
-    with pytest.raises(loop_queue.SubagentKeyWithdrawn):
-        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, None, agent, runtime, None, None)
-    with pytest.raises(loop_queue.SubagentKeyWithdrawn):
-        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, "anthropic", agent, runtime, None, None)
-
-    ordinary = replace(OWN_ACCOUNT_PROFILE, needs_own_model_key=False, own_key_models={})
-    assert loop_queue._subagent_model(ordinary, None, agent, runtime, None, None) == (
-        "workspace-model"
-    )
-
-
-def test_a_pinned_model_cannot_move_a_coding_turn_onto_the_deploys_key() -> None:
-    """A member pinning a model on their conversation pins it for the work that runs on the
-    deploy's account."""
-    agent = SimpleNamespace(model="workspace-model")
-    runtime = SimpleNamespace(
-        registry=SimpleNamespace(resolve=lambda model: model),
-        config=SimpleNamespace(connect=SimpleNamespace(public_base_url="https://ufo.example")),
-        manifests=(SimpleNamespace(connects_member_accounts=True),),
-    )
-
-    assert (
-        loop_queue._subagent_model(
-            OWN_ACCOUNT_PROFILE, "openai", agent, runtime, "pinned-model", None
-        )
-        == OWN_ACCOUNT_MODEL
-    )
-    with pytest.raises(loop_queue.SubagentKeyWithdrawn):
-        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, None, agent, runtime, "pinned-model", None)
-
-    ordinary = replace(OWN_ACCOUNT_PROFILE, needs_own_model_key=False, own_key_models={})
-    assert (
-        loop_queue._subagent_model(ordinary, None, agent, runtime, "pinned-model", None)
-        == "pinned-model"
-    )
-
-
-def test_an_environment_document_moves_a_coding_turn_onto_the_workspaces_key() -> None:
-    """The stored document is the workspace's explicit, attested spend choice, so its model
-    reaches even the own-account profile — connected or not — where a bare pin never does."""
-    agent = SimpleNamespace(model="workspace-model")
-    runtime = SimpleNamespace(
-        registry=SimpleNamespace(resolve=lambda model: model),
-        config=SimpleNamespace(connect=SimpleNamespace(public_base_url="https://ufo.example")),
-        manifests=(SimpleNamespace(connects_member_accounts=True),),
-    )
-
-    for connected in ("openai", None):
-        assert (
-            loop_queue._subagent_model(
-                OWN_ACCOUNT_PROFILE, connected, agent, runtime, "document-model", "document-model"
+    with ws(uuid4()):
+        assert loop_queue._subagent_models(profile, agent, runtime, None, None) == ("z-ai/glm-5.3",)
+        with model_credentials(
+            {"claude-opus-5": "anthropic/member", OWN_ACCOUNT_MODEL: "openai/member"}
+        ):
+            assert loop_queue._subagent_models(profile, agent, runtime, None, None) == (
+                "claude-opus-5",
+                OWN_ACCOUNT_MODEL,
+                "z-ai/glm-5.3",
             )
-            == "document-model"
-        )
 
 
-def test_a_withdrawn_account_hands_over_the_same_address_the_spawn_refusal_does() -> None:
-    """A member whose account went missing between admitting a turn and running it is in the same
-    position as one who never connected: the fix is the same screen."""
-    runtime = SimpleNamespace(
-        registry=SimpleNamespace(resolve=lambda model: model),
-        config=SimpleNamespace(connect=SimpleNamespace(public_base_url="https://ufo.example/")),
-        manifests=(SimpleNamespace(connects_member_accounts=True),),
-    )
+def test_explicit_model_replaces_the_profile_route() -> None:
     agent = SimpleNamespace(model="workspace-model")
-
-    with pytest.raises(loop_queue.SubagentKeyWithdrawn) as withdrawn:
-        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, None, agent, runtime, None, None)
-
-    named = str(withdrawn.value)
-    assert f"https://ufo.example{SPAWN_CONNECT_PATH}" in named
-    assert "ChatGPT or Claude" in named
-    assert OWN_ACCOUNT_PROFILE.name in named
-
-
-def test_a_rate_limited_turn_moves_onto_every_other_account_the_member_connected() -> None:
-    """A member who connected two accounts bought two subscriptions, so the limit of the one the
-    turn started on is not the end of the work."""
     runtime = SimpleNamespace(registry=SimpleNamespace(resolve=lambda model: model))
-    both = replace(
-        OWN_ACCOUNT_PROFILE,
-        own_key_models={"openai": OWN_ACCOUNT_MODEL, "anthropic": "claude-opus-5"},
-    )
 
-    assert loop_queue._own_account_alternates(
-        both, ("openai", "anthropic"), OWN_ACCOUNT_MODEL, None, runtime
-    ) == ("claude-opus-5",)
-    assert loop_queue._own_account_alternates(
-        both, ("anthropic", "openai"), "claude-opus-5", None, runtime
-    ) == (OWN_ACCOUNT_MODEL,)
-    assert (
-        loop_queue._own_account_alternates(both, ("openai",), OWN_ACCOUNT_MODEL, None, runtime)
-        == ()
-    )
+    with ws(uuid4()), model_credentials({OWN_ACCOUNT_MODEL: "openai/member"}):
+        assert loop_queue._subagent_models(
+            OWN_ACCOUNT_PROFILE, agent, runtime, "requested-model", None
+        ) == ("requested-model",)
 
 
-def test_a_turn_the_workspace_pays_for_runs_on_no_member_account() -> None:
+def test_environment_document_replaces_the_profile_route() -> None:
+    agent = SimpleNamespace(model="workspace-model")
     runtime = SimpleNamespace(registry=SimpleNamespace(resolve=lambda model: model))
-    both = replace(
-        OWN_ACCOUNT_PROFILE,
-        own_key_models={"openai": OWN_ACCOUNT_MODEL, "anthropic": "claude-opus-5"},
-    )
-    ordinary = replace(both, needs_own_model_key=False, own_key_models={})
 
-    assert (
-        loop_queue._own_account_alternates(
-            both, ("openai", "anthropic"), "document-model", "document-model", runtime
-        )
-        is None
-    )
-    assert (
-        loop_queue._own_account_alternates(
-            ordinary, ("openai", "anthropic"), "workspace-model", None, runtime
-        )
-        is None
-    )
+    with ws(uuid4()), model_credentials({OWN_ACCOUNT_MODEL: "openai/member"}):
+        assert loop_queue._subagent_models(
+            OWN_ACCOUNT_PROFILE,
+            agent,
+            runtime,
+            "requested-model",
+            "document-model",
+        ) == ("document-model",)
 
 
-def test_a_profile_run_on_the_deploys_key_holds_no_member_account() -> None:
-    """A deploy with no extension that connects an account runs the profile on its own declared
-    pin and the deploy's key, with no account of the member's behind it."""
+def test_a_profile_without_models_inherits_the_workspace_agent_model() -> None:
+    agent = SimpleNamespace(model="workspace-model")
     runtime = SimpleNamespace(registry=SimpleNamespace(resolve=lambda model: model))
-    pinned_profile = replace(OWN_ACCOUNT_PROFILE, model="profile-pin")
 
-    assert (
-        loop_queue._own_account_alternates(pinned_profile, (), "profile-pin", None, runtime) is None
-    )
-    assert (
-        loop_queue._own_account_alternates(
-            pinned_profile, ("openai",), OWN_ACCOUNT_MODEL, None, runtime
-        )
-        == ()
-    )
-
-
-def test_an_exhausted_account_names_the_limit_rather_than_a_missing_connection() -> None:
-    """A member whose accounts are all rate limited did not disconnect anything: telling them to
-    reconnect sends them to a screen that shows the account already there."""
-    limited = loop_queue.SubagentKeyWithdrawn(
-        OWN_ACCOUNT_PROFILE.name, "https://ufo.example/", rate_limited=True
-    )
-    withdrawn = loop_queue.SubagentKeyWithdrawn(OWN_ACCOUNT_PROFILE.name, "https://ufo.example/")
-
-    assert limited.rate_limited
-    assert "every account they connected is rate limited right now" in str(limited)
-    assert "no longer connected" not in str(limited)
-    assert not withdrawn.rate_limited
-    assert "that account is no longer connected" in str(withdrawn)
-    for fault in (limited, withdrawn):
-        assert f"https://ufo.example{SPAWN_CONNECT_PATH}" in str(fault)
+    with ws(uuid4()):
+        assert loop_queue._subagent_models(
+            replace(OWN_ACCOUNT_PROFILE, models=()), agent, runtime, None, None
+        ) == ("workspace-model",)
 
 
 @asynccontextmanager
@@ -2335,29 +2226,3 @@ async def test_the_scheduled_slot_gates_only_scheduled_model_loop_turns() -> Non
     scheduled = loop_queue._turn_gates(None, SCHEDULED_ADMISSION)
     assert len(scheduled) == 1 and isinstance(scheduled[0], asyncio.Semaphore)
     assert scheduled[0]._value == loop_queue.SCHEDULED_TURN_CONCURRENCY
-
-
-def test_a_deploy_that_cannot_hold_an_account_runs_the_profile_on_its_own_key() -> None:
-    """A pack shipping `coding` and no extension that connects an account — the eval packs are
-    exactly that shape — has no member to refuse."""
-    agent = SimpleNamespace(model="workspace-model")
-    pinned_profile = replace(OWN_ACCOUNT_PROFILE, model="profile-pin")
-
-    def runtime_with(connectable: bool) -> SimpleNamespace:
-        return SimpleNamespace(
-            registry=SimpleNamespace(resolve=lambda model: model),
-            config=SimpleNamespace(connect=SimpleNamespace(public_base_url="https://ufo.example")),
-            manifests=(SimpleNamespace(connects_member_accounts=connectable),),
-        )
-
-    assert (
-        loop_queue._subagent_model(pinned_profile, None, agent, runtime_with(False), None, None)
-        == "profile-pin"
-    )
-    with pytest.raises(loop_queue.SubagentKeyWithdrawn):
-        loop_queue._subagent_model(pinned_profile, None, agent, runtime_with(True), None, None)
-
-    assert (
-        loop_queue._subagent_model(pinned_profile, "openai", agent, runtime_with(False), None, None)
-        == OWN_ACCOUNT_MODEL
-    )

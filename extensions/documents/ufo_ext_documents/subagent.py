@@ -59,5 +59,5 @@ WRITING_PROFILE = SubagentProfile(
     tool_names=WRITING_TOOL_NAMES,
     input_model=WritingTask,
     output_model=WritingResult,
-    model=WRITING_MODEL,
+    models=(WRITING_MODEL,),
 )

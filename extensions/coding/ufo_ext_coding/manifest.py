@@ -10,11 +10,11 @@ skill that routes work to it.
  the prompt with the shared citation/formatting discipline and fills its skill index. The `coding`
  skill teaches the main agent to route repo work to that child.
 
-`coding` runs on Opus. `spawn("fable_escalation", ...)` is the last rung on one pull-request
-blocker: the same tools and the same input contract on a stronger pinned model, with its own prompt
-for a worker that two `coding` children already failed in front of. It reads wider than the diff,
-makes one attempt, and reports. Each model is pinned on its profile because the caller chooses the
-rung by naming the target.
+`coding` prefers connected Claude and ChatGPT accounts in that order, then falls back to GLM.
+`spawn("fable_escalation", ...)` is the last rung on one pull-request blocker: the same tools and
+the same input contract on a stronger pinned model, with its own prompt for a worker that two
+`coding` children already failed in front of. It reads wider than the diff, makes one attempt, and
+reports.
 
 The pack ships no agent. It is the machinery a durable one runs on — the child profiles and the
  skill — and a durable agent with work of its own is an application: it ships as its own
@@ -54,10 +54,7 @@ CODING_TOOL_NAMES = (
 )
 CODING_PROMPT = (Path(__file__).parent / "prompts" / "subagent_coding.md").read_text()
 CODING_ROUND_LIMIT = 500
-"""What the coding profile runs on where no member account can be held: the deploy's own Opus
-key."""
-CODING_MODEL = "claude-opus-5-5"
-CODING_MODELS = {"anthropic": "claude-opus-5-5", "openai": "gpt-5.6-sol"}
+CODING_MODELS = ("claude-opus-5-5", "gpt-5.6-sol", "z-ai/glm-5.3")
 FABLE_ESCALATION_PROFILE_NAME = "fable_escalation"
 FABLE_ESCALATION_MODEL = "anthropic/claude-fable-5.1"
 FABLE_ESCALATION_PROMPT = (
@@ -90,9 +87,7 @@ CODING_PROFILE = SubagentProfile(
     input_model=CodingInput,
     output_model=CodingOutput,
     max_rounds=CODING_ROUND_LIMIT,
-    model=CODING_MODEL,
-    own_key_models=CODING_MODELS,
-    needs_own_model_key=True,
+    models=CODING_MODELS,
 )
 
 FABLE_ESCALATION_PROFILE = SubagentProfile(
@@ -102,7 +97,7 @@ FABLE_ESCALATION_PROFILE = SubagentProfile(
     input_model=CodingInput,
     output_model=CodingOutput,
     max_rounds=CODING_ROUND_LIMIT,
-    model=FABLE_ESCALATION_MODEL,
+    models=(FABLE_ESCALATION_MODEL,),
 )
 
 REPOSITORY_PROFILE_NAMES = frozenset({CODING_PROFILE_NAME, FABLE_ESCALATION_PROFILE_NAME})

@@ -67,7 +67,7 @@ RESEARCH_PROFILE = SubagentProfile(
     tool_names=RESEARCH_TOOL_NAMES,
     input_model=ResearchInput,
     output_model=ResearchOutput,
-    model=RESEARCH_MODEL,
+    models=(RESEARCH_MODEL,),
     reasoning=RESEARCH_REASONING,
     concise_parent_handoff=True,
 )
@@ -78,6 +78,6 @@ DEEP_RESEARCH_PROFILE = SubagentProfile(
     input_model=ResearchInput,
     output_model=ResearchOutput,
     max_rounds=DEEP_RESEARCH_ROUND_LIMIT,
-    model=DEEP_RESEARCH_MODEL,
+    models=(DEEP_RESEARCH_MODEL,),
     concise_parent_handoff=True,
 )

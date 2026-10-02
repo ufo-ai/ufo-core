@@ -11,7 +11,7 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
-from ufo_ext_coding.manifest import CODING_MODEL, CODING_PROFILE
+from ufo_ext_coding.manifest import CODING_MODELS, CODING_PROFILE
 
 from ufo.db import workspace_tx
 from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, OPENAI_KEY_SLOT
@@ -28,7 +28,6 @@ from ufo.runtime.access.credentials import CredentialStore, member_slot
 from ufo.runtime.ext.manifest import SubagentProfile
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
 from ufo.runtime.subagents import SubagentRegistry
-from ufo.runtime.tools.context import SPAWN_CONNECT_PATH, SpawnNeedsOwnModelKey
 from ufo.runtime.turns.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
@@ -133,11 +132,13 @@ async def test_an_agent_shadowed_by_a_profile_is_listed_qualified(db: None) -> N
     assert "| `agent:scout` | agent |" in skill.instructions
 
 
-async def test_a_profile_on_the_members_own_key_shadows_their_agent(db: None) -> None:
+async def test_a_profile_with_a_model_route_shadows_their_agent(db: None) -> None:
     workspace_id = await _workspace_with_agents({"coding": None})
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     init_workspace_credentials(store)
-    registry = SubagentRegistry((replace(_profile("coding"), needs_own_model_key=True),))
+    registry = SubagentRegistry(
+        (replace(_profile("coding"), models=("claude-opus-5", "z-ai/glm-5.3")),)
+    )
 
     with ws(workspace_id):
         listed = spawn_catalog_skill(await spawn_targets(registry, SHARED_AUDIENCE))
@@ -207,7 +208,7 @@ async def test_the_catalog_stands_on_its_own_in_the_index(db: None) -> None:
     assert (SPAWN_CATALOG_SKILL_NAME, SPAWN_CATALOG_DESCRIPTION) in registry.index()
 
 
-async def test_a_profile_on_the_members_own_key_is_listed_whether_or_not_they_connected(
+async def test_a_profile_with_a_model_route_is_listed_whether_or_not_they_connected(
     db: None,
 ) -> None:
     """Connecting a provider is a skippable onboarding step, and the coding subagent is what
@@ -219,7 +220,7 @@ async def test_a_profile_on_the_members_own_key_is_listed_whether_or_not_they_co
     registry = SubagentRegistry(
         (
             _profile("research"),
-            replace(_profile("coding"), needs_own_model_key=True),
+            replace(_profile("coding"), models=("claude-opus-5", "z-ai/glm-5.3")),
         )
     )
 
@@ -281,44 +282,25 @@ async def test_the_provider_a_member_connected_is_the_one_they_are_read_as(db: N
         )
 
 
-def test_a_member_key_outranks_the_profiles_own_model_pin() -> None:
-    """The coding subagent is gated on the member having connected an account, so it must also
-    RUN on that account."""
+def test_a_profile_model_route_preserves_priority_order() -> None:
     profile = replace(
         _profile("coding"),
-        model="anthropic.claude-opus-5",
-        needs_own_model_key=True,
-        own_key_models={PROVIDER_ANTHROPIC: "claude-opus-5", PROVIDER_OPENAI: "gpt-5.6-sol"},
+        models=("claude-opus-5", "gpt-5.6-sol", "z-ai/glm-5.3"),
     )
 
-    assert profile.own_key_models.get(PROVIDER_ANTHROPIC) == "claude-opus-5"
-    assert profile.own_key_models.get(PROVIDER_OPENAI) == "gpt-5.6-sol"
-    assert (profile.own_key_models.get(PROVIDER_ANTHROPIC) or profile.model) == "claude-opus-5"
-    assert (profile.own_key_models.get("") or profile.model) == "anthropic.claude-opus-5"
+    assert profile.models == ("claude-opus-5", "gpt-5.6-sol", "z-ai/glm-5.3")
 
 
-def test_the_shipped_coding_profile_runs_only_on_a_members_own_account() -> None:
-    assert CODING_PROFILE.needs_own_model_key
-    assert CODING_PROFILE.model == CODING_MODEL
-    assert set(CODING_PROFILE.own_key_models) == {PROVIDER_ANTHROPIC, PROVIDER_OPENAI}
-
-
-def test_the_refusal_hands_over_the_address_that_satisfies_it() -> None:
-    """The first run offers to connect an account, but a member whose workspace already exists
-    never sees that screen again — so the refusal is where most members meet the requirement."""
-    named = str(SpawnNeedsOwnModelKey("coding", "https://ufo.example/"))
-    assert SPAWN_CONNECT_PATH == "/surface/web#/connectors"
-    assert f"https://ufo.example{SPAWN_CONNECT_PATH}" in named
-    assert "coding" in named
-    assert "ChatGPT or Claude" in named
-    assert "under Coding providers" in named
-    assert "another available route only if the member asks" in named
-    assert "Do not retry" not in named
-    assert "OpenAI" not in named and "Anthropic" not in named
-
-    unconfigured = str(SpawnNeedsOwnModelKey("coding"))
-    assert "the portal" in unconfigured
-    assert "surface/web" not in unconfigured
+def test_the_shipped_coding_profile_prefers_connected_accounts_then_glm() -> None:
+    assert (
+        CODING_PROFILE.models
+        == CODING_MODELS
+        == (
+            "claude-opus-5-5",
+            "gpt-5.6-sol",
+            "z-ai/glm-5.3",
+        )
+    )
 
 
 async def test_the_payload_description_names_every_targets_keys(db: None) -> None:

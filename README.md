@@ -47,7 +47,7 @@ To host UFO yourself, run one process on SQLite and local files, with no Docker.
 
 ```bash
 make install
-cp .env.template .env   # set UFO_ANTHROPIC_API_KEY and UFO_OPENAI_API_KEY
+cp .env.template .env   # set the three model API keys
 make build
 make init EMAIL=email@work.com
 make serve

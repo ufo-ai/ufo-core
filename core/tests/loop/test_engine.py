@@ -74,7 +74,7 @@ from ufo.harness.models.interface import (
     ToolSchema,
     ToolUseBlock,
 )
-from ufo.harness.models.registry import MemberAccounts, ModelRegistry
+from ufo.harness.models.registry import ModelRegistry, ModelRoute, ModelRoutes
 from ufo.harness.models.spec import ModelSpec
 from ufo.harness.rounds import ModelRetryAfter, ModelStreamInterrupted
 from ufo.harness.sandbox.session import (
@@ -267,7 +267,11 @@ from ufo.runtime.turns.workspace_changes import (
     recorded_workspace_changes,
 )
 from ufo.runtime.workspace import (
+    KEY_FUNDED,
     PLAN_FUNDED,
+    PLATFORM_FUNDED,
+    PLATFORM_PAYER,
+    Funding,
     ResolvedModelClient,
     init_workspace_credentials,
     model_credentials,
@@ -7095,15 +7099,13 @@ class OtherAccountModel:
         yield Usage(input_tokens=5, output_tokens=7)
 
 
-def _other_account(client: object, member: UUID) -> ModelRegistry:
+def _route_registry(client: object, funding: Funding, payer: str) -> ModelRegistry:
     class Registry:
         def spec(self, model: str) -> ModelSpec:
             return CORE_SPECS[model]
 
         async def client_for(self, model: str) -> ResolvedModelClient:
-            return ResolvedModelClient(
-                cast(ModelClient, client), PLAN_FUNDED, member_slot(ANTHROPIC_KEY_SLOT, member)
-            )
+            return ResolvedModelClient(cast(ModelClient, client), funding, payer)
 
     return cast(ModelRegistry, Registry())
 
@@ -7116,11 +7118,18 @@ async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_acco
     first, other = LimitedAfterOneRoundModel(), OtherAccountModel()
     member = uuid4()
     engine = replace(_engine(turn, first, tmp_path, model_id="gpt-5.6-sol"), attempt="attempt-1")
-    engine.serving.accounts = MemberAccounts(
-        registry=_other_account(other, member),
-        funding=PLAN_FUNDED,
-        alternates=("claude-opus-5",),
-        exhausted=lambda: RuntimeError("every account they connected is rate limited"),
+    engine.serving.funding = PLAN_FUNDED
+    engine.serving.payer = member_slot(OPENAI_KEY_SLOT, member)
+    engine.serving.routes = ModelRoutes(
+        registry=_route_registry(other, PLAN_FUNDED, member_slot(ANTHROPIC_KEY_SLOT, member)),
+        remaining=(
+            ModelRoute(
+                "claude-opus-5",
+                PLAN_FUNDED,
+                member_slot(ANTHROPIC_KEY_SLOT, member),
+            ),
+            ModelRoute("claude-sonnet-5", PLATFORM_FUNDED, PLATFORM_PAYER),
+        ),
     )
     assert engine.context.window.context_tokens == CORE_SPECS["gpt-5.6-sol"].context_window
 
@@ -7149,6 +7158,7 @@ async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_acco
                     tables.ledger.c.input_tokens,
                     tables.ledger.c.output_tokens,
                     tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.byok,
                 )
                 .where(tables.ledger.c.turn_id == turn.id)
                 .order_by(tables.ledger.c.model)
@@ -7163,6 +7173,7 @@ async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_acco
             5,
             7,
             CORE_PRICING.micro_usd("claude-opus-5", other_burn),
+            True,
         ),
         (
             ledger_id_for(turn.workspace_id, turn.id, TOKENS_DIMENSION, "attempt-1"),
@@ -7170,6 +7181,7 @@ async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_acco
             2,
             2,
             CORE_PRICING.micro_usd("gpt-5.6-sol", first_burn),
+            True,
         ),
     ]
     assert frame.tokens == 16
@@ -7178,23 +7190,55 @@ async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_acco
     ) + CORE_PRICING.micro_usd("gpt-5.6-sol", first_burn)
 
 
-async def test_a_member_with_no_account_left_reads_the_fault_the_caller_named(
+async def test_a_rate_limited_plan_route_falls_back_to_the_deploy_model(
     db: None, tmp_path: Path
 ) -> None:
-    """A rate limit on a turn whose member holds no other account ends the turn on the fault the
-    caller named — the one that tells the member which screen fixes it."""
     turn = await _seed_turn("queued", None)
-    first = LimitedAfterOneRoundModel()
+    first, fallback = LimitedAfterOneRoundModel(), OtherAccountModel()
     first.seen.append("gpt-5.6-sol")
-    engine = _engine(turn, first, tmp_path, model_id="gpt-5.6-sol")
-    engine.serving.accounts = MemberAccounts(
-        registry=_other_account(object(), uuid4()),
-        funding=PLAN_FUNDED,
-        alternates=(),
-        exhausted=lambda: RuntimeError("every account they connected is rate limited"),
+    hub = RecordingHub()
+    member = uuid4()
+    engine = replace(_engine(turn, first, tmp_path, model_id="gpt-5.6-sol"), hub=hub)
+    engine.serving.funding = PLAN_FUNDED
+    engine.serving.payer = member_slot(OPENAI_KEY_SLOT, member)
+    engine.serving.routes = ModelRoutes(
+        registry=_route_registry(fallback, PLATFORM_FUNDED, PLATFORM_PAYER),
+        remaining=(ModelRoute("claude-opus-5", PLATFORM_FUNDED, PLATFORM_PAYER),),
     )
-    with pytest.raises(RuntimeError, match="every account they connected is rate limited"):
-        await engine.run()
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert fallback.seen == ["claude-opus-5"]
+    assert engine.serving.funding == PLATFORM_FUNDED
+    assert Activity(text="Continuing on claude-opus-5.") in hub.frames
+
+
+async def test_a_failover_activity_publish_failure_never_fails_the_turn(
+    db: None, tmp_path: Path
+) -> None:
+    @dataclass
+    class FailingActivityHub(RecordingHub):
+        async def publish(self, turn_id: UUID, frame: LiveFrame) -> str:
+            if isinstance(frame, Activity):
+                raise ConnectionError("hub unreachable")
+            return await super().publish(turn_id, frame)
+
+    turn = await _seed_turn("queued", None)
+    first, fallback = LimitedAfterOneRoundModel(), OtherAccountModel()
+    first.seen.append("gpt-5.6-sol")
+    engine = replace(
+        _engine(turn, first, tmp_path, model_id="gpt-5.6-sol"), hub=FailingActivityHub()
+    )
+    engine.serving.routes = ModelRoutes(
+        registry=_route_registry(fallback, PLATFORM_FUNDED, PLATFORM_PAYER),
+        remaining=(ModelRoute("claude-opus-5", PLATFORM_FUNDED, PLATFORM_PAYER),),
+    )
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert fallback.seen == ["claude-opus-5"]
 
 
 async def test_a_turn_on_no_member_account_fails_a_rate_limit_as_the_providers_fault(
@@ -7204,7 +7248,7 @@ async def test_a_turn_on_no_member_account_fails_a_rate_limit_as_the_providers_f
     limited = LimitedAfterOneRoundModel()
     limited.seen.append("gpt-5.6-sol")
     engine = _engine(turn, limited, tmp_path, model_id="gpt-5.6-sol")
-    assert engine.serving.accounts is None
+    assert engine.serving.routes is None
 
     with pytest.raises(ModelStreamError) as caught:
         await engine.run()
@@ -9407,14 +9451,15 @@ async def test_a_member_cap_holds_the_members_turn_in_a_workspace_conversation(
     await _engine(turn, EchoModel(), tmp_path)._enforce_spend([Usage(input_tokens=1_000_000)], {})
 
 
-async def test_a_byok_round_is_weighed_at_no_platform_spend(db: None, tmp_path: Path) -> None:
+async def test_a_key_funded_round_is_weighed_at_no_platform_spend(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn("queued", None)
     async with workspace_tx() as connection:
         await allow(connection, turn.workspace_id, 1, "park")
     burn = [Usage(input_tokens=1_000_000)]
-    await replace(
-        _engine(turn, EchoModel(), tmp_path, byok=True), spend=SAMPLE_SPEND
-    )._enforce_spend(burn, {})
+    keyed = _engine(turn, EchoModel(), tmp_path)
+    keyed.serving.funding = KEY_FUNDED
+    keyed.serving.payer = ANTHROPIC_KEY_SLOT
+    await replace(keyed, spend=SAMPLE_SPEND)._enforce_spend(burn, {})
     with pytest.raises(TurnParked, match="allowance is spent at round"):
         await replace(_engine(turn, EchoModel(), tmp_path), spend=SAMPLE_SPEND)._enforce_spend(
             burn, {}
