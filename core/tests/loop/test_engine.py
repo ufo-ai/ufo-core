@@ -5003,6 +5003,54 @@ async def test_a_tool_bridge_intent_dispatches_with_inherited_capabilities(
     assert seen == [None]
 
 
+async def _untrusted_refusal_frame(
+    tmp_path: Path, inbound: ToolIntent | ToolBridgeIntent, speaks: bool
+) -> TerminalFrame | None:
+    turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
+    owner = await _seeded_member(turn.workspace_id) if speaks else None
+    turn = turn.model_copy(update={"inbound": inbound.model_dump_json()})
+
+    async def refuse(ctx: ToolContext, args: _NoArgs) -> ToolResult:
+        raise ValueError("'none' is not a website")
+
+    tool = ToolDef(
+        name=inbound.tool,
+        description="refuses its input",
+        input_model=_NoArgs,
+        handler=refuse,
+        untrusted=True,
+        presentation=ActionPresentation(label="Next"),
+    )
+    engine = replace(
+        _engine(turn, object(), tmp_path, member_id=owner), tools=ToolRegistry((tool,))
+    )
+    return await engine.run_intent()
+
+
+async def test_a_members_refused_intent_reads_the_refusal_without_the_untrusted_wall(
+    db: None, tmp_path: Path
+) -> None:
+    frame = await _untrusted_refusal_frame(
+        tmp_path, ToolIntent(tool="connect_account", input={}), speaks=True
+    )
+    assert frame is not None and frame.error_class == "IntentRefused"
+    assert frame.error_message == "ValueError: 'none' is not a website"
+
+
+async def test_a_bridge_intents_refusal_keeps_the_untrusted_wall(db: None, tmp_path: Path) -> None:
+    frame = await _untrusted_refusal_frame(
+        tmp_path,
+        ToolBridgeIntent(request_id=uuid4(), tool="call_external_tool", input={}),
+        speaks=False,
+    )
+    assert frame is not None and frame.error_class == "IntentRefused"
+    assert frame.error_message is not None
+    assert frame.error_message.startswith(
+        UNTRUSTED_NOTICE.format(source="call_external_tool")
+        + UNTRUSTED_OPEN.format(source="call_external_tool")
+    )
+
+
 async def test_a_queued_prepared_intent_rechecks_the_speakers_seat(
     db: None, tmp_path: Path
 ) -> None:
