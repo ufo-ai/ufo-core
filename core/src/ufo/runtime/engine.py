@@ -796,7 +796,9 @@ class DispatchResult(BaseModel):
     referenced images) after the step returns. `usages` preserves every external find call the step
     consumed. A preempted body returns `interrupted=True` so DBOS records that partial usage before
     the live caller re-raises cancellation; recovery replays it, then advances to a fresh dispatch
-    step with the same tool call and idempotency key."""
+    step with the same tool call and idempotency key. `unwalled_error` is an untrusted tool's error
+    text before its wall, for the member a prepared intent's refusal reaches; it is None when the
+    error carries no wall."""
 
     tool_use_id: str
     text: str
@@ -810,6 +812,7 @@ class DispatchResult(BaseModel):
     sources: tuple[SourceRef, ...] = ()
     completion: str | None = None
     created: tuple[ObjectRef, ...] = ()
+    unwalled_error: str | None = None
 
     @model_validator(mode="after")
     def _errors_say_something(self) -> "DispatchResult":
@@ -2353,8 +2356,13 @@ class TurnEngine:
                 await self._publish_run(activity=presentation.label)
             result = await self._dispatch_step_recovering(bound, usage_events)
             if result.is_error:
+                refusal = (
+                    result.text
+                    if self.turn.speaker_member_id is None
+                    else result.unwalled_error or result.text
+                )
                 frame = await self._commit(
-                    "failed", usage_events, meter, error=IntentRefused(result.text)
+                    "failed", usage_events, meter, error=IntentRefused(refusal)
                 )
             else:
                 dispatched_result = (
@@ -4301,6 +4309,7 @@ class TurnEngine:
                 if path is not None
                 else _bounded(content)
             )
+        unwalled_error = content if handled.is_error and handled.untrusted else None
         if handled.untrusted:
             content = wall(ready.effective.call_id, content)
         if handled.is_error:
@@ -4354,6 +4363,7 @@ class TurnEngine:
             sources=handled.sources,
             completion=handled.completion,
             created=handled.created,
+            unwalled_error=unwalled_error,
         )
 
     def _redoes_on_replay(self, tool: ToolDef) -> bool:
