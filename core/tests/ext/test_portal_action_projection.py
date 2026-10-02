@@ -37,6 +37,7 @@ def test_the_portal_registry_carries_the_deploys_actions_beside_its_kinds() -> N
     registry = _sample_registry()
     assert WIDGET_KIND in registry.kinds
     assert {ENGRAVE_ACTION, POLISH_ACTION, CALIBRATE_ACTION} <= set(registry.actions[WIDGET_KIND])
+    assert {"connect_account", "action:credential:request_credentials"} <= set(registry.handoffs)
 
 
 def test_only_presented_actions_project_pre_bound_to_the_row_the_read_answered() -> None:

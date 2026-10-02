@@ -1373,6 +1373,7 @@ def _mount_shared_surfaces(
             _model=None if surface_model is None else surface_model(surface),
             _objects={} if objects is None else objects.kinds,
             _actions={} if objects is None else objects.actions,
+            _handoffs={} if objects is None else objects.handoffs,
             _frame_admissible=(
                 frozenset() if objects is None else frame_admissible(manifests, objects)
             ),

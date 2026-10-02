@@ -35,7 +35,12 @@ from pydantic import BaseModel
 
 from ufo.harness.models.interface import ToolSchema
 from ufo.runtime.access.member_authorization import AuthorizationBinding, AuthorizationScope
-from ufo.runtime.tools.context import ToolContext, ToolResult
+from ufo.runtime.tools.context import (
+    MemberHandoffContext,
+    MemberHandoffResult,
+    ToolContext,
+    ToolResult,
+)
 from ufo.schema.records import FINAL_ACT_FIELDS
 
 OBJECT_ACTION_TOOL = "object_action"
@@ -69,10 +74,11 @@ class ObjectBinding:
 @dataclass(frozen=True)
 class ActionPresentation:
     """A callable's portal control: the label a schema-derived form renders and the confirmation
-    it asks before submitting. Presence admits the callable through the prepared-intent lane; it
-    is never an authority grant — the turn carries the submitting member and the handler
-    decides. `frame` admits the callable from an embedded app page as well: a page speaks with the
-    viewer's whole session, so an act reaches that lane only by saying so."""
+    it asks before submitting. Presence projects the control but grants no authority: a prepared
+    intent carries the submitting member to `handler`, while a declared `member_handoff` receives
+    the authenticated member directly. `frame` admits the callable from an embedded app page as
+    well: a page speaks with the viewer's whole session, so an act reaches either path only by
+    saying so."""
 
     label: str
     confirm: str | None = None
@@ -98,8 +104,9 @@ class ToolDef[ModelT: BaseModel]:
     `requested_by` field and permits that ref to bind member authority; false rejects the field
     regardless of who is speaking. `standing_authorization` binds a code-defined reusable scope
     and the exact context and input its execution must retain; absent, Always Allow is
-    unavailable. `activity` is the member-facing step label the call publishes as it starts, in
-    place of the one the activity model writes."""
+    unavailable. `member_handoff` is the callable's authenticated-surface adapter: it runs the
+    same domain workflow as `handler` without constructing a turn. `activity` is the member-facing
+    step label the call publishes as it starts, in place of the one the activity model writes."""
 
     name: str
     description: str
@@ -120,6 +127,9 @@ class ToolDef[ModelT: BaseModel]:
     activity: str | None = None
     standing_authorization: (
         Callable[[ToolContext, ModelT], Awaitable[StandingAuthorization[ModelT]]] | None
+    ) = None
+    member_handoff: (
+        Callable[[MemberHandoffContext, ModelT], Awaitable[MemberHandoffResult]] | None
     ) = None
 
     @property
@@ -170,6 +180,8 @@ def validate_tool_declaration(tool: ToolDef[Any], label: str) -> None:
         raise ValueError(
             f"{label} declares standing authorization without binding member authority"
         )
+    if tool.member_handoff is not None and tool.presentation is None:
+        raise ValueError(f"{label} declares a member handoff with no presentation")
     if tool.bound is not None and tool.bound.name is not None and tool.bound.binding != "instance":
         raise ValueError(
             f"{label} pins collection action to {tool.bound.kind}/{tool.bound.name} — only an "

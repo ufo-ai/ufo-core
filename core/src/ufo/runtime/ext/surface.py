@@ -78,6 +78,7 @@ from ufo.runtime.access.connectors import CatalogPage, ConnectorRegistry
 from ufo.runtime.access.credentials import (
     CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS,
     CredentialRequestInvalid,
+    CredentialRequests,
     CredentialRequestState,
     CredentialSlotUnset,
     CredentialStore,
@@ -135,11 +136,13 @@ from ufo.runtime.media.preview_renderer import (
     render_document_cover,
 )
 from ufo.runtime.member_profiles import MemberProfile, MemberProfiles, read_profiles
+from ufo.runtime.object_scope import ObjectActionRequestTarget
 from ufo.runtime.object_views import ActionView, presented_action_views
 from ufo.runtime.objects import (
     ConversationMemberListable,
     MemberListable,
     MemberReadable,
+    ObjectActionInput,
     ObjectListQuery,
 )
 from ufo.runtime.seats import (
@@ -154,6 +157,7 @@ from ufo.runtime.seats import (
 )
 from ufo.runtime.skills.runtime import RuntimeSkill, SkillRegistry, SystemSkillBundle
 from ufo.runtime.sources.backend import ConnectorSourceConfig
+from ufo.runtime.tools.context import MemberHandoffContext, MemberHandoffResult
 from ufo.runtime.turns.ambient_reply import NO_REPLY, AmbientMessage, AmbientReplyClassifier
 from ufo.runtime.turns.audience import (
     SHARED_AUDIENCE,
@@ -194,6 +198,8 @@ from ufo.schema.records import (
     AgentVisibility,
     ArtifactRole,
     AskUserInput,
+    CredentialPrompt,
+    CredentialRequest,
     FiredBy,
     ObjectRef,
     ReasoningEffort,
@@ -223,6 +229,7 @@ if TYPE_CHECKING:
     from ufo.runtime.objects import (
         BoundAction,
         BoundKind,
+        BoundMemberHandoff,
         ConversationObjectGrant,
         MemberObject,
         ObjectPage,
@@ -2571,6 +2578,7 @@ class SurfaceContext:
     _store_environment_file: Callable[[WorkspaceBlobStore, bytes], Awaitable[str]] | None = None
     _objects: "Mapping[str, BoundKind]" = MappingProxyType({})
     _actions: "Mapping[str, Mapping[str, BoundAction]]" = MappingProxyType({})
+    _handoffs: "Mapping[str, BoundMemberHandoff]" = MappingProxyType({})
     _frame_admissible: frozenset[str] = frozenset()
     _conversation_slots: tuple["BoundConversationSlot", ...] = ()
     _sign_in_path: str | None = None
@@ -4298,6 +4306,137 @@ class SurfaceContext:
         the handler decide; `presented_action_views` states the rest of the rule."""
         return presented_action_views(
             self._actions, kind, binding, name=name, generation=generation
+        )
+
+    async def member_handoff(
+        self,
+        intent: ToolIntent,
+        *,
+        agent_id: UUID,
+        member_id: UUID,
+    ) -> MemberHandoffResult:
+        """Invoke one callable's declared direct handoff under an authenticated member session."""
+        target: ObjectActionRequestTarget | None = None
+        payload = intent.input
+        callable_id: str = intent.tool
+        if intent.tool == "object_action":
+            wire = ObjectActionInput.model_validate(intent.input)
+            if wire.agent:
+                raise ValueError("a member handoff cannot name another agent")
+            callable_id = f"action:{wire.kind}:{wire.action}"
+            payload = wire.input
+            target = ObjectActionRequestTarget(
+                kind=wire.kind,
+                name=wire.name or None,
+                agent=None,
+                expected_generation=wire.generation,
+            )
+        bound = self._handoffs.get(callable_id)
+        if bound is None or bound.callable.member_handoff is None:
+            raise ValueError(f"{callable_id!r} has no direct member handoff")
+        declared = bound.callable.bound
+        if declared is None:
+            if target is not None:
+                raise ValueError(f"{callable_id!r} is not an object action")
+        else:
+            if target is None or target.kind != declared.kind:
+                raise ValueError(f"member handoff target does not match {callable_id!r}")
+            if declared.binding == "collection" and target.name is not None:
+                raise ValueError(f"{callable_id!r} acts on the {declared.kind!r} collection")
+            if declared.binding == "instance" and target.name is None:
+                raise ValueError(f"{callable_id!r} requires an instance")
+            if declared.name is not None and target.name != declared.name:
+                raise ValueError(
+                    f"{callable_id!r} acts on {declared.kind}/{declared.name}, not "
+                    f"{declared.kind}/{target.name}"
+                )
+        args = bound.callable.input_model.model_validate(payload)
+        async with workspace_tx() as connection:
+            member = (
+                await connection.execute(
+                    sa.select(tables.member.c.is_admin, tables.member.c.seated_at).where(
+                        tables.member.c.workspace_id == self.workspace_id,
+                        tables.member.c.id == member_id,
+                    )
+                )
+            ).one_or_none()
+            held_agent = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id).where(
+                        tables.agent.c.workspace_id == self.workspace_id,
+                        tables.agent.c.id == agent_id,
+                        tables.agent.c.archived_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+        if member is None or member.seated_at is None:
+            raise ValueError("workspace access is required")
+        if held_agent is None:
+            raise ValueError("the handoff agent is unavailable")
+
+        async def request_credentials(
+            reason: str, prompts: tuple[CredentialPrompt, ...]
+        ) -> CredentialRequest:
+            return await self._request_credentials(
+                member_id,
+                reason,
+                prompts,
+                extension=bound.extension,
+            )
+
+        context = MemberHandoffContext(
+            workspace_id=self.workspace_id,
+            agent_id=agent_id,
+            member_id=member_id,
+            admin=bool(member.is_admin),
+            ext=bound.context,
+            target=target,
+            request_credentials=request_credentials,
+        )
+        with ws(self.workspace_id), bind_agent(agent_id):
+            result = await bound.callable.member_handoff(context, args)
+        return MemberHandoffResult.model_validate(result)
+
+    def has_member_handoff(self, callable_id: str) -> bool:
+        """Whether a presented callable declares direct authenticated-surface delivery."""
+        return callable_id in self._handoffs
+
+    async def _request_credentials(
+        self,
+        member_id: UUID,
+        reason: str,
+        prompts: tuple[CredentialPrompt, ...],
+        *,
+        extension: str | None,
+    ) -> CredentialRequest:
+        if self._credentials is None:
+            raise RuntimeError("no credential key is configured — this deploy cannot store secrets")
+        async with workspace_tx() as connection:
+            if not await member_is_admin(connection, self.workspace_id, member_id):
+                raise ValueError("only a workspace admin can fill credential slots")
+        workspace_declared = (
+            ()
+            if self._workspace_slots is None
+            else await self._workspace_slots.declared(self.workspace_id)
+        )
+        requests = CredentialRequests(
+            fernet=self._credentials.fernet,
+            declared=frozenset(
+                slot.name
+                for slot in self._declared_slots
+                if extension is None or slot.extension == extension
+            ),
+        )
+        return requests.request(
+            self.workspace_id,
+            member_id,
+            reason,
+            prompts,
+            {
+                slot.name: declared_slot_fingerprint(slot)
+                for slot in workspace_declared
+                if extension is None or slot.extension == extension
+            },
         )
 
     def frame_admits(self, callable_id: str) -> bool:

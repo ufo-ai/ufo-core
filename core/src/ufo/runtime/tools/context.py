@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -83,7 +83,7 @@ from ufo.runtime.media.image_previews import IMAGE_PREVIEW_MAX_BYTES, raster_ima
 from ufo.runtime.media.previews import StoredPreview
 from ufo.runtime.media.site_previewer import SitePreviewer
 from ufo.runtime.object_name import ObjectRef
-from ufo.runtime.object_scope import ObjectActionTarget
+from ufo.runtime.object_scope import ObjectActionRequestTarget, ObjectActionTarget
 from ufo.runtime.search import SearchProvider
 from ufo.runtime.seats import member_is_admin
 from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkills, SkillRegistry
@@ -95,7 +95,15 @@ from ufo.runtime.turns.audience import (
 from ufo.runtime.turns.contracts import ValidatedJson
 from ufo.runtime.turns.subjects import member_subject
 from ufo.schema import tables
-from ufo.schema.records import Agent, AgentVisibility, TerminalFrame, Turn, Usage
+from ufo.schema.records import (
+    Agent,
+    AgentVisibility,
+    CredentialPrompt,
+    CredentialRequest,
+    TerminalFrame,
+    Turn,
+    Usage,
+)
 
 if TYPE_CHECKING:
     from ufo.runtime.access.workspace_slots import WorkspaceSlots
@@ -567,6 +575,30 @@ def _speaker_required(
     return SpeakerRequired(
         f"{subject} is a member's private account{note}, and this call does not carry that member"
     )
+
+
+class MemberHandoffResult(BaseModel):
+    """The typed response a member-authenticated surface returns without admitting a turn."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    message: str = ""
+    data: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MemberHandoffContext:
+    """The authenticated member authority and scoped extension capability for one direct handoff."""
+
+    workspace_id: UUID
+    agent_id: UUID
+    member_id: UUID
+    admin: bool
+    ext: "ExtensionContext | None" = None
+    target: ObjectActionRequestTarget | None = None
+    request_credentials: (
+        Callable[[str, tuple[CredentialPrompt, ...]], Awaitable[CredentialRequest]] | None
+    ) = None
 
 
 @dataclass(frozen=True)

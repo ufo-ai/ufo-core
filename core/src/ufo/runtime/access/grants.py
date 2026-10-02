@@ -34,7 +34,7 @@ from ufo.runtime.turns.changes import turn_conversation_changed
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, connection_subject
 from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame
+from ufo.schema.records import ConnectRequest, TerminalFrame
 
 CONNECT_STATE_TTL_SECONDS = 600
 CONNECT_MEMO_SECONDS = 120
@@ -322,14 +322,15 @@ def _resume_key(state: str) -> str:
 
 class ConnectState(BaseModel):
     """The state carried across the OAuth redirect: who is granting, to which agent, for which
-    provider, in which conversation. Fernet-sealed into the `state` param so the callback trusts it
-    without a server-side pending row, and TTL-bounded so a stale handoff is refused."""
+    provider, and the conversation to resume when chat began the handoff. Fernet-sealed into the
+    `state` param so the callback trusts it without a server-side pending row, and TTL-bounded so a
+    stale handoff is refused."""
 
     workspace_id: UUID
     agent_id: UUID
     provider: str
     grantor_member_id: UUID
-    conversation_id: UUID
+    conversation_id: UUID | None = None
     shared: bool = False
     turn_id: UUID | None = None
     """The turn whose request this state was minted for, stamped when the grant lands so the reply
@@ -1014,7 +1015,7 @@ class ConnectFlow:
         agent_id: UUID,
         provider: str,
         grantor_member_id: UUID,
-        conversation_id: UUID,
+        conversation_id: UUID | None,
         shared: bool,
         turn_id: UUID | None = None,
     ) -> str:
@@ -1030,6 +1031,23 @@ class ConnectFlow:
         )
         sealed = self.fernet.encrypt(state.model_dump_json().encode()).decode()
         return descriptor.authorize_url(sealed, self.redirect_uri)
+
+    async def request(
+        self,
+        *,
+        provider: str,
+        requester_member_id: UUID,
+        shared: bool,
+        grantee_agent_id: UUID | None = None,
+    ) -> ConnectRequest:
+        """Validate a provider and return the handoff both chat and direct surfaces authorize."""
+        await self.validate_provider(provider)
+        return ConnectRequest(
+            provider=provider,
+            requester_member_id=requester_member_id,
+            shared=shared,
+            grantee_agent_id=grantee_agent_id,
+        )
 
     async def validate_provider(self, provider: str) -> None:
         if provider in self.providers:
@@ -1058,9 +1076,10 @@ class ConnectFlow:
         it: what a connected account implies — the feeds it syncs — exists by the time the member
         reads the callback, rather than at the next sweep of whatever job would notice later.
 
-        The conversation that began the connect is told last, once the grant and everything derived
-        from it stand — so the turn it wakes reads a workspace where the account is already usable,
-        rather than racing the feeds its own answer is about."""
+        A conversation-bound handoff is told last, once the grant and everything derived from it
+        stand — so the turn it wakes reads a workspace where the account is already usable rather
+        than racing the feeds its own answer is about. A direct surface handoff has no conversation
+        to resume."""
         claims = self._open(state)
         descriptor = self._provider(claims.provider)
         with ws(claims.workspace_id), agent(claims.agent_id):
@@ -1090,7 +1109,7 @@ class ConnectFlow:
             label = self.label_for(descriptor.provider)
             named = account.account_label or account.account_id
             resumed = False
-            if self.resumption is not None:
+            if self.resumption is not None and claims.conversation_id is not None:
                 resumed = await self.resumption.resume(
                     claims.conversation_id,
                     CONNECTED_MESSAGE.format(provider=label, account=named),
