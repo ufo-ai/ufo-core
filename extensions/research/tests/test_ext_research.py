@@ -259,8 +259,8 @@ def test_deep_research_lifts_its_round_budget_above_the_default() -> None:
 
 
 def test_deep_research_runs_on_sonnet_5_5_and_research_stays_on_terra() -> None:
-    assert DEEP_RESEARCH_PROFILE.model == "claude-sonnet-5-5"
-    assert RESEARCH_PROFILE.model == "gpt-5.6-terra"
+    assert DEEP_RESEARCH_PROFILE.models == ("claude-sonnet-5-5",)
+    assert RESEARCH_PROFILE.models == ("gpt-5.6-terra",)
 
 
 def test_research_skills_parse_and_index() -> None:

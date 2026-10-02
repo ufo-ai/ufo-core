@@ -20,8 +20,8 @@ it always has."""
 import asyncio
 import hashlib
 import json
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -54,7 +54,6 @@ from ufo.runtime.skills.runtime import CORE_SKILLS, LoadedSkill, loaded_context
 from ufo.runtime.tools.context import (
     AmbiguousSpawnTarget,
     SpawnModelRejected,
-    SpawnNeedsOwnModelKey,
     SpawnPayloadRejected,
     SpawnResult,
     SubagentStatus,
@@ -179,16 +178,6 @@ class AgentTarget:
     output_schema: dict[str, object] | None
 
 
-def _target_model(resolved: SubagentProfile | AgentTarget) -> str | None:
-    """A workspace agent's model lives on its own row, which the gate reads from the agent id the
-    child is admitted under."""
-    match resolved:
-        case SubagentProfile():
-            return resolved.model
-        case _:
-            return None
-
-
 def subagent_system_prompt(
     profile: SubagentProfile,
     *,
@@ -244,12 +233,11 @@ class Subagents:
     hub: Hub | None = None
     invoker: TurnInvoker | None = None
     spend: SpendGates = NO_SPEND_GATES
-    connect_url: str | None = None
     """The model ids this deploy's registry serves, the closed set a spawn's own model pin holds
     to. The registry is fixed at boot, so the ids ride here as data rather than as a handle
     `subagents` would have to import the registry to hold."""
     models: tuple[str, ...] = ()
-    member_accounts_connectable: bool = True
+    model_providers: Mapping[str, str] = field(default_factory=dict)
 
     async def spawn(
         self,
@@ -297,32 +285,41 @@ class Subagents:
         )
         replay = None if dedup_key is None else await self._existing_agent_spawn(turn_id, target)
         resolved = replay[0] if replay is not None else await self._resolve(target)
+        runtime_config = replayed_runtime if replay_exists else self._child_runtime_config(model)
+        available_model_accounts = (
+            replayed_model_accounts if replay_exists else self.parent.model_accounts
+        )
+        pinned_model = (
+            None if runtime_config is None or runtime_config.model is None else runtime_config.model
+        )
         match resolved:
             case SubagentProfile():
-                if resolved.needs_own_model_key and model is not None:
-                    raise SpawnModelRejected.own_account(model, target)
-                available_model_accounts = (
-                    replayed_model_accounts if replay_exists else self.parent.model_accounts
+                routed_models = (
+                    (pinned_model,) if pinned_model is not None else resolved.models[:-1]
                 )
-                model_accounts = (
-                    tuple(
-                        account
-                        for account in available_model_accounts
-                        if account.provider in resolved.own_key_models
-                    )
-                    if resolved.needs_own_model_key
-                    else available_model_accounts
+                routed_providers = {
+                    provider
+                    for candidate in routed_models
+                    if (provider := self.model_providers.get(candidate)) is not None
+                }
+                model_accounts = tuple(
+                    account
+                    for account in available_model_accounts
+                    if not routed_models or account.provider in routed_providers
                 )
-                if resolved.needs_own_model_key and not model_accounts and not replay_exists:
+                if (
+                    routed_models
+                    and not model_accounts
+                    and not replay_exists
+                    and requester_member_id is not None
+                ):
                     model_accounts = tuple(
                         ModelAccountCapability(provider=provider, slot=slot)
                         for provider, slot in await ws_current().member_model_accounts(
                             requester_member_id
                         )
-                        if provider in resolved.own_key_models
+                        if provider in routed_providers
                     )
-                    if self.member_accounts_connectable and not model_accounts:
-                        raise SpawnNeedsOwnModelKey(target, self.connect_url)
                 agent_id = self.parent.agent_id
                 profile_name: str | None = resolved.name
                 inherits_sandbox = True
@@ -331,9 +328,28 @@ class Subagents:
                 untrusted = resolved.untrusted_output
                 agent_target: AgentTarget | None = None
             case AgentTarget():
-                model_accounts = (
-                    replayed_model_accounts if replay_exists else self.parent.model_accounts
+                routed_provider = (
+                    None if pinned_model is None else self.model_providers.get(pinned_model)
                 )
+                model_accounts = tuple(
+                    account
+                    for account in available_model_accounts
+                    if routed_provider is None or account.provider == routed_provider
+                )
+                if (
+                    pinned_model is not None
+                    and routed_provider is not None
+                    and not model_accounts
+                    and not replay_exists
+                    and requester_member_id is not None
+                ):
+                    model_accounts = tuple(
+                        ModelAccountCapability(provider=provider, slot=slot)
+                        for provider, slot in await ws_current().member_model_accounts(
+                            requester_member_id
+                        )
+                        if provider == routed_provider
+                    )
                 agent_id = resolved.id
                 profile_name = None
                 inherits_sandbox = False
@@ -343,7 +359,6 @@ class Subagents:
                 agent_target = resolved
                 background = True
                 delivers_result = True
-        runtime_config = replayed_runtime if replay_exists else self._child_runtime_config(model)
         request_fingerprint = (
             "sha256:"
             + hashlib.sha256(
@@ -382,7 +397,7 @@ class Subagents:
             model=(
                 runtime_config.model
                 if runtime_config is not None and runtime_config.model is not None
-                else _target_model(resolved)
+                else self._profile_model(profile_name, model_accounts)
             ),
         ):
             await self._enqueue(turn_id, conversation_id)
@@ -569,7 +584,13 @@ class Subagents:
                 (
                     runtime_config.model
                     if runtime_config is not None and runtime_config.model is not None
-                    else self._profile_model(child.subagent_profile)
+                    else self._profile_model(
+                        child.subagent_profile,
+                        tuple(
+                            ModelAccountCapability.model_validate(account)
+                            for account in child.model_accounts
+                        ),
+                    )
                 ),
                 child.agent_id,
             )
@@ -791,9 +812,19 @@ class Subagents:
             raise ValueError(f"{turn_id} is not a spawn of this conversation")
         return row.subagent_profile
 
-    def _profile_model(self, profile: str | None) -> str | None:
+    def _profile_model(
+        self,
+        profile: str | None,
+        accounts: tuple[ModelAccountCapability, ...] = (),
+    ) -> str | None:
         named = next((one for one in self.registry.profiles if one.name == profile), None)
-        return named.model if named is not None else None
+        if named is None or not named.models:
+            return None
+        connected = {account.provider for account in accounts}
+        return next(
+            (model for model in named.models[:-1] if self.model_providers.get(model) in connected),
+            named.models[-1],
+        )
 
     def _child_runtime_config(self, model: str | None) -> TurnRuntimeConfig | None:
         """An unregistered model id would fail every attempt of the child's turn with nothing for

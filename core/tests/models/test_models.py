@@ -14,6 +14,7 @@ import pytest
 from anthropic.types.raw_message_delta_event import Delta
 from openai.types.chat import chat_completion_chunk
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
+from pydantic import BaseModel
 
 from ufo.config import (
     BlobConfig,
@@ -72,7 +73,7 @@ from ufo.harness.models.registry import ServingModel, model_registry
 from ufo.harness.models.spec import ModelSpec, ReasoningSupport, RepeatedToolRollover
 from ufo.harness.rounds import ModelRetryAfter, ModelStreamInterrupted
 from ufo.runtime.access.credentials import CredentialValueInvalid
-from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.ext.manifest import Manifest, SubagentProfile
 from ufo.runtime.workspace import ws
 from ufo.schema.records import Usage
 from ufo.sdk import models as sdk_models
@@ -1767,6 +1768,24 @@ def test_registry_rejects_two_specs_for_one_id(tmp_path: Path) -> None:
     dup = Manifest(name="dup", version="1", models=(clash,))
     with pytest.raises(ValueError, match="two model specs registered for id"):
         model_registry(_config(tmp_path), (dup,))
+
+
+def test_registry_rejects_a_subagent_route_model_no_spec_describes(tmp_path: Path) -> None:
+    class Contract(BaseModel):
+        result: str
+
+    profile = SubagentProfile(
+        name="worker",
+        prompt="work",
+        tool_names=(),
+        input_model=Contract,
+        output_model=Contract,
+        models=("claude-opus-5-5", "missing-model"),
+    )
+    manifest = Manifest(name="workers", version="1", subagents=(profile,))
+
+    with pytest.raises(ValueError, match="'worker' model 'missing-model' is not a registered"):
+        model_registry(_config(tmp_path), (manifest,))
 
 
 @pytest.mark.parametrize(

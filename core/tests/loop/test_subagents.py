@@ -52,7 +52,6 @@ from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.context import (
     AmbiguousSpawnTarget,
     SpawnModelRejected,
-    SpawnNeedsOwnModelKey,
     SpawnPayloadRejected,
     ToolContext,
     UnknownSpawnTarget,
@@ -218,12 +217,12 @@ def test_skill_capable_subagent_requires_a_skill_index_slot() -> None:
 
 def test_profile_model_and_reasoning_default_to_inherit_the_parent() -> None:
     profile = _profile("a")
-    assert profile.model is None
+    assert profile.models == ()
     assert profile.reasoning is None
 
 
 def test_general_purpose_inherits_the_parent_model() -> None:
-    assert SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE).model is None
+    assert SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE).models == ()
 
 
 def test_a_profile_can_pin_a_distinct_model() -> None:
@@ -233,20 +232,24 @@ def test_a_profile_can_pin_a_distinct_model() -> None:
         tool_names=(),
         input_model=_Task,
         output_model=_Finding,
-        model="gpt-5.4",
+        models=("gpt-5.4",),
         reasoning="high",
     )
-    assert pinned.model == "gpt-5.4"
+    assert pinned.models == ("gpt-5.4",)
     assert pinned.reasoning == "high"
-    assert (pinned.model or "claude-opus-4-8") == "gpt-5.4"
-    assert (_profile("a").model or "claude-opus-4-8") == "claude-opus-4-8"
 
-    escalation = replace(_profile("worker"), name="worker-escalation", model="gpt-5.4")
+    escalation = replace(_profile("worker"), name="worker-escalation", models=("gpt-5.4",))
     registry = SubagentRegistry((_profile("worker"), escalation))
-    assert registry.get("worker").model is None
-    assert registry.get("worker-escalation").model == "gpt-5.4"
+    assert registry.get("worker").models == ()
+    assert registry.get("worker-escalation").models == ("gpt-5.4",)
     assert registry.get("worker").tool_names == registry.get("worker-escalation").tool_names
     assert registry.get("worker").input_model is registry.get("worker-escalation").input_model
+
+
+@pytest.mark.parametrize("models", (("",), ("gpt-5.4", "gpt-5.4")))
+def test_a_profile_model_route_requires_unique_nonempty_ids(models: tuple[str, ...]) -> None:
+    with pytest.raises(ValueError, match="unique nonempty ids"):
+        replace(_profile("worker"), models=models)
 
 
 @dataclass
@@ -1194,26 +1197,59 @@ async def test_spawn_refuses_a_model_the_registry_does_not_serve(
     assert client.enqueued == []
 
 
-async def test_spawn_refuses_a_model_pin_on_a_target_that_runs_on_the_members_account(
+async def test_spawn_model_override_uses_the_matching_member_account(
     db: None, dbos_launched: Config
 ) -> None:
-    """A profile bound to the member's own account takes the model that account serves, so a pin
-    there would be dropped."""
     workspace_id, agent_id = await _workspace_agent()
+    member_id = await _seeded_member(workspace_id)
+    await _specialist(workspace_id)
     parent = await _parent(workspace_id, agent_id)
-    client = _RecordingClient()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
     subagents = Subagents(
-        client=client,
-        registry=SubagentRegistry((replace(_profile("coding"), needs_own_model_key=True),)),
+        client=_RecordingClient(),
+        registry=SubagentRegistry(
+            (replace(_profile("coding"), models=("claude-opus-5", "z-ai/glm-5.3")),)
+        ),
         parent=parent,
-        audience=conversation_audience(None),
-        models=("claude-opus-4-8",),
+        audience=conversation_audience(member_id),
+        models=("claude-opus-5", "gpt-5.6-sol", "z-ai/glm-5.3"),
+        model_providers={
+            "claude-opus-5": PROVIDER_ANTHROPIC,
+            "gpt-5.6-sol": PROVIDER_OPENAI,
+            "z-ai/glm-5.3": "openrouter",
+        },
     )
 
-    with pytest.raises(SpawnModelRejected, match="own provider account"):
-        await subagents.spawn("coding", {"task": "acme"}, background=True, model="claude-opus-4-8")
+    with ws(workspace_id):
+        await store.put(
+            workspace_id, member_slot(OPENAI_KEY_SLOT, member_id), "sk-openai-connected"
+        )
+        spawned = await subagents.spawn(
+            "coding",
+            {"task": "acme"},
+            background=True,
+            model="gpt-5.6-sol",
+            requester_member_id=member_id,
+        )
+        agent_spawned = await subagents.spawn(
+            "support",
+            {"task": "acme"},
+            model="gpt-5.6-sol",
+            requester_member_id=member_id,
+        )
 
-    assert client.enqueued == []
+    child, _, _ = await _load_turn(spawned.turn_id)
+    assert child.runtime_config == TurnRuntimeConfig(model="gpt-5.6-sol")
+    assert child.model_accounts == (
+        ModelAccountCapability(
+            provider=PROVIDER_OPENAI,
+            slot=member_slot(OPENAI_KEY_SLOT, member_id),
+        ),
+    )
+    agent_child, _, _ = await _load_turn(agent_spawned.turn_id)
+    assert agent_child.runtime_config == TurnRuntimeConfig(model="gpt-5.6-sol")
+    assert agent_child.model_accounts == child.model_accounts
 
 
 async def test_wait_reports_every_already_finished_childs_status(
@@ -3000,8 +3036,8 @@ async def test_a_child_pinned_to_another_provider_is_not_exempted_by_its_agents_
                 updated_at=sa.func.now(),
             )
         )
-    own = replace(_profile("own"), model="anthropic-model")
-    other = replace(_profile("other"), model="openai-model")
+    own = replace(_profile("own"), models=("anthropic-model",))
+    other = replace(_profile("other"), models=("openai-model",))
     subagents = Subagents(
         client=_RecordingClient(),
         registry=SubagentRegistry((own, other)),
@@ -3688,21 +3724,20 @@ async def test_model_account_capabilities_are_resolved_once_and_inherited(
         )
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     init_workspace_credentials(store)
-    own_account = replace(
-        _profile("coding"),
-        needs_own_model_key=True,
-        own_key_models={PROVIDER_ANTHROPIC: "claude-opus-5"},
-    )
+    own_account = replace(_profile("coding"), models=("claude-opus-5", "z-ai/glm-5.3"))
     subagents = Subagents(
         client=_RecordingClient(),
         registry=SubagentRegistry((own_account,)),
         parent=parent,
         audience=conversation_audience(member_id),
+        model_providers={
+            "claude-opus-5": PROVIDER_ANTHROPIC,
+            "z-ai/glm-5.3": "openrouter",
+        },
     )
 
     with ws(workspace_id):
-        with pytest.raises(SpawnNeedsOwnModelKey):
-            await subagents.spawn("coding", {"task": "acme"}, background=True)
+        fallback = await subagents.spawn("coding", {"task": "fallback"}, background=True)
 
         await store.put(
             workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id), "sk-ant-connected"
@@ -3715,6 +3750,8 @@ async def test_model_account_capabilities_are_resolved_once_and_inherited(
             requester_member_id=member_id,
         )
 
+    fallback_child, _, _ = await _load_turn(fallback.turn_id)
+    assert fallback_child.model_accounts == ()
     child, _, _ = await _load_turn(spawned.turn_id)
     assert child.speaker_member_id is None
     assert tuple(account.provider for account in child.model_accounts) == (PROVIDER_ANTHROPIC,)
@@ -3725,6 +3762,10 @@ async def test_model_account_capabilities_are_resolved_once_and_inherited(
         registry=SubagentRegistry((own_account,)),
         parent=child,
         audience=conversation_audience(member_id),
+        model_providers={
+            "claude-opus-5": PROVIDER_ANTHROPIC,
+            "z-ai/glm-5.3": "openrouter",
+        },
     )
     with ws(workspace_id):
         grandchild = await descendant.spawn("coding", {"task": "nested"}, background=True)
@@ -3755,18 +3796,10 @@ async def test_an_own_account_spawn_persists_only_its_profiles_provider_slots(
         )
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     init_workspace_credentials(store)
-    anthropic = replace(
-        _profile("anthropic"),
-        needs_own_model_key=True,
-        own_key_models={PROVIDER_ANTHROPIC: "claude-opus-5"},
-    )
+    anthropic = replace(_profile("anthropic"), models=("claude-opus-5", "z-ai/glm-5.3"))
     mixed = replace(
         _profile("mixed"),
-        needs_own_model_key=True,
-        own_key_models={
-            PROVIDER_ANTHROPIC: "claude-opus-5",
-            PROVIDER_OPENAI: "gpt-5.6-sol",
-        },
+        models=("claude-opus-5", "gpt-5.6-sol", "z-ai/glm-5.3"),
     )
     registry = SubagentRegistry((anthropic, mixed))
     spawner = Subagents(
@@ -3774,6 +3807,11 @@ async def test_an_own_account_spawn_persists_only_its_profiles_provider_slots(
         registry=registry,
         parent=parent,
         audience=conversation_audience(member_id),
+        model_providers={
+            "claude-opus-5": PROVIDER_ANTHROPIC,
+            "gpt-5.6-sol": PROVIDER_OPENAI,
+            "z-ai/glm-5.3": "openrouter",
+        },
     )
 
     with ws(workspace_id):
@@ -3805,6 +3843,11 @@ async def test_an_own_account_spawn_persists_only_its_profiles_provider_slots(
             registry=registry,
             parent=child,
             audience=child_audience,
+            model_providers={
+                "claude-opus-5": PROVIDER_ANTHROPIC,
+                "gpt-5.6-sol": PROVIDER_OPENAI,
+                "z-ai/glm-5.3": "openrouter",
+            },
         ).spawn("mixed", {"task": "nested"}, background=True)
 
     grandchild, _, _ = await _load_turn(descendant.turn_id)
@@ -3933,7 +3976,7 @@ async def test_spawn_inherits_an_automatic_parents_runtime_config(
     assert child.runtime_config == runtime_config
 
 
-async def test_old_own_account_spawn_replay_keeps_the_admitted_runtime_config(
+async def test_model_route_spawn_replay_keeps_the_admitted_runtime_config(
     db: None, dbos_launched: Config
 ) -> None:
     workspace_id, agent_id = await _workspace_agent()
@@ -3951,16 +3994,16 @@ async def test_old_own_account_spawn_replay_keeps_the_admitted_runtime_config(
         )
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     init_workspace_credentials(store)
-    own_account = replace(
-        _profile("coding"),
-        needs_own_model_key=True,
-        own_key_models={PROVIDER_ANTHROPIC: "claude-opus-5"},
-    )
+    own_account = replace(_profile("coding"), models=("claude-opus-5", "z-ai/glm-5.3"))
     subagents = Subagents(
         client=_RecordingClient(),
         registry=SubagentRegistry((own_account,)),
         parent=parent,
         audience=conversation_audience(member_id),
+        model_providers={
+            "claude-opus-5": PROVIDER_ANTHROPIC,
+            "z-ai/glm-5.3": "openrouter",
+        },
     )
 
     with ws(workspace_id):

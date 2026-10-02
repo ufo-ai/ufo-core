@@ -16,7 +16,7 @@ from ufo.db import workspace_tx
 from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, OPENAI_KEY_SLOT
 from ufo.harness.models.grant import Grant, read_grant
 from ufo.harness.models.pricing import Pricing
-from ufo.harness.models.registry import MemberAccounts, ModelRegistry, ServingModel
+from ufo.harness.models.registry import ModelRegistry, ModelRoute, ModelRoutes, ServingModel
 from ufo.host.ext.loader import injecting_slots
 from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.product import PRODUCT_ATTACH_METRIC, ProductCensus
@@ -51,7 +51,10 @@ from ufo.runtime.ext.manifest import (
 )
 from ufo.runtime.seats import create_member
 from ufo.runtime.workspace import (
+    KEY_FUNDED,
     PLAN_FUNDED,
+    PLATFORM_FUNDED,
+    PLATFORM_PAYER,
     ModelFundingChanged,
     init_workspace_credentials,
     model_credentials,
@@ -270,21 +273,48 @@ async def test_model_resolution_tells_a_plan_apart_from_a_metered_key(
     await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, planned), grant.stored())
     await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, keyed), "sk-ant-api-pasted")
     with ws(workspace_id):
-        assert (
-            await ws_current().model_credential(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
-        ).funding == "platform"
+        platform = await ws_current().model_payer(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+        assert (platform.funding, platform.payer) == (PLATFORM_FUNDED, PLATFORM_PAYER)
         with model_credentials({OWN_ACCOUNT_MODEL: member_slot(ANTHROPIC_KEY_SLOT, planned)}):
-            assert (
-                await ws_current().model_credential(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
-            ).funding == "plan"
+            plan = await ws_current().model_payer(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+            assert (plan.funding, plan.payer) == (
+                PLAN_FUNDED,
+                member_slot(ANTHROPIC_KEY_SLOT, planned),
+            )
         with model_credentials({OWN_ACCOUNT_MODEL: member_slot(ANTHROPIC_KEY_SLOT, keyed)}):
-            assert (
-                await ws_current().model_credential(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
-            ).funding == "key"
+            member_key = await ws_current().model_payer(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+            assert (member_key.funding, member_key.payer) == (
+                KEY_FUNDED,
+                member_slot(ANTHROPIC_KEY_SLOT, keyed),
+            )
         await store.put(workspace_id, ANTHROPIC_KEY_SLOT, "workspace-key")
-        assert (
-            await ws_current().model_credential(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
-        ).funding == "key"
+        workspace_key = await ws_current().model_payer(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+        assert (workspace_key.funding, workspace_key.payer) == (
+            KEY_FUNDED,
+            ANTHROPIC_KEY_SLOT,
+        )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_fallback_payer_freezes_before_its_deploy_key_exists(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    monkeypatch.delenv("UFO_FALLBACK_MODEL_KEY", raising=False)
+    monkeypatch.delenv("FALLBACK_MODEL_KEY", raising=False)
+
+    with ws(workspace_id):
+        payer = await ws_current().model_payer(
+            "fallback_model_key", "FALLBACK_MODEL_KEY", "fallback-model"
+        )
+        with pytest.raises(CredentialSlotUnset):
+            await ws_current().model_credential(
+                "fallback_model_key", "FALLBACK_MODEL_KEY", "fallback-model"
+            )
+
+    assert (payer.funding, payer.payer) == (PLATFORM_FUNDED, PLATFORM_PAYER)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1045,18 +1075,17 @@ def _two_account_registry(served: list[str]) -> ModelRegistry:
     )
 
 
-async def _serving_on_own_account(registry: ModelRegistry, *alternates: str) -> ServingModel:
+async def _serving_on_member_account(
+    registry: ModelRegistry, *alternates: ModelRoute
+) -> ServingModel:
     first = await registry.client_for(OWN_ACCOUNT_MODEL)
     return ServingModel(
         model=OWN_ACCOUNT_MODEL,
         spec=registry.spec(OWN_ACCOUNT_MODEL),
         client=first.client,
-        accounts=MemberAccounts(
-            registry=registry,
-            funding=first.funding,
-            alternates=alternates,
-            exhausted=lambda: RuntimeError("every account they connected is rate limited"),
-        ),
+        funding=first.funding,
+        payer=first.payer,
+        routes=ModelRoutes(registry=registry, remaining=alternates),
     )
 
 
@@ -1081,17 +1110,21 @@ async def test_a_rate_limited_turn_moves_onto_the_members_other_connected_accoun
         OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member),
         OTHER_ACCOUNT_MODEL: member_slot(ANTHROPIC_KEY_SLOT, member),
     }
+    alternate = ModelRoute(
+        OTHER_ACCOUNT_MODEL,
+        PLAN_FUNDED,
+        member_slot(ANTHROPIC_KEY_SLOT, member),
+    )
 
     with ws(workspace_id), model_credentials(routes):
-        serving = await _serving_on_own_account(registry, OTHER_ACCOUNT_MODEL)
+        serving = await _serving_on_member_account(registry, alternate)
         assert await serving.move() is True
         assert (serving.model, serving.spec) == (
             OTHER_ACCOUNT_MODEL,
             registry.spec(OTHER_ACCOUNT_MODEL),
         )
         assert [event async for event in serving.client.complete(object())] == ["round"]
-        with pytest.raises(RuntimeError, match="every account they connected is rate limited"):
-            await serving.move()
+        assert await serving.move() is False
 
     assert served == ["anthropic"]
 
@@ -1117,10 +1150,15 @@ async def test_a_move_never_lands_on_the_workspaces_row_or_the_deploys_key(db: N
         OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member),
         OTHER_ACCOUNT_MODEL: member_slot(ANTHROPIC_KEY_SLOT, member),
     }
+    alternate = ModelRoute(
+        OTHER_ACCOUNT_MODEL,
+        PLAN_FUNDED,
+        member_slot(ANTHROPIC_KEY_SLOT, member),
+    )
 
     with ws(workspace_id), model_credentials(routes):
-        serving = await _serving_on_own_account(registry, OTHER_ACCOUNT_MODEL)
-        assert serving.accounts is not None and serving.accounts.funding == PLAN_FUNDED
+        serving = await _serving_on_member_account(registry, alternate)
+        assert serving.funding == PLAN_FUNDED
         with pytest.raises(RuntimeError, match="exact account credential"):
             await serving.move()
 
@@ -1144,10 +1182,15 @@ async def test_a_move_holds_the_funding_class_the_attempt_froze(db: None) -> Non
         OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member),
         OTHER_ACCOUNT_MODEL: member_slot(ANTHROPIC_KEY_SLOT, member),
     }
+    alternate = ModelRoute(
+        OTHER_ACCOUNT_MODEL,
+        PLAN_FUNDED,
+        member_slot(ANTHROPIC_KEY_SLOT, member),
+    )
 
     with ws(workspace_id), model_credentials(routes):
-        serving = await _serving_on_own_account(registry, OTHER_ACCOUNT_MODEL)
-        with pytest.raises(ModelFundingChanged, match="payer changed during account failover"):
+        serving = await _serving_on_member_account(registry, alternate)
+        with pytest.raises(ModelFundingChanged, match="payer changed during route failover"):
             await serving.move()
 
     assert (serving.model, served) == (OWN_ACCOUNT_MODEL, [])

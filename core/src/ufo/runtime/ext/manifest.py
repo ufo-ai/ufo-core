@@ -760,23 +760,19 @@ class SubagentProfile:
     best-effort, schema-shaped final answer — the turn fails only if that forced call still
     violates the schema, and the parent receives a failure as a tool error, never a crash. A deep
     profile lifts it to
-    the main ceiling; the default suits an ordinary focused subagent. `model` runs the child under
-    a model distinct from its parent — possibly a different provider — while `None` inherits the
-    parent's; `reasoning` does the same for the model's reasoning effort. A spawn resolves and bills
-    the child under those settings.
+    the main ceiling; the default suits an ordinary focused subagent. `models` runs the child under
+    an ordered route distinct from its parent; an empty route inherits the parent's model. Before
+    the final model, an entry is available when the speaking member connected its provider account;
+    the final model resolves through the workspace or deploy key. A spawn's explicit model replaces
+    the route and prefers that member's matching account when connected. `reasoning` does the same
+    for the model's reasoning effort. A spawn resolves and bills the child under those settings.
     `untrusted_output` declares the child's answer derives from untrusted content (web pages, third
     parties): every path that returns it to a parent — a foreground spawn, and the
     arrival a background child delivers — walls it as data, exactly as an untrusted tool's own
     result is walled. `concise_parent_handoff` gives a member-facing profile the shared short
     result discipline; machine-readable and workspace-agent results keep their full contract.
     `isolated_tools` makes
-    `tool_names` exact by excluding cross-extension grants and subagent defaults.
-    `needs_own_model_key` marks a profile that runs on the speaking member's own provider account:
-    the spawn catalog omits it and a spawn refuses it for a member who connected neither provider,
-    so skipping that step in onboarding takes the capability away rather than silently spending the
-    deploy's key on it. `own_key_models` names the model to run per provider they may have
-    connected, and it outranks `model` — a pin naming some third backend would spend the deploy's
-    account on the very work the member's key was asked for."""
+    `tool_names` exact by excluding cross-extension grants and subagent defaults."""
 
     name: str
     prompt: str
@@ -784,16 +780,16 @@ class SubagentProfile:
     input_model: type[BaseModel]
     output_model: type[BaseModel]
     max_rounds: int = SUBAGENT_ROUND_LIMIT
-    model: str | None = None
+    models: tuple[str, ...] = ()
     reasoning: ReasoningEffort | None = None
     untrusted_output: bool = False
     concise_parent_handoff: bool = False
     isolated_tools: bool = False
     connector_read_only: bool = False
-    needs_own_model_key: bool = False
-    own_key_models: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if any(not model for model in self.models) or len(set(self.models)) != len(self.models):
+            raise ValueError(f"subagent profile {self.name!r} models must be unique nonempty ids")
         if OBJECT_ACTION_TOOL in self.tool_names:
             raise ValueError(
                 f"subagent profile {self.name!r} allowlists {OBJECT_ACTION_TOOL!r} — an "
@@ -890,10 +886,7 @@ class Manifest:
     egress for live turns when the extension's sandbox tools require it. `deploy_keys` names the
     environment keys this extension needs the deploy to carry — a provider key nobody can mint, so
     `init` reports the ones a fresh checkout is missing rather than leaving them to be discovered
-    when the first job that needs one raises. `connects_member_accounts` says this extension can
-    store a member's own provider account — a deploy carrying none has no way to hold one, so a
-    profile that runs on such an account runs on the deploy's own key there instead of refusing
-    work nobody on that deploy could ever enable. `deploy_bearer_env` names the deploy key whose
+    when the first job that needs one raises. `deploy_bearer_env` names the deploy key whose
     value gates this extension's `deploy_routes`, so it is also one of `deploy_keys`.
     `operator_rules` registers who may operate the deploy's operator surfaces; boot builds only the
     rule `[operator] rule` names, and only a first-party distribution may register one."""
@@ -901,7 +894,6 @@ class Manifest:
     name: str
     version: str
     _: KW_ONLY
-    connects_member_accounts: bool = False
     tools: tuple[ToolDef, ...] = ()
     objects: tuple[ObjectKind, ...] = ()
     jobs: tuple[JobSpec, ...] = ()

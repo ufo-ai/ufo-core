@@ -109,6 +109,14 @@ class ModelCredential:
 
 
 @dataclass(frozen=True)
+class ModelPayer:
+    """The funding identity a model route freezes before it constructs a provider client."""
+
+    funding: Funding
+    payer: str
+
+
+@dataclass(frozen=True)
 class ResolvedModelClient:
     """A constructed model client and the immutable payer facts its usage must carry."""
 
@@ -204,6 +212,23 @@ class WorkspaceScope:
             raise CredentialSlotUnset(slot)
         return ModelCredential(value, PLATFORM_FUNDED, PLATFORM_PAYER)
 
+    async def model_payer(self, slot: str, env: str | None, model: str) -> ModelPayer:
+        """Resolve a model's funding identity without requiring or exposing its credential."""
+        routed = self._routed_slot(slot, model)
+        if _store is not None:
+            for candidate in (slot,) if routed is None else (routed,):
+                try:
+                    stored = await _store.get(self.workspace_id, candidate)
+                except CredentialSlotUnset:
+                    continue
+                return ModelPayer(
+                    PLAN_FUNDED if read_grant(stored) is not None else KEY_FUNDED,
+                    candidate,
+                )
+        if routed is not None:
+            raise CredentialSlotUnset(routed)
+        return ModelPayer(PLATFORM_FUNDED, PLATFORM_PAYER)
+
     async def _refreshed_credential(
         self, store: "CredentialStore", candidate: str, slot: str, stored: str, grant: Grant
     ) -> ModelCredential:
@@ -232,9 +257,6 @@ class WorkspaceScope:
 
     def routed_model_call(self, model: str) -> bool:
         return model in _current_model_credentials.get()
-
-    def routed_model_payer(self, model: str) -> str | None:
-        return _current_model_credentials.get().get(model)
 
     def _slot_order(self, slot: str, model: str | None) -> tuple[str, ...]:
         routed = self._routed_slot(slot, model)

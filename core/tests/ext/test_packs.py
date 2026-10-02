@@ -51,10 +51,7 @@ def test_a_pack_that_ships_coding_registers_its_profile_models() -> None:
         named = {
             model
             for name in (coding.CODING_PROFILE_NAME, coding.FABLE_ESCALATION_PROFILE_NAME)
-            for model in (
-                *profiles[name].own_key_models.values(),
-                *((profiles[name].model,) if profiles[name].model else ()),
-            )
+            for model in profiles[name].models
         }
         served = {spec.id for spec in CORE_MODEL_SPECS}
         served |= {spec.id for manifest in manifests for spec in manifest.models}

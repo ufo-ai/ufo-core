@@ -16,7 +16,7 @@ def test_documents_manifest_registers_the_writing_profile() -> None:
     manifest = documents.manifest()
     assert [profile.name for profile in manifest.subagents] == ["writing"]
     profile = manifest.subagents[0]
-    assert profile.model == "gpt-5.6-terra"
+    assert profile.models == ("gpt-5.6-terra",)
     assert profile.input_model.model_validate({"objective": "tighten it"}).objective == "tighten it"
     assert profile.output_model.model_validate({"result": "drafted"}).result == "drafted"
 

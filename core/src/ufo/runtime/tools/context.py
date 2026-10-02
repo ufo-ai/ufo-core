@@ -69,7 +69,6 @@ from ufo.harness.sandbox.session import Sandbox, shell_path
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialRequests
 from ufo.runtime.access.grants import (
-    CONNECTORS_SCREEN_FRAGMENT,
     ConnectUnavailable,
     Grant,
     GrantStore,
@@ -187,10 +186,9 @@ class SpawnPayloadRejected(Exception):
 class SpawnModelRejected(Exception):
     """A spawn asked for a model its child cannot be run on. The pin reaches the child turn's
     runtime config, which the child's every setup reads, so it is decided where the caller can
-    still repair the call: an id the registry does not serve names the ids it does serve, a target
-    that runs on the member's own account says the pin would not take effect there, and a turn tree
-    the member already pinned says whose choice it keeps — a pin silently dropped is what makes a
-    caller believe it ran a model it never ran."""
+    still repair the call: an id the registry does not serve names the ids it does serve, and a
+    turn tree the member already pinned says whose choice it keeps — a pin silently dropped is what
+    makes a caller believe it ran a model it never ran."""
 
     def __init__(self, message: str, requested: str) -> None:
         super().__init__(message)
@@ -212,14 +210,6 @@ class SpawnModelRejected(Exception):
             requested,
         )
 
-    @classmethod
-    def own_account(cls, requested: str, target: str) -> "SpawnModelRejected":
-        return cls(
-            f"spawn target {target!r} runs on the member's own provider account, which serves its "
-            f"own models — it cannot be pinned to {requested!r}; spawn it without a model",
-            requested,
-        )
-
 
 class UnknownSpawnTarget(Exception):
     """A spawn named a target neither namespace holds. Its message lists what is spawnable — the
@@ -233,29 +223,6 @@ class UnknownSpawnTarget(Exception):
         self.requested = requested
         self.profiles = profiles
         self.agents = agents
-
-
-SPAWN_CONNECT_PATH = f"/surface/web{CONNECTORS_SCREEN_FRAGMENT}"
-
-
-class SpawnNeedsOwnModelKey(Exception):
-    """A spawn named a profile that runs on the speaking member's own provider account, and they
-    connected neither. The first run offers to connect one, but a member whose workspace already
-    exists never sees that screen again — so this is where most of them meet the requirement, and it
-    carries the address of the screen that connects either account rather than pointing at "the
-    portal". The model reads it and hands the member a link instead of retrying a target that cannot
-    resolve for them."""
-
-    def __init__(self, requested: str, connect_url: str | None = None) -> None:
-        connect = f"{connect_url.rstrip('/')}{SPAWN_CONNECT_PATH}" if connect_url else "the portal"
-        super().__init__(
-            f"spawn target {requested!r} runs the coding agent on the member's own ChatGPT or "
-            "Claude account, and nothing else in ufo uses that account. This member has connected "
-            "neither, so coding tasks stay off until they connect one. Tell them to open "
-            f"{connect}, connect ChatGPT or Claude under Coding providers, then return to this "
-            "task first; use another available route only if the member asks."
-        )
-        self.requested = requested
 
 
 class AmbiguousSpawnTarget(Exception):
