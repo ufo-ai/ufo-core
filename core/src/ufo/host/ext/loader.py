@@ -103,6 +103,7 @@ from ufo.runtime.object_views import frame_admissible_ids
 from ufo.runtime.objects import (
     BoundAction,
     BoundKind,
+    BoundMemberHandoff,
     ObjectKind,
     ObjectVerbs,
     action_registry,
@@ -630,11 +631,11 @@ def turn_tools(
 
 @dataclass(frozen=True)
 class MemberObjectRegistry:
-    """The deploy's kinds and actions bound for member reads outside a turn: what the portal
-    projects its rows and its controls from."""
+    """The deploy's kinds, actions, and declared handoffs bound outside a turn."""
 
     kinds: dict[str, BoundKind]
     actions: dict[str, dict[str, BoundAction]]
+    handoffs: dict[str, BoundMemberHandoff]
 
 
 def member_object_registry(
@@ -648,28 +649,31 @@ def member_object_registry(
     spend: SpendGates,
     ledger: Ledger,
 ) -> MemberObjectRegistry:
-    """The deploy's object kinds and actions bound for member reads outside a turn — the portal's
-    registry. The same kinds and the same boot validation as `turn_tools`, but each extension
-    context is workspace-ambient rather than audience-scoped: a member read carries no
-    conversation. Bound actions pass the same registration gates here, in this flavor, so a portal
-    build fails loud exactly where a turn build would, and ride out beside the kinds for the
-    portal's action projection."""
+    """The deploy's object kinds, actions, and handoffs bound outside a turn. The same kinds and
+    boot validation as `turn_tools`, but each extension context is workspace-ambient rather than
+    audience-scoped: a member read or handoff carries no conversation. Bound callables pass the
+    same registration gates here, so a portal build fails loud exactly where a turn build would."""
     bound: list[BoundKind] = list(CORE_OBJECT_KINDS)
     deploy_credentials = deploy_claims(manifests)
+    core_bound_actions = core_actions(manifests)
     actions: list[BoundAction] = [
-        BoundAction(action=action, extension=None, context=None)
-        for action in core_actions(manifests)
+        BoundAction(action=action, extension=None, context=None) for action in core_bound_actions
+    ]
+    handoffs = [
+        BoundMemberHandoff(callable=tool, extension=None, context=None)
+        for tool in (*BUILTIN_TOOLS, *core_bound_actions)
+        if tool.member_handoff is not None
     ]
     for manifest in manifests:
-        declared_actions = tuple(
-            tool
-            for tool in (
-                *manifest.tools,
-                *(tool for connector in manifest.connectors for tool in connector.tools),
-            )
-            if tool.bound is not None
+        declared_tools = (
+            *manifest.tools,
+            *(tool for connector in manifest.connectors for tool in connector.tools),
         )
-        if not manifest.objects and not declared_actions:
+        declared_actions = tuple(tool for tool in declared_tools if tool.bound is not None)
+        declared_handoffs = tuple(
+            tool for tool in declared_tools if tool.member_handoff is not None
+        )
+        if not manifest.objects and not declared_actions and not declared_handoffs:
             continue
         declared = frozenset(slot.name for slot in manifest.credentials)
         if declared and credential_store is None:
@@ -697,6 +701,10 @@ def member_object_registry(
             BoundAction(action=tool, extension=manifest.name, context=context)
             for tool in declared_actions
         )
+        handoffs.extend(
+            BoundMemberHandoff(callable=tool, extension=manifest.name, context=context)
+            for tool in declared_handoffs
+        )
         bound.extend(
             BoundKind(kind=kind, extension=manifest.name, context=context)
             for kind in manifest.objects
@@ -710,7 +718,18 @@ def member_object_registry(
         )
     )
     kinds = object_registry(tuple(bound))
-    return MemberObjectRegistry(kinds=kinds, actions=action_registry(tuple(actions), kinds))
+    registered_actions = action_registry(tuple(actions), kinds)
+    indexed_handoffs: dict[str, BoundMemberHandoff] = {}
+    for handoff in handoffs:
+        callable_id = handoff.callable.canonical_id
+        if callable_id in indexed_handoffs:
+            raise ValueError(f"duplicate member handoff: {callable_id}")
+        indexed_handoffs[callable_id] = handoff
+    return MemberObjectRegistry(
+        kinds=kinds,
+        actions=registered_actions,
+        handoffs=indexed_handoffs,
+    )
 
 
 def core_actions(manifests: tuple[Manifest, ...]) -> tuple[ToolDef, ...]:

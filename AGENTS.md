@@ -8,20 +8,17 @@ workspace model, and non-goals. Read it before proposing structural changes.
 **Core doctrine is the first review question:** if a capability can be an extension, it is not
 core. Every addition to `core/` must name why extensions cannot express it.
 
-**Every member action happens in chat.** Connecting an account, granting access, approving a
-change — a member expresses it in natural conversation and the agent drives it (a tool it calls,
-surfacing any link in its reply); never a slash-command, keyword, or bespoke end-user HTTP
-endpoint. The only endpoints are the chat transport itself, authenticated **read projections** of
-object, status, usage, and audit data (a surface page reads directly), **prepared intents** — a
-surface form's one mutation path: the panel's structured intent is admitted as a turn the engine
-dispatches verbatim to the typed object verb, so the turn IS the chat transport and the audit
-record, the route only prepares and admits, and the panel reads back the typed result or refusal —
-a **stateless display render** (a composer rasterizing a member's picked file to show them what
-they are about to send: bytes in, a picture back, storing nothing and admitting no turn — a preview
-is not an action, it grants nothing and changes nothing, so it never has to be a chat turn) — and
-unavoidable third-party plumbing (e.g. an OAuth callback). The speaker gates the granting act;
-subsequent use is the wire's job. (`ufoctl` CLI verbs are the operator surface — a different
-audience, not member actions.)
+**Member authority is explicit; it is not synonymous with a turn.** A member may ask in natural
+conversation and the agent calls a tool. A browser-native handoff — OAuth consent, a private
+credential prompt, or a billing-provider session — may instead run directly from an authenticated
+surface control. The callable declares `member_handoff`; the surface passes the member and target,
+and the handoff calls the same domain workflow as its chat handler, without a queue, transcript,
+model environment, or second authorization policy. Other surface mutations are **prepared
+intents**: the form's structured intent is admitted as a turn the engine dispatches verbatim to the
+typed object verb, so the turn is the audit record. Endpoints otherwise remain authenticated
+**read projections**, **stateless display renders**, and unavoidable third-party plumbing such as
+an OAuth callback. The member gates the granting act; subsequent use is the wire's job. (`ufoctl`
+CLI verbs are the operator surface — a different audience.)
 
 - Study how established products solve the problem before designing a solution. Adopt their proven
   patterns and conventions rather than inventing an approach from scratch.

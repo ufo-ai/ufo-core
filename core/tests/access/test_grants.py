@@ -555,6 +555,44 @@ async def test_connect_flow_records_a_durable_grant_with_account_label(db: None)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_direct_connect_flow_records_the_grant_without_resuming_a_conversation(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    resumed = _RecordingResumption()
+    flow = ConnectFlow(
+        providers={"stub": StubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
+        resumption=resumed,
+    )
+    request = await flow.request(
+        provider="stub",
+        requester_member_id=member_id,
+        shared=False,
+    )
+    url = flow.authorize(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider=request.provider,
+        grantor_member_id=request.requester_member_id,
+        conversation_id=None,
+        shared=request.shared,
+    )
+    state = parse_qs(urlparse(url).query)["state"][0]
+    recorded = await flow.complete(state=state, code="the-code")
+    assert recorded.resumed is False
+    assert resumed.calls == []
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.connector_grant))
+        ).scalar_one()
+    assert rows == 1
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connect_flow_cannot_land_after_the_grantor_loses_access(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)

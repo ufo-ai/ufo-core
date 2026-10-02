@@ -38,6 +38,12 @@ from ufo.runtime.tools.context import (
     ImageContent as ImageContent,
 )
 from ufo.runtime.tools.context import (
+    MemberHandoffContext as MemberHandoffContext,
+)
+from ufo.runtime.tools.context import (
+    MemberHandoffResult as MemberHandoffResult,
+)
+from ufo.runtime.tools.context import (
     SpeakerRequired as SpeakerRequired,
 )
 from ufo.runtime.tools.context import (

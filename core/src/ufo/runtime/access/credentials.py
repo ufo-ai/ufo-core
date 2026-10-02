@@ -25,6 +25,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ufo.db import workspace_tx
 from ufo.schema import tables
+from ufo.schema.records import CredentialPrompt, CredentialRequest
 
 CREDENTIAL_REQUEST_TTL_SECONDS = 900
 CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS = 86_400
@@ -160,6 +161,23 @@ class CredentialRequests:
                 },
             ),
         )
+
+    def request(
+        self,
+        workspace_id: UUID,
+        member_id: UUID,
+        reason: str,
+        prompts: tuple[CredentialPrompt, ...],
+        also_declared: Mapping[str, str] | None = None,
+    ) -> CredentialRequest:
+        """Build the private prompt over the same sealed slot grant every surface fulfills."""
+        sealed = self.seal(
+            workspace_id,
+            member_id,
+            tuple(prompt.slot for prompt in prompts),
+            also_declared,
+        )
+        return CredentialRequest(reason=reason, prompts=prompts, sealed=sealed)
 
     def authorize(self, workspace_id: UUID, member_id: UUID, slot: str, payload: str) -> str:
         if slot not in self.declared:

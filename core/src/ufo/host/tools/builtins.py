@@ -93,6 +93,8 @@ from ufo.runtime.tools.context import (
     AmbiguousSpawnTarget,
     ContextControl,
     ImageContent,
+    MemberHandoffContext,
+    MemberHandoffResult,
     SpawnModelRejected,
     SpawnPayloadRejected,
     TextContent,
@@ -1103,8 +1105,7 @@ async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -
     """Leave a provider-validated private OAuth handoff for the speaking member."""
     speaker = ctx.require_speaker(CONNECT_GRANT_GATE)
     grantee = await _grantee_agent_id(ctx, args.agent.strip())
-    await installed_connect_flow().validate_provider(args.provider)
-    request = ConnectRequest(
+    request = await installed_connect_flow().request(
         provider=args.provider,
         requester_member_id=speaker,
         shared=args.shared,
@@ -1113,6 +1114,29 @@ async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -
     return ToolResult(
         content=(TextContent(text=f"{CONNECT_ACCOUNT_DIRECTIVE}\n{request.model_dump_json()}"),)
     )
+
+
+async def connect_account_member_handoff(
+    ctx: MemberHandoffContext, args: ConnectAccountInput
+) -> MemberHandoffResult:
+    """Mint an OAuth authorization for the authenticated member and route-bound agent."""
+    if args.agent.strip():
+        raise ValueError("a direct connection cannot name another agent")
+    flow = installed_connect_flow()
+    request = await flow.request(
+        provider=args.provider,
+        requester_member_id=ctx.member_id,
+        shared=args.shared,
+    )
+    url = flow.authorize(
+        workspace_id=ctx.workspace_id,
+        agent_id=ctx.agent_id,
+        provider=request.provider,
+        grantor_member_id=request.requester_member_id,
+        conversation_id=None,
+        shared=request.shared,
+    )
+    return MemberHandoffResult(data={"url": url})
 
 
 REQUEST_CREDENTIALS_DIRECTIVE = (
@@ -1137,16 +1161,28 @@ async def request_credentials_handler(
         raise ValueError("no credential key is configured — this deploy cannot store secrets")
     if not await ctx.require_speaking_admin(CREDENTIAL_FILL_GATE):
         raise AdminRequired(CREDENTIAL_FILL_ADMIN_ONLY)
-    sealed = ctx.requestable_credentials.seal(
+    request = ctx.requestable_credentials.request(
         ctx.turn.workspace_id,
         speaker,
-        tuple(prompt.slot for prompt in args.prompts),
+        args.reason,
+        args.prompts,
         await _workspace_declared(ctx),
     )
-    request = CredentialRequest(reason=args.reason, prompts=args.prompts, sealed=sealed)
     return ToolResult(
         content=(TextContent(text=f"{REQUEST_CREDENTIALS_DIRECTIVE}\n{request.model_dump_json()}"),)
     )
+
+
+async def request_credentials_member_handoff(
+    ctx: MemberHandoffContext, args: RequestCredentialsInput
+) -> MemberHandoffResult:
+    """Mint a private credential prompt for the authenticated portal member."""
+    if not ctx.admin:
+        raise AdminRequired(CREDENTIAL_FILL_ADMIN_ONLY)
+    if ctx.request_credentials is None:
+        raise RuntimeError("no credential key is configured — this deploy cannot store secrets")
+    request = await ctx.request_credentials(args.reason, args.prompts)
+    return MemberHandoffResult(data={"credentials": request.model_dump(mode="json")})
 
 
 async def _workspace_declared(ctx: ToolContext) -> dict[str, str]:
@@ -1414,6 +1450,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=ConnectAccountInput,
         handler=connect_account_handler,
+        member_handoff=connect_account_member_handoff,
         final_act_model=ConnectRequest,
         presentation=ActionPresentation(label="Connect", frame=True),
     ),
@@ -1454,6 +1491,7 @@ REQUEST_CREDENTIALS_TOOL_DEF = ToolDef(
     ),
     input_model=RequestCredentialsInput,
     handler=request_credentials_handler,
+    member_handoff=request_credentials_member_handoff,
     final_act_model=CredentialRequest,
     bound=ObjectBinding(kind=CREDENTIAL_KIND, binding="collection"),
     presentation=ActionPresentation(label="Request credentials"),

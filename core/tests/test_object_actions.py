@@ -44,7 +44,14 @@ from ufo.runtime.queue import (
     _with_action_verbs,
 )
 from ufo.runtime.tools.bridge import bridge_tools
-from ufo.runtime.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
+from ufo.runtime.tools.context import (
+    MemberHandoffContext,
+    MemberHandoffResult,
+    SpawnResult,
+    TextContent,
+    ToolContext,
+    ToolResult,
+)
 from ufo.runtime.tools.registry import (
     ActionPresentation,
     ObjectBinding,
@@ -76,6 +83,10 @@ class _ProbeInput(BaseModel):
 
 async def _probe(ctx: ToolContext, args: _ProbeInput) -> ToolResult:
     return ToolResult(content=(TextContent(text="ok"),))
+
+
+async def _handoff(ctx: MemberHandoffContext, args: _ProbeInput) -> MemberHandoffResult:
+    return MemberHandoffResult(message="ok")
 
 
 def _action(
@@ -199,6 +210,7 @@ def test_declaration_gates_hold_presentation_and_final_act_models() -> None:
         ({"presentation": ActionPresentation(label="  ")}, "empty label"),
         ({"presentation": ActionPresentation(label="Run", confirm=" ")}, "empty confirmation"),
         ({"profile_only": True, "presentation": ActionPresentation(label="Run")}, "profile_only"),
+        ({"member_handoff": _handoff}, "member handoff with no presentation"),
         ({"final_act_model": _ProbeInput}, "no terminal frame field"),
     ):
         with pytest.raises(ValueError, match=message):

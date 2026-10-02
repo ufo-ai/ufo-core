@@ -788,6 +788,15 @@ class BoundAction:
     context: "ExtensionContext | None"
 
 
+@dataclass(frozen=True)
+class BoundMemberHandoff:
+    """A callable's direct surface handler bound to its contributor's scoped context."""
+
+    callable: ToolDef
+    extension: str | None
+    context: "ExtensionContext | None"
+
+
 def action_registry(
     bound: tuple[BoundAction, ...], kinds: Mapping[str, BoundKind]
 ) -> dict[str, dict[str, BoundAction]]:
