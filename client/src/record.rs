@@ -63,6 +63,13 @@ pub struct Meter {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelRouteChange {
+    pub failed_model: String,
+    pub replacement_model: String,
+    pub failure: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRef {
     pub kind: String,
     pub name: String,
@@ -140,6 +147,8 @@ pub struct TerminalFrame {
     pub created: Option<Vec<ObjectRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<Vec<ActivityEvent>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_route_changes: Option<Vec<ModelRouteChange>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
