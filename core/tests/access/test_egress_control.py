@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_sample.spend import CHARGE_TABLE, SampleGate
 
 from ufo.db import workspace_tx
+from ufo.harness import o11y
 from ufo.harness.models.catalog import CORE_PRICING
 from ufo.harness.sandbox.cache import CACHE_HOST
 from ufo.harness.sandbox.preview import PREVIEW_AUTH_HEADER, PREVIEW_HOST, PREVIEW_SENTINEL
@@ -37,7 +38,7 @@ from ufo.runtime.access.egress_rules import (
 )
 from ufo.runtime.access.grants import GrantStore, grant_sentinel
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.billing.accounting import Ledger
+from ufo.runtime.billing.accounting import EGRESS_DIMENSION, Ledger
 from ufo.runtime.billing.spend import GateDeploy
 from ufo.runtime.tools.bridge import (
     TOOL_BRIDGE_HOST,
@@ -852,11 +853,15 @@ async def test_meter_folds_unpriced_cache_write_30m_into_input(monkeypatch, db: 
     assert captured["claude-opus-4-8"].input_tokens == 6000
 
 
-async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(monkeypatch) -> None:
-    calls: list[tuple[str, int, str, str]] = []
+async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(
+    db: None, monkeypatch
+) -> None:
+    calls: list[tuple[str, int, str, str, bool]] = []
     monkeypatch.setattr(
         "ufo.runtime.access.egress_control.emit_metric",
-        lambda name, amount, **dims: calls.append((name, amount, dims["host"], dims["dimension"])),
+        lambda name, amount, **dims: calls.append(
+            (name, amount, dims["host"], dims["dimension"], "workspace_id" in dims)
+        ),
     )
     resolver = PerAgentRules(base=(), grants=None)
     async with _client(_control(resolver)) as client:
@@ -873,9 +878,59 @@ async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(mon
         )
     assert response.json() == {}
     assert set(calls) == {
-        ("sandbox_egress_total", 2, "api.anthropic.com", "tokens"),
-        ("sandbox_egress_total", 1, "github.com", "requests"),
+        ("sandbox_egress_total", 2, "api.anthropic.com", "tokens", False),
+        ("sandbox_egress_total", 1, "github.com", "requests", False),
     }
+
+
+async def test_meter_tags_the_sandbox_egress_counter_with_the_loop_global(db, monkeypatch) -> None:
+    """When the meter endpoint runs inside a loop's workspace scope, the ambient scope is what the
+    counter is tagged with — the batch carries no workspace of its own."""
+    calls: list[tuple[str, dict[str, str]]] = []
+    monkeypatch.setattr(
+        "ufo.runtime.access.egress_control.emit_metric",
+        lambda name, amount, **dims: calls.append((name, {**dims, **o11y._ambient_scope()})),
+    )
+    seeded, resolver, _tokens = await _seed_git_cli()
+    with ws(seeded.workspace_id):
+        async with _client(_control(resolver)) as client:
+            response = await client.post(
+                "/internal/egress/meter",
+                headers=_auth(),
+                json={
+                    "records": [
+                        {"kind": "metric", "host": "api.anthropic.com", "dimension": "tokens"},
+                        {
+                            "kind": "egress",
+                            "workspace_id": str(seeded.workspace_id),
+                            "turn_id": str(seeded.turn_id),
+                            "host": "api.anthropic.com",
+                        },
+                    ]
+                },
+            )
+    assert response.json() == {}
+    assert calls == [
+        (
+            "sandbox_egress_total",
+            {
+                "host": "api.anthropic.com",
+                "dimension": "tokens",
+                "workspace_id": str(seeded.workspace_id),
+            },
+        )
+    ]
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.ledger).where(
+                    tables.ledger.c.workspace_id == seeded.workspace_id,
+                    tables.ledger.c.turn_id == seeded.turn_id,
+                    tables.ledger.c.dimension == EGRESS_DIMENSION,
+                )
+            )
+        ).fetchall()
+    assert len(rows) == 1
 
 
 async def _seed_git_cli(
