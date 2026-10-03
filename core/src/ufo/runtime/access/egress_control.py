@@ -221,9 +221,8 @@ class EgressControl:
                         ),
                     )
         for (host, dimension, ws_id), amount in counter.items():
-            # The record carries the workspace the connecting principal ran under — bind it as the
-            # ambient scope so the emitted counter is tagged with it. A pre-tag ufo-egress sends
-            # none and its point reads unattributed.
+            # The record carries the connecting principal's workspace — a pre-tag proxy sends none
+            # and its point reads unattributed.
             if ws_id is None:
                 emit_metric("sandbox_egress_total", amount, host=host, dimension=dimension)
             else:
