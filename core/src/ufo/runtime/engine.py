@@ -2911,7 +2911,7 @@ class TurnEngine:
         first_round: bool = False,
     ) -> tuple[tuple[Message, ...], StreamResult]:
         try:
-            result = await self._stream_retrying_interruption(
+            messages, result = await self._stream_retrying_interruption(
                 _RoundInput(
                     messages=messages,
                     system=system,
@@ -2944,7 +2944,7 @@ class TurnEngine:
             self._reseed_loaded_skills(compacted)
             emit_metric("turn_context_overflow_recovered_total", profile=self.profile)
             log("turn.context_overflow_recovered", turn_id=str(self.turn.id))
-            result = await self._stream_retrying_interruption(
+            compacted, result = await self._stream_retrying_interruption(
                 _RoundInput(
                     messages=compacted,
                     system=system,
@@ -2965,7 +2965,7 @@ class TurnEngine:
 
     async def _stream_retrying_interruption(
         self, round_input: _RoundInput, usage_events: list[Usage]
-    ) -> StreamResult:
+    ) -> tuple[tuple[Message, ...], StreamResult]:
         """The retry logs only the fault kind: the message is provider text and `log` redacts by
         field name."""
         interruptions = 0
@@ -2994,7 +2994,7 @@ class TurnEngine:
                     PROVIDER_RETRY_NOTICE.format(retry_at=retry_at.isoformat()), retry_at
                 )
             if result.error_kind is None or interruptions >= MAX_MIDSTREAM_ROUND_RETRIES:
-                return result
+                return round_input.messages, result
             interruptions += 1
             emit_metric(
                 "model_provider_retry_total",

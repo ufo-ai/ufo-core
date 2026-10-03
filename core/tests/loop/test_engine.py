@@ -7152,6 +7152,20 @@ class OtherAccountModel:
 
 
 @dataclass
+class ToolThenAnswerModel:
+    requests: list[ModelRequest] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            yield ToolCallStart(id="c1", name="bash")
+            yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
+        else:
+            yield TextDelta(text="done")
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass
 class UnavailableAccountModel:
     seen: list[str] = field(default_factory=list)
 
@@ -7227,6 +7241,37 @@ async def test_unavailable_connected_accounts_move_to_the_deploy_model(
             ),
         ),
     )
+
+
+async def test_a_route_change_notice_reaches_the_final_round_after_a_tool_call(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    unavailable = UnavailableAccountModel()
+    fallback = ToolThenAnswerModel()
+    engine = replace(
+        _engine(turn, unavailable, tmp_path, model_id="claude-opus-5"), attempt="attempt-1"
+    )
+    engine.serving.funding = PLAN_FUNDED
+    engine.serving.payer = "member/anthropic"
+    engine.serving.routes = ModelRoutes(
+        registry=_route_registry(fallback, PLATFORM_FUNDED, PLATFORM_PAYER),
+        remaining=(ModelRoute("claude-sonnet-5", PLATFORM_FUNDED, PLATFORM_PAYER),),
+    )
+    notice = Message(
+        role="user",
+        content=MODEL_ROUTE_CHANGE.format(
+            failed_model="claude-opus-5", replacement_model="claude-sonnet-5"
+        ),
+    )
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert frame.text == "done"
+    assert len(fallback.requests) == 2
+    assert notice in fallback.requests[0].messages
+    assert notice in fallback.requests[1].messages
 
 
 async def test_an_unavailable_pinned_account_does_not_change_models(
