@@ -58,6 +58,7 @@ from ufo.harness.models.interface import (
     ImageBlock,
     Message,
     ModelAccountRateLimited,
+    ModelAccountUnavailable,
     ModelClient,
     ModelEvent,
     ModelRequest,
@@ -7147,6 +7148,16 @@ class OtherAccountModel:
         yield Usage(input_tokens=5, output_tokens=7)
 
 
+@dataclass
+class UnavailableAccountModel:
+    seen: list[str] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.seen.append(request.model)
+        raise ModelAccountUnavailable("connected account unavailable")
+        yield TextDelta(text="")
+
+
 def _route_registry(client: object, funding: Funding, payer: str) -> ModelRegistry:
     class Registry:
         def spec(self, model: str) -> ModelSpec:
@@ -7156,6 +7167,64 @@ def _route_registry(client: object, funding: Funding, payer: str) -> ModelRegist
             return ResolvedModelClient(cast(ModelClient, client), funding, payer)
 
     return cast(ModelRegistry, Registry())
+
+
+async def test_unavailable_connected_accounts_move_to_the_deploy_model(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    first, second, fallback = (
+        UnavailableAccountModel(),
+        UnavailableAccountModel(),
+        OtherAccountModel(),
+    )
+
+    class Registry:
+        def spec(self, model: str) -> ModelSpec:
+            return CORE_SPECS[model]
+
+        async def client_for(self, model: str) -> ResolvedModelClient:
+            clients: dict[str, ModelClient] = {
+                "gpt-5.6-sol": second,
+                "claude-sonnet-5": fallback,
+            }
+            funding = PLAN_FUNDED if model == "gpt-5.6-sol" else PLATFORM_FUNDED
+            payer = "member/openai" if model == "gpt-5.6-sol" else PLATFORM_PAYER
+            return ResolvedModelClient(clients[model], funding, payer)
+
+    engine = replace(_engine(turn, first, tmp_path, model_id="claude-opus-5"), attempt="attempt-1")
+    engine.serving.funding = PLAN_FUNDED
+    engine.serving.payer = "member/anthropic"
+    engine.serving.routes = ModelRoutes(
+        registry=cast(ModelRegistry, Registry()),
+        remaining=(
+            ModelRoute("gpt-5.6-sol", PLAN_FUNDED, "member/openai"),
+            ModelRoute("claude-sonnet-5", PLATFORM_FUNDED, PLATFORM_PAYER),
+        ),
+    )
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert first.seen == ["claude-opus-5"]
+    assert second.seen == ["gpt-5.6-sol"]
+    assert fallback.seen == ["claude-sonnet-5"]
+    assert engine.serving.model == "claude-sonnet-5"
+
+
+async def test_an_unavailable_pinned_account_does_not_change_models(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    unavailable = UnavailableAccountModel()
+    engine = _engine(turn, unavailable, tmp_path, model_id="claude-opus-5")
+
+    with pytest.raises(ModelStreamError) as caught:
+        await engine.run()
+
+    assert caught.value.model_error_class == ModelAccountUnavailable.__name__
+    assert unavailable.seen == ["claude-opus-5"]
+    assert engine.serving.model == "claude-opus-5"
 
 
 async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_account(

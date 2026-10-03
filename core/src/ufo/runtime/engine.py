@@ -90,6 +90,7 @@ from ufo.harness.models.interface import (
     ImageSource,
     Message,
     ModelAccountRateLimited,
+    ModelAccountUnavailable,
     ModelRequest,
     ModelResponseTruncated,
     ModelStreamStart,
@@ -2966,9 +2967,10 @@ class TurnEngine:
         while True:
             result = await self._stream_once(round_input)
             usage_events.extend(result.usages)
-            if result.error_class == ModelAccountRateLimited.__name__ and await self._move_route(
-                usage_events
-            ):
+            if result.error_class in (
+                ModelAccountRateLimited.__name__,
+                ModelAccountUnavailable.__name__,
+            ) and await self._move_route(usage_events):
                 continue
             if result.retry_after_seconds is not None:
                 retry_at = datetime.now(UTC) + timedelta(seconds=result.retry_after_seconds)

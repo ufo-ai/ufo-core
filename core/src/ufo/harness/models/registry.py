@@ -10,13 +10,16 @@ from dataclasses import dataclass
 
 from ufo.config import Config
 from ufo.harness.models.catalog import core_model_specs
+from ufo.harness.models.grant import GrantRefusedRefresh
 from ufo.harness.models.interface import (
     AUTO_MODEL,
     PROVIDER_ANTHROPIC,
     PROVIDER_OPENAI,
+    ModelAccountUnavailable,
     ModelClient,
     ModelEvent,
     ModelRequest,
+    ModelStreamStart,
 )
 from ufo.harness.models.pricing import Pricing, pricing_from
 from ufo.harness.models.spec import ModelSpec
@@ -31,6 +34,16 @@ from ufo.runtime.workspace import (
     ResolvedModelClient,
     ws_current,
 )
+
+
+@dataclass(frozen=True)
+class _UnavailableAccount:
+    message: str
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        del request
+        raise ModelAccountUnavailable(self.message)
+        yield ModelStreamStart()
 
 
 @dataclass(frozen=True)
@@ -156,12 +169,21 @@ class ModelRegistry:
         if not spec.key_slot and not spec.key_env:
             return ResolvedModelClient(spec.client(spec, ""), PLATFORM_FUNDED, PLATFORM_PAYER)
         needed = spec.key_env or spec.key_slot.upper()
+        workspace = ws_current()
+        routed = workspace.routed_model_call(model)
         try:
-            credential = await ws_current().model_credential(
+            credential = await workspace.model_credential(
                 spec.key_slot, spec.key_env or None, model
             )
+        except GrantRefusedRefresh as refused:
+            if not routed:
+                raise
+            payer = await workspace.model_payer(spec.key_slot, spec.key_env or None, model)
+            return ResolvedModelClient(
+                _UnavailableAccount(str(refused)), payer.funding, payer.payer
+            )
         except CredentialSlotUnset as unset:
-            if ws_current().routed_model_call(model):
+            if routed:
                 raise RuntimeError(
                     f"model {model!r} needs the exact account credential bound to this turn"
                 ) from unset
@@ -178,7 +200,7 @@ class ModelRegistry:
                 "provider wire cannot carry."
             ) from error
         built = spec.client(spec, credential.value)
-        if ws_current().routed_model_call(model):
+        if routed:
             built = _RebuiltOnRejection(
                 registry=self,
                 model=model,
