@@ -19,7 +19,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from ufo.db import workspace_tx
+from ufo.db import current_workspace, workspace_tx
 from ufo.harness.models.pricing import Pricing
 from ufo.harness.o11y import emit_metric
 from ufo.harness.sandbox.session import ProbeToken, ProbeTokenCodec, RunToken, RunTokenCodec
@@ -102,9 +102,6 @@ class MetricMeterRecord(BaseModel):
     kind: Literal["metric"]
     host: str
     dimension: str
-    # A ufo-egress older than the workspace tag omits it; those points read unattributed
-    # rather than costing the batch its billing records.
-    workspace_id: UUID | None = None
 
 
 class MeterRequest(BaseModel):
@@ -192,10 +189,14 @@ class EgressControl:
         egress: dict[tuple[UUID, UUID | None], int] = {}
         tokens: dict[tuple[UUID, UUID | None], dict[str, Usage]] = {}
         counter: dict[tuple[str, str, UUID | None], int] = {}
+        # The proxy posts from outside any turn — the loop global is the only workspace this batch
+        # can name, and the point reads unattributed when none is bound.
+        loop_ws = current_workspace.get()
         for record in body.records:
             match record:
-                case MetricMeterRecord(host=host, dimension=dimension, workspace_id=ws_id):
-                    counter[(host, dimension, ws_id)] = counter.get((host, dimension, ws_id), 0) + 1
+                case MetricMeterRecord(host=host, dimension=dimension):
+                    key = (host, dimension, loop_ws)
+                    counter[key] = counter.get(key, 0) + 1
                     continue
                 case _:
                     billed = (record.workspace_id, record.turn_id)
@@ -221,8 +222,6 @@ class EgressControl:
                         ),
                     )
         for (host, dimension, ws_id), amount in counter.items():
-            # The record carries the connecting principal's workspace — a pre-tag proxy sends none
-            # and its point reads unattributed.
             if ws_id is None:
                 emit_metric("sandbox_egress_total", amount, host=host, dimension=dimension)
             else:
