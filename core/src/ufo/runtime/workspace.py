@@ -99,6 +99,14 @@ class ModelFundingChanged(RuntimeError):
     """A model client would continue an attempt on a different payer than the one it began on."""
 
 
+class ModelAccountUnusable(RuntimeError):
+    """A model's connected account could not be refreshed, so no client can be built for it.
+
+    Raised at selection time so a turn whose first candidate sits on the dead account moves to
+    the next one instead of failing before any model call. When every candidate refuses, the
+    message names the reconnect: the grant is the one thing nothing else in the deploy repairs."""
+
+
 @dataclass(frozen=True)
 class ModelCredential:
     """A model credential bound to the funding and payer its client must retain."""

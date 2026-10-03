@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from ufo.config import Config
 from ufo.harness.models.catalog import core_model_specs
+from ufo.harness.models.grant import GrantRefusedRefresh
 from ufo.harness.models.interface import (
     AUTO_MODEL,
     PROVIDER_ANTHROPIC,
@@ -26,6 +27,7 @@ from ufo.runtime.workspace import (
     PLATFORM_FUNDED,
     PLATFORM_PAYER,
     Funding,
+    ModelAccountUnusable,
     ModelFundingChanged,
     ModelPayer,
     ResolvedModelClient,
@@ -169,6 +171,10 @@ class ModelRegistry:
                 f"model {model!r} needs a key: set env UFO_{needed} (or {needed}) or the "
                 f"workspace's {spec.key_slot!r} BYOK slot"
             ) from unset
+        except GrantRefusedRefresh as refused:
+            raise ModelAccountUnusable(
+                f"model {model!r} runs on a connected account that could not be refreshed"
+            ) from refused
         try:
             credential.value.encode("ascii")
         except UnicodeEncodeError as error:

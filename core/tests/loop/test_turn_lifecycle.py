@@ -73,7 +73,7 @@ from ufo.harness.models.catalog import (
     CORE_PRICING,
     OPENAI_KEY_SLOT,
 )
-from ufo.harness.models.grant import Grant
+from ufo.harness.models.grant import Grant, GrantRefusedRefresh
 from ufo.harness.models.interface import (
     PROVIDER_ANTHROPIC,
     Message,
@@ -2226,3 +2226,100 @@ async def test_the_scheduled_slot_gates_only_scheduled_model_loop_turns() -> Non
     scheduled = loop_queue._turn_gates(None, SCHEDULED_ADMISSION)
     assert len(scheduled) == 1 and isinstance(scheduled[0], asyncio.Semaphore)
     assert scheduled[0]._value == loop_queue.SCHEDULED_TURN_CONCURRENCY
+
+
+async def test_a_refusing_account_is_dropped_from_the_routes_not_the_turn(
+    surface: Turns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first candidate whose connected account refuses to refresh is an unreachable route: the
+    turn moves to the next candidate instead of failing before any model call."""
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    seed = await _bootstrap()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    monkeypatch.setattr(workspace_module, "_store", store)
+    monkeypatch.setattr(
+        loop_queue,
+        "_runtime",
+        replace(
+            runtime,
+            registry=KEYED_REGISTRY,
+            subagents=SubagentRegistry((PLAN_ACCOUNT_PROFILE,)),
+        ),
+    )
+
+    async def refused_member(email: str) -> str:
+        conversation_id, turn_id = uuid4(), uuid4()
+        async with workspace_tx() as connection:
+            member = await create_member(connection, seed.workspace_id, email)
+            await connection.execute(
+                sa.insert(tables.conversation).values(
+                    id=conversation_id,
+                    workspace_id=seed.workspace_id,
+                    agent_id=seed.agent_id,
+                    surface="subagent",
+                    queue_key=str(turn_id),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=turn_id,
+                    workspace_id=seed.workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=seed.agent_id,
+                    seq=1,
+                    status="queued",
+                    inbound='{"value": 1}',
+                    subagent_profile=PLAN_ACCOUNT_PROFILE.name,
+                    model_accounts=[
+                        ModelAccountCapability(
+                            provider=PROVIDER_ANTHROPIC,
+                            slot=member_slot(ANTHROPIC_KEY_SLOT, member),
+                        ).model_dump(mode="json")
+                    ],
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        # A grant at its refresh margin: the next client_for must exchange its refresh token.
+        grant = Grant(access="oat-token", refresh="refresh", expires_at=time.time())
+        await store.put(seed.workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member), grant.stored())
+        return turn_id
+
+    dead = await refused_member("dead@work.com")
+    # A member whose grant refuses its refresh: the plan route is unreachable, so the turn falls
+    # to the next candidate — the deploy's key under the fallback model.
+    monkeypatch.setattr(workspace_module, "refreshed", async_refusal, raising=True)
+    status = await loop_queue._execute_turn(str(seed.workspace_id), str(dead))
+    monkeypatch.undo()
+    async with workspace_tx() as connection:
+        terminal = (
+            await connection.execute(
+                sa.select(tables.turn.c.terminal).where(tables.turn.c.id == dead)
+            )
+        ).scalar_one()
+    assert status == "done", (
+        f"the refused route did not fall through: {status} "
+        f"{(terminal or {}).get('error_class')}: {(terminal or {}).get('error_message')}"
+    )
+
+    async with workspace_tx() as connection:
+        dead_models = (
+            (
+                await connection.execute(
+                    sa.select(tables.ledger.c.model).where(tables.ledger.c.turn_id == dead)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert set(dead_models) == {PLAN_FALLBACK_MODEL}
+
+
+async def _async_refusal(grant: Grant, slot: str) -> Grant:
+    raise GrantRefusedRefresh(slot)
+
+
+async_refusal = _async_refusal

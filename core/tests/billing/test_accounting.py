@@ -21,6 +21,7 @@ from ufo.harness.models.pricing import (
 )
 from ufo.harness.models.registry import ModelRegistry
 from ufo.runtime import queue as loop_queue
+from ufo.runtime.access.credentials import CredentialSlotUnset
 from ufo.runtime.billing import accounting
 from ufo.runtime.billing.accounting import (
     IMAGES_DIMENSION,
@@ -45,6 +46,7 @@ from ufo.runtime.workspace import (
     PLAN_FUNDED,
     PLATFORM_FUNDED,
     PLATFORM_PAYER,
+    ModelAccountUnusable,
     ModelFundingChanged,
     ModelPayer,
     ResolvedModelClient,
@@ -1710,8 +1712,9 @@ async def test_a_recovery_cannot_move_the_frozen_model_to_another_payer(db: None
         "anthropic_api_key:member:first",
         True,
     )
-    assert first_registry.requested == ["claude-opus-4-8"]
-    assert recovered_registry.requested == ["claude-opus-4-8"]
+    # The route probe also builds a client for the sole candidate, so it appears twice.
+    assert set(first_registry.requested) == {"claude-opus-4-8"}
+    assert set(recovered_registry.requested) == {"claude-opus-4-8"}
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1859,3 +1862,46 @@ async def test_background_provider_call_id_deduplicates_and_refuses_changed_usag
         and charge["platform_paid"] is not byok
         for charge in charges
     )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_an_unreachable_route_is_dropped_before_the_identity_freezes(
+    db: None,
+) -> None:
+    """An unreachable later candidate is dropped from the routes, not a fault: a deploy with no
+    OpenRouter key and a member account on the first candidate runs the turn on that account."""
+
+    class Registry:
+        pricing = CORE_PRICING
+
+        def __init__(self) -> None:
+            self.served: list[str] = []
+
+        async def client_for(self, model: str) -> ResolvedModelClient:
+            self.served.append(model)
+            payer = f"{model}_slot:member:first"
+            funding = KEY_FUNDED if model == FIRST_MODEL else None
+            if funding is None:
+                raise ModelAccountUnusable(f"model {model!r} account refused")
+            return ResolvedModelClient(cast(ModelClient, object()), funding, payer)
+
+        async def payer_for(self, model: str) -> ModelPayer:
+            if model != FIRST_MODEL:
+                raise CredentialSlotUnset(f"{model}_slot")
+            return ModelPayer(KEY_FUNDED, f"{model}_slot:member:first")
+
+    registry = Registry()
+    billing, _, _ = await loop_queue._TurnBilling(
+        registry=cast(ModelRegistry, registry),
+        turn_id=uuid4(),
+        attempt="attempt-1",
+        candidates=(FIRST_MODEL, "gpt-5.4"),
+    ).resolve()
+
+    assert billing.model == FIRST_MODEL
+    assert FIRST_MODEL in registry.served
+    # The dropped candidate holds no route in the frozen identity.
+    assert billing.alternate_order == ()
+
+
+FIRST_MODEL = "claude-opus-4-8"

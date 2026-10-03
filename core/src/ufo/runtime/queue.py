@@ -132,6 +132,7 @@ from ufo.runtime.workspace import (
     PLAN_FUNDED,
     PLATFORM_FUNDED,
     Funding,
+    ModelAccountUnusable,
     ModelFundingChanged,
     ResolvedModelClient,
     model_credentials,
@@ -262,6 +263,16 @@ class _BillingIdentity(_Rates):
         )
 
 
+async def _account_refused(registry: ModelRegistry, model: str) -> bool:
+    """True when `model`'s connected account refuses to refresh — an unreachable candidate the
+    route builder drops; any other refusal (a missing key, a bad value) propagates."""
+    try:
+        await registry.client_for(model)
+    except ModelAccountUnusable:
+        return True
+    return False
+
+
 @dataclass(frozen=True)
 class _TurnBilling:
     registry: ModelRegistry
@@ -272,9 +283,18 @@ class _TurnBilling:
     async def resolve(self) -> tuple[_BillingIdentity, ResolvedModelClient, bool]:
         billing = await _stored_billing_identity(self.turn_id, self.attempt)
         if billing is None:
-            model = await self.registry.client_for(self.candidates[0])
-            routes = [ModelRoute(self.candidates[0], model.funding, model.payer)]
-            for candidate_model in self.candidates[1:]:
+            serving = [
+                candidate
+                for candidate in self.candidates
+                if not await _account_refused(self.registry, candidate)
+            ]
+            if not serving:
+                await self.registry.client_for(
+                    self.candidates[0]
+                )  # raise the refusal with its own identity
+            model = await self.registry.client_for(serving[0])
+            routes = [ModelRoute(serving[0], model.funding, model.payer)]
+            for candidate_model in serving[1:]:
                 payer = await self.registry.payer_for(candidate_model)
                 routes.append(ModelRoute(candidate_model, payer.funding, payer.payer))
             candidate = self._identity(tuple(routes))
