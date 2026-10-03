@@ -247,6 +247,7 @@ from ufo.runtime.tools.context import (
     TextContent,
     ToolContext,
     ToolResult,
+    model_route_guidance,
 )
 from ufo.runtime.tools.question import ASK_USER_DIRECTIVE
 from ufo.runtime.tools.registry import (
@@ -8900,6 +8901,52 @@ async def test_dispatch_offloads_an_oversize_nonerror_result_and_keeps_a_preview
     )
     assert full not in block.content
     assert carrier.writes == [(actual, full.encode())]
+
+
+async def test_dispatch_keeps_route_guidance_after_an_untrusted_result_preview(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    total = MAX_TOOL_RESULT_CHARS + 500
+    full = "a" * total
+    route_change = ModelRouteChange(
+        failed_model="claude-opus-5-5",
+        replacement_model="gpt-5.6-sol",
+        failure="unavailable",
+    )
+
+    async def routed(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(
+            content=(TextContent(text=full),),
+            untrusted=True,
+            model_route_changes=(route_change,),
+        )
+
+    carrier = RecordingCarrier()
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path, carrier=carrier),
+        tools=ToolRegistry(
+            (ToolDef(name="routed", description="d", input_model=_NoArgs, handler=routed),)
+        ),
+    )
+
+    block = await _dispatch(
+        engine,
+        _dispatch_context(engine),
+        ToolUseBlock(id="c1", name="routed", input={}),
+        {},
+    )
+
+    path = _tool_output_display(turn, "c1.txt")
+    preview = full[:TOOL_RESULT_PREVIEW_CHARS] + OFFLOAD_NOTICE.format(total=total, path=path)
+    guidance = model_route_guidance((route_change,))
+    assert block.content == (
+        UNTRUSTED_NOTICE.format(source="routed")
+        + UNTRUSTED_OPEN.format(source="routed")
+        + preview
+        + UNTRUSTED_CLOSE
+        + f"\n\n{guidance}"
+    )
 
 
 def _image_result_tool(name: str) -> ToolDef:

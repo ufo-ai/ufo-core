@@ -219,6 +219,7 @@ from ufo.runtime.tools.context import (
     UntrustedContentError,
     clipped,
     measure_file,
+    model_route_guidance,
     store_artifact,
 )
 from ufo.runtime.tools.question import question_result_text
@@ -727,6 +728,7 @@ class _HandlerOutput:
     sources: tuple[SourceRef, ...] = ()
     completion: str | None = None
     created: tuple[ObjectRef, ...] = ()
+    model_route_changes: tuple[ModelRouteChange, ...] = ()
 
 
 @dataclass
@@ -4287,6 +4289,7 @@ class TurnEngine:
                 sources=() if result.is_error else result.sources,
                 completion=None if result.is_error else result.completion,
                 created=() if result.is_error else result.created,
+                model_route_changes=() if result.is_error else result.model_route_changes,
             )
         except TerminalAbsent as error:
             raise TerminalGone(str(error)) from error
@@ -4362,6 +4365,9 @@ class TurnEngine:
                 content = post.output
             if post.injected:
                 content = f"{content}\n{post.injected}"
+        guidance = model_route_guidance(handled.model_route_changes)
+        if guidance:
+            content = f"{content}\n\n{guidance}"
         image_refs: list[ImageRef] = []
         if handled.images and not handled.is_error:
             for index, image in enumerate(handled.images):

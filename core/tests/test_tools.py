@@ -1149,7 +1149,7 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
     assert recorded[1] == ("turn-1/spawn/call-1", False, speaker, request_ref)
 
 
-async def test_spawn_appends_model_route_guidance_after_the_validated_output(
+async def test_spawn_returns_route_changes_beside_the_validated_output(
     tmp_path: Path,
 ) -> None:
     async def _record(
@@ -1190,13 +1190,15 @@ async def test_spawn_appends_model_route_guidance_after_the_validated_output(
         payload={"task": "x"},
     )
 
-    output, guidance = result.content[0].text.split("\n\n", 1)
-    assert '<untrusted-content source="research">' in output
-    assert '{"result":"done"}' in output
-    assert output.endswith("</untrusted-content>")
-    assert guidance.startswith("<model_route_guidance>")
-    assert '"failed_model":"claude-opus-5-5"' in guidance
-    assert '"replacement_model":"gpt-5.6-sol"' in guidance
+    assert result.content[0].text == '{"result":"done"}'
+    assert result.untrusted
+    assert result.model_route_changes == (
+        ModelRouteChange(
+            failed_model="claude-opus-5-5",
+            replacement_model="gpt-5.6-sol",
+            failure="unavailable",
+        ),
+    )
 
 
 async def test_spawn_carries_the_calls_model_to_the_child_and_surfaces_its_refusal(

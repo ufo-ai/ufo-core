@@ -244,7 +244,8 @@ class ToolResult(BaseModel):
     """A handler result. Successful completion supplies the member-facing final reply;
     structured profiles keep their output contract. `created` names every object the call brought
     into being, whichever tool ran the verb, so the turn records the creation from the result
-    itself rather than from the text one tool happens to print."""
+    itself rather than from the text one tool happens to print. `model_route_changes` carries a
+    completed child's routing facts past result bounding and untrusted-content walls."""
 
     completion: str | None = Field(default=None, min_length=1, max_length=TOOL_COMPLETION_MAX_CHARS)
     content: tuple[ContentBlock, ...]
@@ -252,6 +253,7 @@ class ToolResult(BaseModel):
     untrusted: bool = False
     sources: tuple[SourceRef, ...] = ()
     created: tuple[ObjectRef, ...] = ()
+    model_route_changes: tuple[ModelRouteChange, ...] = ()
 
 
 RESULT_CUT_MARKER = "\n…["
