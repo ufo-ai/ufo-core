@@ -296,6 +296,10 @@ MODEL_TRUNCATED_ERROR_CLASS = ModelResponseTruncated.__name__
 MAX_MIDSTREAM_ROUND_RETRIES = 1
 CARRIED_FILE_KEY_PART = "artifact"
 PROVIDER_RETRY_NOTICE = "The model provider limited this task. It will retry after {retry_at}."
+MODEL_ROUTE_FAILURES: Mapping[str, ModelRouteFailure] = {
+    ModelAccountRateLimited.__name__: "rate_limited",
+    ModelAccountUnavailable.__name__: "unavailable",
+}
 SANDBOX_PROVIDER_RETRY_NOTICE = (
     "The sandbox provider is unavailable. This task will retry after {retry_at}."
 )
@@ -2972,10 +2976,7 @@ class TurnEngine:
         while True:
             result = await self._stream_once(round_input)
             usage_events.extend(result.usages)
-            route_failure: ModelRouteFailure | None = {
-                ModelAccountRateLimited.__name__: "rate_limited",
-                ModelAccountUnavailable.__name__: "unavailable",
-            }.get(result.error_class or "")
+            route_failure = MODEL_ROUTE_FAILURES.get(result.error_class or "")
             if route_failure is not None and await self._move_route(usage_events, route_failure):
                 continue
             if result.retry_after_seconds is not None:
