@@ -294,6 +294,11 @@ MODEL_TRUNCATED_ERROR_CLASS = ModelResponseTruncated.__name__
 MAX_MIDSTREAM_ROUND_RETRIES = 1
 CARRIED_FILE_KEY_PART = "artifact"
 PROVIDER_RETRY_NOTICE = "The model provider limited this task. It will retry after {retry_at}."
+MODEL_ROUTE_CHANGE = (
+    "<model_route_change>The connected account serving {failed_model} is unavailable. This turn "
+    "continued with {replacement_model}. Tell the member both facts in your final response."
+    "</model_route_change>"
+)
 SANDBOX_PROVIDER_RETRY_NOTICE = (
     "The sandbox provider is unavailable. This task will retry after {retry_at}."
 )
@@ -2967,11 +2972,22 @@ class TurnEngine:
         while True:
             result = await self._stream_once(round_input)
             usage_events.extend(result.usages)
-            if result.error_class in (
+            routed_error = result.error_class in (
                 ModelAccountRateLimited.__name__,
                 ModelAccountUnavailable.__name__,
-            ) and await self._move_route(usage_events):
-                continue
+            )
+            if routed_error:
+                failed_model = self.serving.model
+                if await self._move_route(usage_events):
+                    notice = MODEL_ROUTE_CHANGE.format(
+                        failed_model=failed_model,
+                        replacement_model=self.serving.model,
+                    )
+                    round_input = replace(
+                        round_input,
+                        messages=(*round_input.messages, Message(role="user", content=notice)),
+                    )
+                    continue
             if result.retry_after_seconds is not None:
                 retry_at = datetime.now(UTC) + timedelta(seconds=result.retry_after_seconds)
                 raise TurnParked(

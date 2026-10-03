@@ -153,6 +153,7 @@ from ufo.runtime.engine import (
     MAX_MIDSTREAM_ROUND_RETRIES,
     MAX_PARALLEL_TOOL_CALLS,
     MAX_TOOL_RESULT_CHARS,
+    MODEL_ROUTE_CHANGE,
     MODEL_TRUNCATED_ERROR_CLASS,
     NO_DIAGNOSTIC_NOTICE,
     NO_REQUESTER_HINT,
@@ -7141,9 +7142,11 @@ class LimitedAfterOneRoundModel:
 @dataclass
 class OtherAccountModel:
     seen: list[str] = field(default_factory=list)
+    requests: list[ModelRequest] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         self.seen.append(request.model)
+        self.requests.append(request)
         yield TextDelta(text="done")
         yield Usage(input_tokens=5, output_tokens=7)
 
@@ -7210,6 +7213,20 @@ async def test_unavailable_connected_accounts_move_to_the_deploy_model(
     assert second.seen == ["gpt-5.6-sol"]
     assert fallback.seen == ["claude-sonnet-5"]
     assert engine.serving.model == "claude-sonnet-5"
+    assert fallback.requests[0].messages[-2:] == (
+        Message(
+            role="user",
+            content=MODEL_ROUTE_CHANGE.format(
+                failed_model="claude-opus-5", replacement_model="gpt-5.6-sol"
+            ),
+        ),
+        Message(
+            role="user",
+            content=MODEL_ROUTE_CHANGE.format(
+                failed_model="gpt-5.6-sol", replacement_model="claude-sonnet-5"
+            ),
+        ),
+    )
 
 
 async def test_an_unavailable_pinned_account_does_not_change_models(
