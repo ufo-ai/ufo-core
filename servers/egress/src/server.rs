@@ -1040,12 +1040,12 @@ async fn service(
     };
     if let Some(host) = &billed_host {
         emit_metrics(
-        shared,
-        host,
-        &[REQUEST_METER_DIMENSION.to_string()],
-        principal.workspace_id(),
-    )
-    .await;
+            shared,
+            host,
+            &[REQUEST_METER_DIMENSION.to_string()],
+            principal.workspace_id(),
+        )
+        .await;
         enqueue_egress(shared, &principal).await;
     }
     let mut daemon_conn = daemon_conn;
