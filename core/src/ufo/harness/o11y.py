@@ -635,6 +635,19 @@ def _emit_log(
     )
 
 
+WORKSPACE_DIMENSION = "workspace_id"
+
+
+def _tagged(dimensions: dict[str, str]) -> dict[str, str]:
+    """A series' attributes with the ambient workspace merged in, so every metric inside a
+    `with ws(...)` scope is tagged with the workspace it ran under — usage splittable by workspace
+    with no call site passing it. A call site passing `workspace_id` itself would mint one series
+    under one scope's tag and read under another's, so it refuses rather than mis-tag."""
+    if WORKSPACE_DIMENSION in dimensions:
+        raise ValueError(f"{WORKSPACE_DIMENSION} is ambient; do not pass it to a metric")
+    return {**dimensions, **_ambient_scope()}
+
+
 def _bounded_error_class(dimensions: dict[str, str]) -> dict[str, str]:
     """A series' attributes with `error_class` folded onto `ERROR_CLASSES`, everything else
     `OTHER_ERROR_CLASS`. A series costs the product of its dimensions, and a class name is whatever
@@ -661,7 +674,7 @@ def emit_metric(name: str, amount: int = 1, /, **dimensions: str) -> None:
     if counter is None:
         counter = metrics.get_meter(INSTRUMENTATION_NAME).create_counter(f"ufo.{name}")
         _counters[name] = counter
-    counter.add(amount, attributes=_bounded_error_class(dimensions))
+    counter.add(amount, attributes=_bounded_error_class(_tagged(dimensions)))
 
 
 def emit_histogram(name: str, value: int, /, **dimensions: str) -> None:
@@ -686,7 +699,7 @@ def emit_histogram(name: str, value: int, /, **dimensions: str) -> None:
             f"ufo.{name}", unit="ms"
         )
         _histograms[name] = histogram
-    histogram.record(value, attributes=_bounded_error_class(dimensions))
+    histogram.record(value, attributes=_bounded_error_class(_tagged(dimensions)))
 
 
 def emit_up_down_metric(name: str, amount: int, /, **dimensions: str) -> None:
@@ -701,7 +714,7 @@ def emit_up_down_metric(name: str, amount: int, /, **dimensions: str) -> None:
     if counter is None:
         counter = metrics.get_meter(INSTRUMENTATION_NAME).create_up_down_counter(f"ufo.{name}")
         _up_down_counters[name] = counter
-    counter.add(amount, attributes=dimensions)
+    counter.add(amount, attributes=_tagged(dimensions))
 
 
 async def emit_service_check(name: str, status: int, message: str = "", /, **tags: str) -> None:

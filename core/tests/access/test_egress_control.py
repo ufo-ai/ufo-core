@@ -853,9 +853,24 @@ async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(mon
             headers=_auth(),
             json={
                 "records": [
-                    {"kind": "metric", "host": "api.anthropic.com", "dimension": "tokens"},
-                    {"kind": "metric", "host": "api.anthropic.com", "dimension": "tokens"},
-                    {"kind": "metric", "host": "github.com", "dimension": "requests"},
+                    {
+                        "kind": "metric",
+                        "host": "api.anthropic.com",
+                        "dimension": "tokens",
+                        "workspace_id": "00000000-0000-0000-0000-000000000001",
+                    },
+                    {
+                        "kind": "metric",
+                        "host": "api.anthropic.com",
+                        "dimension": "tokens",
+                        "workspace_id": "00000000-0000-0000-0000-000000000001",
+                    },
+                    {
+                        "kind": "metric",
+                        "host": "github.com",
+                        "dimension": "requests",
+                        "workspace_id": "00000000-0000-0000-0000-000000000002",
+                    },
                 ]
             },
         )

@@ -247,11 +247,9 @@ def _attributes(reader: InMemoryMetricReader) -> dict[str, dict[str, str]]:
     }
 
 
-def test_logs_and_spans_carry_the_workspace_and_metrics_carry_none(monkeypatch, caplog):
-    """A workspace on a metric is one time series per workspace, multiplied by every other dimension
-    — the one dimension that grows with the customer base. A record and a span cost their own
-    storage and are read one at a time, so the scope tags both: the same turn is findable by
-    workspace in logs and traces, and its metrics aggregate across the fleet."""
+def test_logs_spans_and_metrics_carry_the_workspace(monkeypatch, caplog):
+    """Usage has to split by workspace, so the scope tags metrics as well as records and spans —
+    one time series per workspace per metric, the same bound the other dimensions live under."""
     exporter = InMemorySpanExporter()
     tracer_provider = TracerProvider()
     tracer_provider.add_span_processor(SimpleSpanProcessor(exporter))
@@ -265,8 +263,8 @@ def test_logs_and_spans_carry_the_workspace_and_metrics_carry_none(monkeypatch, 
             pass
         o11y.log("turn.started", turn_id="abc")
     assert _attributes(reader) == {
-        "ufo.turn_started_total": {},
-        "ufo.model_round_ms": {"model": "claude-opus-4-8"},
+        "ufo.turn_started_total": {"workspace_id": str(workspace_id)},
+        "ufo.model_round_ms": {"model": "claude-opus-4-8", "workspace_id": str(workspace_id)},
     }
     assert exporter.get_finished_spans()[0].attributes["ufo.workspace_id"] == str(workspace_id)
     assert caplog.records[-1].ufo == {"workspace_id": str(workspace_id), "turn_id": "abc"}

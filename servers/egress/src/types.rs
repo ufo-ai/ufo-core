@@ -70,7 +70,8 @@ pub enum Rule {
 }
 
 /// One metered event the proxy posts to the meter RPC; `serve` groups, prices, and writes the ledger.
-/// `Metric` carries no ledger charge — it is the `sandbox_egress_total{host, dimension}` observability
+/// `Metric` carries the connecting principal's workspace — no ledger charge, but the
+/// `sandbox_egress_total` counter it becomes is tagged with the workspace, so usage splits by one.
 /// counter the in-process Python proxy emitted directly, now teed through the RPC so `serve` (which
 /// holds the OTLP meter provider) emits it. It fires once per metered CONNECT — for a token-metered
 /// host that means at establish time, before and independent of whether usage parses.
@@ -90,6 +91,7 @@ pub enum MeterRecord {
     Metric {
         host: String,
         dimension: String,
+        workspace_id: Uuid,
     },
 }
 
