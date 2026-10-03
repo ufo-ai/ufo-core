@@ -1040,8 +1040,13 @@ async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult:
                 ),
             )
         )
+    text = result.output.model_dump_json()
     return ToolResult(
-        content=(TextContent(text=result.output.model_dump_json()),), untrusted=result.untrusted
+        content=(TextContent(text=text),),
+        untrusted=result.untrusted,
+        model_route_changes=(
+            () if result.terminal is None else result.terminal.model_route_changes
+        ),
     )
 
 

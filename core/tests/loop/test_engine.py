@@ -58,6 +58,7 @@ from ufo.harness.models.interface import (
     ImageBlock,
     Message,
     ModelAccountRateLimited,
+    ModelAccountUnavailable,
     ModelClient,
     ModelEvent,
     ModelRequest,
@@ -246,6 +247,7 @@ from ufo.runtime.tools.context import (
     TextContent,
     ToolContext,
     ToolResult,
+    model_route_guidance,
 )
 from ufo.runtime.tools.question import ASK_USER_DIRECTIVE
 from ufo.runtime.tools.registry import (
@@ -293,6 +295,7 @@ from ufo.schema.records import (
     AskQuestion,
     AskUserInput,
     ConnectRequest,
+    ModelRouteChange,
     QuestionOption,
     TerminalFrame,
     ToolIntent,
@@ -7140,11 +7143,37 @@ class LimitedAfterOneRoundModel:
 @dataclass
 class OtherAccountModel:
     seen: list[str] = field(default_factory=list)
+    requests: list[ModelRequest] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         self.seen.append(request.model)
+        self.requests.append(request)
         yield TextDelta(text="done")
         yield Usage(input_tokens=5, output_tokens=7)
+
+
+@dataclass
+class ToolThenAnswerModel:
+    requests: list[ModelRequest] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            yield ToolCallStart(id="c1", name="bash")
+            yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
+        else:
+            yield TextDelta(text="done")
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass
+class UnavailableAccountModel:
+    seen: list[str] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.seen.append(request.model)
+        raise ModelAccountUnavailable("connected account unavailable")
+        yield TextDelta(text="")
 
 
 def _route_registry(client: object, funding: Funding, payer: str) -> ModelRegistry:
@@ -7156,6 +7185,111 @@ def _route_registry(client: object, funding: Funding, payer: str) -> ModelRegist
             return ResolvedModelClient(cast(ModelClient, client), funding, payer)
 
     return cast(ModelRegistry, Registry())
+
+
+async def test_unavailable_connected_accounts_move_to_the_deploy_model(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    first, second, fallback = (
+        UnavailableAccountModel(),
+        UnavailableAccountModel(),
+        OtherAccountModel(),
+    )
+
+    class Registry:
+        def spec(self, model: str) -> ModelSpec:
+            return CORE_SPECS[model]
+
+        async def client_for(self, model: str) -> ResolvedModelClient:
+            clients: dict[str, ModelClient] = {
+                "gpt-5.6-sol": second,
+                "claude-sonnet-5": fallback,
+            }
+            funding = PLAN_FUNDED if model == "gpt-5.6-sol" else PLATFORM_FUNDED
+            payer = "member/openai" if model == "gpt-5.6-sol" else PLATFORM_PAYER
+            return ResolvedModelClient(clients[model], funding, payer)
+
+    engine = replace(_engine(turn, first, tmp_path, model_id="claude-opus-5"), attempt="attempt-1")
+    engine.serving.funding = PLAN_FUNDED
+    engine.serving.payer = "member/anthropic"
+    engine.serving.routes = ModelRoutes(
+        registry=cast(ModelRegistry, Registry()),
+        remaining=(
+            ModelRoute("gpt-5.6-sol", PLAN_FUNDED, "member/openai"),
+            ModelRoute("claude-sonnet-5", PLATFORM_FUNDED, PLATFORM_PAYER),
+        ),
+    )
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert first.seen == ["claude-opus-5"]
+    assert second.seen == ["gpt-5.6-sol"]
+    assert fallback.seen == ["claude-sonnet-5"]
+    assert engine.serving.model == "claude-sonnet-5"
+    assert frame.model_route_changes == (
+        ModelRouteChange(
+            failed_model="claude-opus-5",
+            replacement_model="gpt-5.6-sol",
+            failure="unavailable",
+        ),
+        ModelRouteChange(
+            failed_model="gpt-5.6-sol",
+            replacement_model="claude-sonnet-5",
+            failure="unavailable",
+        ),
+    )
+    assert all(
+        "model_route" not in str(message.content) for message in fallback.requests[0].messages
+    )
+
+
+async def test_route_changes_stay_out_of_replacement_model_rounds(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
+    unavailable = UnavailableAccountModel()
+    fallback = ToolThenAnswerModel()
+    engine = replace(
+        _engine(turn, unavailable, tmp_path, model_id="claude-opus-5"), attempt="attempt-1"
+    )
+    engine.serving.funding = PLAN_FUNDED
+    engine.serving.payer = "member/anthropic"
+    engine.serving.routes = ModelRoutes(
+        registry=_route_registry(fallback, PLATFORM_FUNDED, PLATFORM_PAYER),
+        remaining=(ModelRoute("claude-sonnet-5", PLATFORM_FUNDED, PLATFORM_PAYER),),
+    )
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert frame.text == "done"
+    assert len(fallback.requests) == 2
+    assert frame.model_route_changes == (
+        ModelRouteChange(
+            failed_model="claude-opus-5",
+            replacement_model="claude-sonnet-5",
+            failure="unavailable",
+        ),
+    )
+    assert all(
+        "model_route" not in str(message.content)
+        for request in fallback.requests
+        for message in request.messages
+    )
+
+
+async def test_an_unavailable_pinned_account_does_not_change_models(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    unavailable = UnavailableAccountModel()
+    engine = _engine(turn, unavailable, tmp_path, model_id="claude-opus-5")
+
+    with pytest.raises(ModelStreamError) as caught:
+        await engine.run()
+
+    assert caught.value.model_error_class == ModelAccountUnavailable.__name__
+    assert unavailable.seen == ["claude-opus-5"]
+    assert engine.serving.model == "claude-opus-5"
 
 
 async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_account(
@@ -7196,6 +7330,13 @@ async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_acco
     assert first.seen == ["gpt-5.6-sol", "gpt-5.6-sol"]
     assert other.seen == ["claude-opus-5"]
     assert engine.serving.model == "claude-opus-5"
+    assert frame.model_route_changes == (
+        ModelRouteChange(
+            failed_model="gpt-5.6-sol",
+            replacement_model="claude-opus-5",
+            failure="rate_limited",
+        ),
+    )
     assert engine.context.window.context_tokens == CORE_SPECS["claude-opus-5"].context_window
     async with workspace_tx() as connection:
         rows = (
@@ -8760,6 +8901,52 @@ async def test_dispatch_offloads_an_oversize_nonerror_result_and_keeps_a_preview
     )
     assert full not in block.content
     assert carrier.writes == [(actual, full.encode())]
+
+
+async def test_dispatch_keeps_route_guidance_after_an_untrusted_result_preview(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    total = MAX_TOOL_RESULT_CHARS + 500
+    full = "a" * total
+    route_change = ModelRouteChange(
+        failed_model="claude-opus-5-5",
+        replacement_model="gpt-5.6-sol",
+        failure="unavailable",
+    )
+
+    async def routed(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(
+            content=(TextContent(text=full),),
+            untrusted=True,
+            model_route_changes=(route_change,),
+        )
+
+    carrier = RecordingCarrier()
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path, carrier=carrier),
+        tools=ToolRegistry(
+            (ToolDef(name="routed", description="d", input_model=_NoArgs, handler=routed),)
+        ),
+    )
+
+    block = await _dispatch(
+        engine,
+        _dispatch_context(engine),
+        ToolUseBlock(id="c1", name="routed", input={}),
+        {},
+    )
+
+    path = _tool_output_display(turn, "c1.txt")
+    preview = full[:TOOL_RESULT_PREVIEW_CHARS] + OFFLOAD_NOTICE.format(total=total, path=path)
+    guidance = model_route_guidance((route_change,))
+    assert block.content == (
+        UNTRUSTED_NOTICE.format(source="routed")
+        + UNTRUSTED_OPEN.format(source="routed")
+        + preview
+        + UNTRUSTED_CLOSE
+        + f"\n\n{guidance}"
+    )
 
 
 def _image_result_tool(name: str) -> ToolDef:

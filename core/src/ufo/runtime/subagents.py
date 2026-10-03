@@ -60,6 +60,7 @@ from ufo.runtime.tools.context import (
     UnknownSpawnTarget,
     UnknownSubagentProfile,
     UntrustedContentError,
+    model_route_guidance,
 )
 from ufo.runtime.turns.audience import Audience, audience_member
 from ufo.runtime.turns.cancellation import cancel_one_turn
@@ -1368,9 +1369,11 @@ class SubagentResult:
         payload, status = self._payload(contract, child.terminal)
         if walled:
             payload = wall(wall_label, payload)
+        guidance = model_route_guidance(child.terminal.model_route_changes)
         return (
             RESULT_OPEN.format(target=target, spawn_id=child.id, status=status)
             + f"\n{payload.replace(RESULT_CLOSE, RESULT_CLOSE_ESCAPE)}\n"
+            + ("" if not guidance else f"{guidance}\n")
             + RESULT_CLOSE
         )
 

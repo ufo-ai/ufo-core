@@ -90,6 +90,7 @@ from ufo.harness.models.interface import (
     ImageSource,
     Message,
     ModelAccountRateLimited,
+    ModelAccountUnavailable,
     ModelRequest,
     ModelResponseTruncated,
     ModelStreamStart,
@@ -218,6 +219,7 @@ from ufo.runtime.tools.context import (
     UntrustedContentError,
     clipped,
     measure_file,
+    model_route_guidance,
     store_artifact,
 )
 from ufo.runtime.tools.question import question_result_text
@@ -272,6 +274,8 @@ from ufo.schema.records import (
     ConnectRequest,
     CredentialRequest,
     IncompleteReason,
+    ModelRouteChange,
+    ModelRouteFailure,
     TerminalFrame,
     TerminalStatus,
     ToolIntent,
@@ -293,6 +297,10 @@ MODEL_TRUNCATED_ERROR_CLASS = ModelResponseTruncated.__name__
 MAX_MIDSTREAM_ROUND_RETRIES = 1
 CARRIED_FILE_KEY_PART = "artifact"
 PROVIDER_RETRY_NOTICE = "The model provider limited this task. It will retry after {retry_at}."
+MODEL_ROUTE_FAILURES: Mapping[str, ModelRouteFailure] = {
+    ModelAccountRateLimited.__name__: "rate_limited",
+    ModelAccountUnavailable.__name__: "unavailable",
+}
 SANDBOX_PROVIDER_RETRY_NOTICE = (
     "The sandbox provider is unavailable. This task will retry after {retry_at}."
 )
@@ -720,6 +728,7 @@ class _HandlerOutput:
     sources: tuple[SourceRef, ...] = ()
     completion: str | None = None
     created: tuple[ObjectRef, ...] = ()
+    model_route_changes: tuple[ModelRouteChange, ...] = ()
 
 
 @dataclass
@@ -1855,6 +1864,9 @@ class TurnEngine:
     _activity: _ActivityState = field(default_factory=_ActivityState, init=False, repr=False)
     _window: _RoundWindow = field(default_factory=_RoundWindow, init=False, repr=False)
     _burn: _Burn = field(default_factory=_Burn, init=False, repr=False)
+    _model_route_changes: list[ModelRouteChange] = field(
+        default_factory=list, init=False, repr=False
+    )
     _find_usages: ContextVar[list[Usage] | None] = field(
         default_factory=lambda: ContextVar("find_usages", default=None),
         init=False,
@@ -2966,9 +2978,8 @@ class TurnEngine:
         while True:
             result = await self._stream_once(round_input)
             usage_events.extend(result.usages)
-            if result.error_class == ModelAccountRateLimited.__name__ and await self._move_route(
-                usage_events
-            ):
+            route_failure = MODEL_ROUTE_FAILURES.get(result.error_class or "")
+            if route_failure is not None and await self._move_route(usage_events, route_failure):
                 continue
             if result.retry_after_seconds is not None:
                 retry_at = datetime.now(UTC) + timedelta(seconds=result.retry_after_seconds)
@@ -2993,12 +3004,19 @@ class TurnEngine:
                 attempt=interruptions,
             )
 
-    async def _move_route(self, usage_events: list[Usage]) -> bool:
+    async def _move_route(self, usage_events: list[Usage], failure: ModelRouteFailure) -> bool:
         left = self.serving.model
         funding = self.serving.funding
         if not await self.serving.move():
             return False
         self._burn.left.append((left, len(usage_events), funding != PLATFORM_FUNDED))
+        self._model_route_changes.append(
+            ModelRouteChange(
+                failed_model=left,
+                replacement_model=self.serving.model,
+                failure=failure,
+            )
+        )
         log(
             "model.route_failover",
             turn_id=str(self.turn.id),
@@ -4271,6 +4289,7 @@ class TurnEngine:
                 sources=() if result.is_error else result.sources,
                 completion=None if result.is_error else result.completion,
                 created=() if result.is_error else result.created,
+                model_route_changes=() if result.is_error else result.model_route_changes,
             )
         except TerminalAbsent as error:
             raise TerminalGone(str(error)) from error
@@ -4346,6 +4365,9 @@ class TurnEngine:
                 content = post.output
             if post.injected:
                 content = f"{content}\n{post.injected}"
+        guidance = model_route_guidance(handled.model_route_changes)
+        if guidance:
+            content = f"{content}\n\n{guidance}"
         image_refs: list[ImageRef] = []
         if handled.images and not handled.is_error:
             for index, image in enumerate(handled.images):
@@ -4583,6 +4605,7 @@ class TurnEngine:
                 connect_request=connect_request,
                 created=created,
                 activity=self._settled_activity(),
+                model_route_changes=tuple(self._model_route_changes),
             )
             updated = await connection.execute(
                 sa.update(tables.turn)
