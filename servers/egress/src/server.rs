@@ -764,7 +764,13 @@ async fn tunnel(
     {
         return;
     }
-    emit_metrics(shared, target.host, &metering.metric_dims, principal.workspace_id()).await;
+    emit_metrics(
+        shared,
+        target.host,
+        &metering.metric_dims,
+        principal.workspace_id(),
+    )
+    .await;
     if metering.egress {
         enqueue_egress(shared, &principal).await;
     }
@@ -824,7 +830,13 @@ async fn mitm(
 
     // The counter fires once the tunnel is up and the request head is read — for a token-metered
     // host, before any usage is teed off the wire.
-    emit_metrics(shared, target.host, &metering.metric_dims, principal.workspace_id()).await;
+    emit_metrics(
+        shared,
+        target.host,
+        &metering.metric_dims,
+        principal.workspace_id(),
+    )
+    .await;
 
     let tcp = match dial_upstream(target).await {
         Some(sock) => sock,
@@ -1027,7 +1039,13 @@ async fn service(
         }
     };
     if let Some(host) = &billed_host {
-        emit_metrics(shared, host, &[REQUEST_METER_DIMENSION.to_string()], principal.workspace_id()).await;
+        emit_metrics(
+        shared,
+        host,
+        &[REQUEST_METER_DIMENSION.to_string()],
+        principal.workspace_id(),
+    )
+    .await;
         enqueue_egress(shared, &principal).await;
     }
     let mut daemon_conn = daemon_conn;
@@ -1088,7 +1106,13 @@ async fn service_direct(
             return;
         }
     };
-    emit_metrics(shared, &host, &[REQUEST_METER_DIMENSION.to_string()], principal.workspace_id()).await;
+    emit_metrics(
+        shared,
+        &host,
+        &[REQUEST_METER_DIMENSION.to_string()],
+        principal.workspace_id(),
+    )
+    .await;
     enqueue_egress(shared, &principal).await;
     let (upstream_read, mut upstream_write) = tokio::io::split(upstream);
     let mut head = Vec::new();
