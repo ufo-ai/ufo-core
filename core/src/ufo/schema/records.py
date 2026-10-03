@@ -28,6 +28,7 @@ IncompleteReason = Literal["round_budget"]
 ArtifactRole = Literal["file", "details"]
 TurnAdmissionSource = Literal["member", "internal", "scheduled", "intent"]
 ReasoningEffort = Literal["auto", "off", "low", "medium", "high"]
+ModelRouteFailure = Literal["unavailable", "rate_limited"]
 DEFAULT_REASONING_EFFORT: ReasoningEffort = "auto"
 SandboxSize = Literal["small", "medium", "large"]
 DEFAULT_SANDBOX_SIZE: SandboxSize = "small"
@@ -438,6 +439,14 @@ class ActivityEvent(BaseModel):
     text: str
 
 
+class ModelRouteChange(BaseModel):
+    """One connected-account route the turn left and the model that continued its work."""
+
+    failed_model: str
+    replacement_model: str
+    failure: ModelRouteFailure
+
+
 class TerminalFrame(BaseModel):
     status: TerminalStatus
     text: str = ""
@@ -462,6 +471,8 @@ class TerminalFrame(BaseModel):
     activity: tuple[ActivityEvent, ...] = ()
     """What a spawned turn did, written when it settled so no reader derives it from the child's
     transcript again. A root turn records none; a frame written before this field carries none."""
+    model_route_changes: tuple[ModelRouteChange, ...] = ()
+    """Connected-account failures the initiating parent must disclose with a spawned result."""
 
 
 class RuntimeIdentity(BaseModel):

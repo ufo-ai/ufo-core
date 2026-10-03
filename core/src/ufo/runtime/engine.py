@@ -273,6 +273,8 @@ from ufo.schema.records import (
     ConnectRequest,
     CredentialRequest,
     IncompleteReason,
+    ModelRouteChange,
+    ModelRouteFailure,
     TerminalFrame,
     TerminalStatus,
     ToolIntent,
@@ -294,11 +296,6 @@ MODEL_TRUNCATED_ERROR_CLASS = ModelResponseTruncated.__name__
 MAX_MIDSTREAM_ROUND_RETRIES = 1
 CARRIED_FILE_KEY_PART = "artifact"
 PROVIDER_RETRY_NOTICE = "The model provider limited this task. It will retry after {retry_at}."
-MODEL_ROUTE_CHANGE = (
-    "<model_route_change>The connected account serving {failed_model} is unavailable. This turn "
-    "continued with {replacement_model}. Tell the member both facts in your final response."
-    "</model_route_change>"
-)
 SANDBOX_PROVIDER_RETRY_NOTICE = (
     "The sandbox provider is unavailable. This task will retry after {retry_at}."
 )
@@ -1861,6 +1858,9 @@ class TurnEngine:
     _activity: _ActivityState = field(default_factory=_ActivityState, init=False, repr=False)
     _window: _RoundWindow = field(default_factory=_RoundWindow, init=False, repr=False)
     _burn: _Burn = field(default_factory=_Burn, init=False, repr=False)
+    _model_route_changes: list[ModelRouteChange] = field(
+        default_factory=list, init=False, repr=False
+    )
     _find_usages: ContextVar[list[Usage] | None] = field(
         default_factory=lambda: ContextVar("find_usages", default=None),
         init=False,
@@ -2911,7 +2911,7 @@ class TurnEngine:
         first_round: bool = False,
     ) -> tuple[tuple[Message, ...], StreamResult]:
         try:
-            messages, result = await self._stream_retrying_interruption(
+            result = await self._stream_retrying_interruption(
                 _RoundInput(
                     messages=messages,
                     system=system,
@@ -2944,7 +2944,7 @@ class TurnEngine:
             self._reseed_loaded_skills(compacted)
             emit_metric("turn_context_overflow_recovered_total", profile=self.profile)
             log("turn.context_overflow_recovered", turn_id=str(self.turn.id))
-            compacted, result = await self._stream_retrying_interruption(
+            result = await self._stream_retrying_interruption(
                 _RoundInput(
                     messages=compacted,
                     system=system,
@@ -2965,36 +2965,26 @@ class TurnEngine:
 
     async def _stream_retrying_interruption(
         self, round_input: _RoundInput, usage_events: list[Usage]
-    ) -> tuple[tuple[Message, ...], StreamResult]:
+    ) -> StreamResult:
         """The retry logs only the fault kind: the message is provider text and `log` redacts by
         field name."""
         interruptions = 0
         while True:
             result = await self._stream_once(round_input)
             usage_events.extend(result.usages)
-            routed_error = result.error_class in (
-                ModelAccountRateLimited.__name__,
-                ModelAccountUnavailable.__name__,
-            )
-            if routed_error:
-                failed_model = self.serving.model
-                if await self._move_route(usage_events):
-                    notice = MODEL_ROUTE_CHANGE.format(
-                        failed_model=failed_model,
-                        replacement_model=self.serving.model,
-                    )
-                    round_input = replace(
-                        round_input,
-                        messages=(*round_input.messages, Message(role="user", content=notice)),
-                    )
-                    continue
+            route_failure: ModelRouteFailure | None = {
+                ModelAccountRateLimited.__name__: "rate_limited",
+                ModelAccountUnavailable.__name__: "unavailable",
+            }.get(result.error_class or "")
+            if route_failure is not None and await self._move_route(usage_events, route_failure):
+                continue
             if result.retry_after_seconds is not None:
                 retry_at = datetime.now(UTC) + timedelta(seconds=result.retry_after_seconds)
                 raise TurnParked(
                     PROVIDER_RETRY_NOTICE.format(retry_at=retry_at.isoformat()), retry_at
                 )
             if result.error_kind is None or interruptions >= MAX_MIDSTREAM_ROUND_RETRIES:
-                return round_input.messages, result
+                return result
             interruptions += 1
             emit_metric(
                 "model_provider_retry_total",
@@ -3011,12 +3001,19 @@ class TurnEngine:
                 attempt=interruptions,
             )
 
-    async def _move_route(self, usage_events: list[Usage]) -> bool:
+    async def _move_route(self, usage_events: list[Usage], failure: ModelRouteFailure) -> bool:
         left = self.serving.model
         funding = self.serving.funding
         if not await self.serving.move():
             return False
         self._burn.left.append((left, len(usage_events), funding != PLATFORM_FUNDED))
+        self._model_route_changes.append(
+            ModelRouteChange(
+                failed_model=left,
+                replacement_model=self.serving.model,
+                failure=failure,
+            )
+        )
         log(
             "model.route_failover",
             turn_id=str(self.turn.id),
@@ -4601,6 +4598,7 @@ class TurnEngine:
                 connect_request=connect_request,
                 created=created,
                 activity=self._settled_activity(),
+                model_route_changes=tuple(self._model_route_changes),
             )
             updated = await connection.execute(
                 sa.update(tables.turn)

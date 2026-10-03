@@ -64,6 +64,7 @@ from ufo.harness.sandbox.session import (
     shell_path,
     workspace_path,
 )
+from ufo.harness.untrusted import wall
 from ufo.host.kinds.artifacts import artifact_object_names
 from ufo.host.kinds.conversations import CONVERSATION_MARK_ACTIONS
 from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
@@ -100,6 +101,7 @@ from ufo.runtime.tools.context import (
     ToolResult,
     UnknownSpawnTarget,
     measure_file,
+    model_route_guidance,
     store_artifact,
 )
 from ufo.runtime.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
@@ -1040,9 +1042,14 @@ async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult:
                 ),
             )
         )
-    return ToolResult(
-        content=(TextContent(text=result.output.model_dump_json()),), untrusted=result.untrusted
-    )
+    text = result.output.model_dump_json()
+    if result.untrusted:
+        text = wall(args.target, text)
+    if result.terminal is not None:
+        guidance = model_route_guidance(result.terminal.model_route_changes)
+        if guidance:
+            text = f"{text}\n\n{guidance}"
+    return ToolResult(content=(TextContent(text=text),))
 
 
 async def ask_user_handler(ctx: ToolContext, args: AskUserCall) -> ToolResult:

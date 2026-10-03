@@ -153,7 +153,6 @@ from ufo.runtime.engine import (
     MAX_MIDSTREAM_ROUND_RETRIES,
     MAX_PARALLEL_TOOL_CALLS,
     MAX_TOOL_RESULT_CHARS,
-    MODEL_ROUTE_CHANGE,
     MODEL_TRUNCATED_ERROR_CLASS,
     NO_DIAGNOSTIC_NOTICE,
     NO_REQUESTER_HINT,
@@ -295,6 +294,7 @@ from ufo.schema.records import (
     AskQuestion,
     AskUserInput,
     ConnectRequest,
+    ModelRouteChange,
     QuestionOption,
     TerminalFrame,
     ToolIntent,
@@ -7227,25 +7227,24 @@ async def test_unavailable_connected_accounts_move_to_the_deploy_model(
     assert second.seen == ["gpt-5.6-sol"]
     assert fallback.seen == ["claude-sonnet-5"]
     assert engine.serving.model == "claude-sonnet-5"
-    assert fallback.requests[0].messages[-2:] == (
-        Message(
-            role="user",
-            content=MODEL_ROUTE_CHANGE.format(
-                failed_model="claude-opus-5", replacement_model="gpt-5.6-sol"
-            ),
+    assert frame.model_route_changes == (
+        ModelRouteChange(
+            failed_model="claude-opus-5",
+            replacement_model="gpt-5.6-sol",
+            failure="unavailable",
         ),
-        Message(
-            role="user",
-            content=MODEL_ROUTE_CHANGE.format(
-                failed_model="gpt-5.6-sol", replacement_model="claude-sonnet-5"
-            ),
+        ModelRouteChange(
+            failed_model="gpt-5.6-sol",
+            replacement_model="claude-sonnet-5",
+            failure="unavailable",
         ),
+    )
+    assert all(
+        "model_route" not in str(message.content) for message in fallback.requests[0].messages
     )
 
 
-async def test_a_route_change_notice_reaches_the_final_round_after_a_tool_call(
-    db: None, tmp_path: Path
-) -> None:
+async def test_route_changes_stay_out_of_replacement_model_rounds(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn("queued", None)
     unavailable = UnavailableAccountModel()
     fallback = ToolThenAnswerModel()
@@ -7258,20 +7257,23 @@ async def test_a_route_change_notice_reaches_the_final_round_after_a_tool_call(
         registry=_route_registry(fallback, PLATFORM_FUNDED, PLATFORM_PAYER),
         remaining=(ModelRoute("claude-sonnet-5", PLATFORM_FUNDED, PLATFORM_PAYER),),
     )
-    notice = Message(
-        role="user",
-        content=MODEL_ROUTE_CHANGE.format(
-            failed_model="claude-opus-5", replacement_model="claude-sonnet-5"
-        ),
-    )
-
     frame = await engine.run()
 
     assert frame.status == "done"
     assert frame.text == "done"
     assert len(fallback.requests) == 2
-    assert notice in fallback.requests[0].messages
-    assert notice in fallback.requests[1].messages
+    assert frame.model_route_changes == (
+        ModelRouteChange(
+            failed_model="claude-opus-5",
+            replacement_model="claude-sonnet-5",
+            failure="unavailable",
+        ),
+    )
+    assert all(
+        "model_route" not in str(message.content)
+        for request in fallback.requests
+        for message in request.messages
+    )
 
 
 async def test_an_unavailable_pinned_account_does_not_change_models(
@@ -7327,6 +7329,13 @@ async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_acco
     assert first.seen == ["gpt-5.6-sol", "gpt-5.6-sol"]
     assert other.seen == ["claude-opus-5"]
     assert engine.serving.model == "claude-opus-5"
+    assert frame.model_route_changes == (
+        ModelRouteChange(
+            failed_model="gpt-5.6-sol",
+            replacement_model="claude-opus-5",
+            failure="rate_limited",
+        ),
+    )
     assert engine.context.window.context_tokens == CORE_SPECS["claude-opus-5"].context_window
     async with workspace_tx() as connection:
         rows = (
