@@ -4856,18 +4856,22 @@ async def test_a_finished_turn_meters_its_wall_clock_its_rounds_and_its_outcome(
         frame = await _engine(turn, ClockedToolCallingModel(clock), tmp_path, carrier=carrier).run()
     assert frame is not None and frame.status == "done"
     points = _exported_metrics(reader)
+    ws_tag = {"workspace_id": str(turn.workspace_id)}
     (wall,) = points["ufo.turn_ms"]
     assert (wall.count, wall.sum, dict(wall.attributes)) == (
         1,
         2 * ROUND_MS,
-        {"status": "done", "profile": "main"},
+        {"status": "done", "profile": "main", **ws_tag},
     )
     (rounds,) = points["ufo.turn_rounds_total"]
-    assert (rounds.value, dict(rounds.attributes)) == (2, {"status": "done", "profile": "main"})
+    assert (rounds.value, dict(rounds.attributes)) == (
+        2,
+        {"status": "done", "profile": "main", **ws_tag},
+    )
     (terminal,) = points["ufo.turn_terminal_total"]
     assert (terminal.value, dict(terminal.attributes)) == (
         1,
-        {"status": "done", "error_class": "", "profile": "main"},
+        {"status": "done", "error_class": "", "profile": "main", **ws_tag},
     )
 
 
@@ -6711,7 +6715,7 @@ async def test_round_budget_exhaustion_meters_under_the_turn_profile(
     points = _exported_metrics(reader)
     assert [
         dict(point.attributes) for point in points["ufo.turn_round_budget_exhausted_total"]
-    ] == [{"profile": "coding"}]
+    ] == [{"profile": "coding", "workspace_id": str(turn.workspace_id)}]
 
 
 async def test_a_lone_valid_finish_call_ends_a_subagent_turn_with_its_payload(

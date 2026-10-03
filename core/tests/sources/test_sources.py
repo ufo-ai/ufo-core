@@ -2997,6 +2997,7 @@ async def test_cursor_expired_clears_stored_cursor_and_next_run_refetches(
     assert failure.ufo["error_class"] == "CursorExpired"
     assert _metric_points(reader, SYNC_METRIC) == [
         {
+            "workspace_id": str(workspace_id),
             "provider": SCRIPTED_BACKEND,
             "stream": "",
             "error_class": "CursorExpired",
@@ -3570,7 +3571,9 @@ async def test_a_refused_stream_parks_on_the_threshold_run_and_records_it_withou
         "consecutive_refusals": SOURCE_REFUSAL_PARK_THRESHOLD,
         "reason": PARK_REASON,
     }
-    assert _metric_points(reader, PARKED_METRIC) == [{"provider": SCRIPTED_BACKEND, "stream": ""}]
+    assert _metric_points(reader, PARKED_METRIC) == [
+        {"workspace_id": str(workspace_id), "provider": SCRIPTED_BACKEND, "stream": ""}
+    ]
     assert submitted == []  # the park is not the failure path's check to speak on
 
 
@@ -4034,6 +4037,7 @@ async def test_a_failed_stream_reports_its_provider_stream_and_cause(
     }
     assert _metric_points(reader, SYNC_METRIC) == [
         {
+            "workspace_id": str(workspace_id),
             "provider": CONNECTOR_PROVIDER,
             "stream": CONNECTOR_STREAM,
             "error_class": "RuntimeError",
@@ -4591,6 +4595,7 @@ async def test_a_provider_http_error_is_still_a_failed_run(
     assert (await _source_state(source_id))["consecutive_errors"] == 1
     assert _metric_points(reader, SYNC_METRIC) == [
         {
+            "workspace_id": str(workspace_id),
             "provider": CONNECTOR_PROVIDER,
             "stream": CONNECTOR_STREAM,
             "error_class": "HTTPStatusError",
@@ -4632,6 +4637,7 @@ async def test_a_provider_socket_timeout_is_still_a_failed_run(
     assert (await _source_state(source_id))["consecutive_errors"] == 1
     assert _metric_points(reader, SYNC_METRIC) == [
         {
+            "workspace_id": str(workspace_id),
             "provider": CONNECTOR_PROVIDER,
             "stream": CONNECTOR_STREAM,
             "error_class": "TimeoutError",
@@ -4681,6 +4687,7 @@ async def test_a_blob_volume_that_refuses_a_body_is_still_a_failed_run(
     assert (await _source_state(source_id))["consecutive_errors"] == 1
     assert _metric_points(reader, SYNC_METRIC) == [
         {
+            "workspace_id": str(workspace_id),
             "provider": CONNECTOR_PROVIDER,
             "stream": CONNECTOR_STREAM,
             "error_class": "OSError",
@@ -4774,11 +4781,13 @@ async def test_a_provider_fault_reports_its_status_and_url_and_never_its_body_or
     assert not [record for record in failures if "SUPERSECRET" in str(record.ufo)]
     assert _metric_points(reader, SYNC_METRIC) == [
         {
+            "workspace_id": str(workspace_id),
             "provider": CONNECTOR_PROVIDER,
             "stream": CONNECTOR_STREAM,
             "error_class": "HTTPStatusError",
         },
         {
+            "workspace_id": str(workspace_id),
             "provider": CONNECTOR_PROVIDER,
             "stream": CONNECTOR_STREAM,
             "error_class": "LocalProtocolError",
@@ -4996,7 +5005,9 @@ async def test_a_failing_stream_holds_a_critical_check_until_a_run_succeeds(
         (SOURCE_SYNC_CHECK, o11y.SERVICE_CHECK_OK, "", check_tags),
     ]
     assert SOURCE_SYNC_CHECK in o11y.SERVICE_CHECKS
-    assert _metric_points(reader, SYNC_METRIC) == [{**tags, "error_class": "TimeoutError"}]
+    assert _metric_points(reader, SYNC_METRIC) == [
+        {**tags, "error_class": "TimeoutError", "workspace_id": str(workspace_id)}
+    ]
 
 
 async def test_telemetry_that_raises_never_breaks_the_sync_run(

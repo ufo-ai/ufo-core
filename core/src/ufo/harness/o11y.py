@@ -645,10 +645,8 @@ WORKSPACE_DIMENSION = "workspace_id"
 
 
 def _tagged(dimensions: dict[str, str]) -> dict[str, str]:
-    """A series' attributes with the ambient workspace merged in, so every metric inside a
-    `with ws(...)` scope is tagged with the workspace it ran under — usage splittable by workspace
-    with no call site passing it. A call site passing `workspace_id` itself would mint one series
-    under one scope's tag and read under another's, so it refuses rather than mis-tag."""
+    """Attributes with the ambient workspace merged in — usage splittable by workspace. A call
+    site passing `workspace_id` itself would mis-tag, so it refuses."""
     if WORKSPACE_DIMENSION in dimensions:
         raise ValueError(f"{WORKSPACE_DIMENSION} is ambient; do not pass it to a metric")
     return {**dimensions, **_ambient_scope()}
