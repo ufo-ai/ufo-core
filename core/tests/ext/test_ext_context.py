@@ -1,10 +1,10 @@
 import asyncio
 from base64 import b64encode
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from contextlib import contextmanager
 from unittest.mock import ANY
 from uuid import UUID, uuid4
 
@@ -440,7 +440,9 @@ async def test_a_failed_background_call_meters_its_latency_with_the_error_class(
             "workspace_id": ANY,
         }
     ]
-    assert all(len(point.attributes["workspace_id"]) == 36 for point in points["ufo.model_round_ms"])
+    assert all(
+        len(point.attributes["workspace_id"]) == 36 for point in points["ufo.model_round_ms"]
+    )
     assert "ufo.model_round_tokens_total" not in points
 
 
