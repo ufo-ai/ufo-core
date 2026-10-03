@@ -46,6 +46,7 @@ from ufo.runtime.tools.bridge import (
     ToolBridgeSuccess,
 )
 from ufo.runtime.workspace import ws
+from ufo.runtime.billing.accounting import EGRESS_DIMENSION
 from ufo.schema import tables
 from ufo.schema.records import TurnRuntimeConfig
 
@@ -891,6 +892,50 @@ async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(mon
         ("sandbox_egress_total", 2, "api.anthropic.com", "tokens"),
         ("sandbox_egress_total", 1, "github.com", "requests"),
     }
+
+
+async def test_a_metric_record_without_a_workspace_id_from_an_older_egress_still_meters(
+    db: None, monkeypatch
+) -> None:
+    """A ufo-egress older than the workspace tag omits it on every metric record. Rejecting the
+    batch would strand the billing records beside it, so the unattributed point meters."""
+    calls: list[tuple[str, int, str, str, bool]] = []
+    monkeypatch.setattr(
+        "ufo.runtime.access.egress_control.emit_metric",
+        lambda name, amount, **dims: calls.append(
+            (name, amount, dims["host"], dims["dimension"], "workspace_id" in dims)
+        ),
+    )
+    seeded, resolver, _tokens = await _seed_git_cli()
+    token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
+    async with _client(_control(resolver)) as client:
+        response = await client.post(
+            "/internal/egress/meter",
+            headers=_auth(),
+            json={
+                "records": [
+                    {"kind": "metric", "host": "api.anthropic.com", "dimension": "tokens"},
+                    {
+                        "kind": "egress",
+                        "workspace_id": str(seeded.workspace_id),
+                        "turn_id": str(seeded.turn_id),
+                        "host": "api.anthropic.com",
+                    },
+                ]
+            },
+        )
+    assert response.json() == {}
+    assert calls == [("sandbox_egress_total", 1, "api.anthropic.com", "tokens", False)]
+    async with workspace_tx() as connection:
+        rows = (await connection.execute(
+            sa.select(tables.ledger).where(
+                tables.ledger.c.workspace_id == seeded.workspace_id,
+                tables.ledger.c.turn_id == seeded.turn_id,
+                tables.ledger.c.dimension == EGRESS_DIMENSION,
+            )
+        )
+    ).fetchall()
+    assert len(rows) == 1
 
 
 async def _seed_git_cli(

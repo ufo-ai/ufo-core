@@ -102,7 +102,9 @@ class MetricMeterRecord(BaseModel):
     kind: Literal["metric"]
     host: str
     dimension: str
-    workspace_id: UUID
+    # A ufo-egress older than the workspace tag omits it; those points read unattributed
+    # rather than costing the batch its billing records.
+    workspace_id: UUID | None = None
 
 
 class MeterRequest(BaseModel):
@@ -189,7 +191,7 @@ class EgressControl:
     async def _meter(self, body: MeterRequest) -> dict[str, object]:
         egress: dict[tuple[UUID, UUID | None], int] = {}
         tokens: dict[tuple[UUID, UUID | None], dict[str, Usage]] = {}
-        counter: dict[tuple[str, str, UUID], int] = {}
+        counter: dict[tuple[str, str, UUID | None], int] = {}
         for record in body.records:
             match record:
                 case MetricMeterRecord(host=host, dimension=dimension, workspace_id=ws_id):
@@ -220,9 +222,13 @@ class EgressControl:
                     )
         for (host, dimension, ws_id), amount in counter.items():
             # The record carries the workspace the connecting principal ran under — bind it as the
-            # ambient scope so the emitted counter is tagged with it.
-            with ws(ws_id):
+            # ambient scope so the emitted counter is tagged with it. A pre-tag ufo-egress sends
+            # none and its point reads unattributed.
+            if ws_id is None:
                 emit_metric("sandbox_egress_total", amount, host=host, dimension=dimension)
+            else:
+                with ws(ws_id):
+                    emit_metric("sandbox_egress_total", amount, host=host, dimension=dimension)
         for workspace_id, turn_id in {*egress, *tokens}:
             with ws(workspace_id):
                 async with workspace_tx() as connection:
