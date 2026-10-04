@@ -16,13 +16,16 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
 
-FROM debian:stable-slim
+FROM debian:stable-slim AS runtime-packages
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         libreoffice-writer libreoffice-calc libreoffice-impress \
         fonts-liberation fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
         ffmpeg chromium python3 ca-certificates curl tini \
     && rm -rf /var/lib/apt/lists/*
+
+FROM runtime-packages AS runtime
 COPY scripts/fetch-pdfium.sh /tmp/fetch-pdfium.sh
 RUN sh /tmp/fetch-pdfium.sh /usr/local/lib/pdfium && rm /tmp/fetch-pdfium.sh
 ENV UFO_PREVIEW_PDFIUM_LIB=/usr/local/lib/pdfium/libpdfium.so
