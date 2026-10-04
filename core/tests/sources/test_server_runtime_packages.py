@@ -21,6 +21,7 @@ def test_server_runtime_packages_can_refresh_without_compiling(server: str) -> N
 @pytest.mark.parametrize("server", ("cache", "preview"))
 def test_libcurl_consumers_use_fixed_backports(server: str) -> None:
     dockerfile = (ROOT / "servers" / server / "Dockerfile").read_text()
+    assert "FROM rust:1-slim-trixie AS chef" in dockerfile
     assert "FROM debian:trixie-slim AS runtime-packages" in dockerfile
     assert "deb http://deb.debian.org/debian trixie-backports main" in dockerfile
     assert "-t trixie-backports" in dockerfile

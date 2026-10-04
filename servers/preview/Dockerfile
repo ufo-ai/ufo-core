@@ -1,6 +1,6 @@
 # The preview renderer: a Rust service that spawns LibreOffice and a pdfium worker as
 # bounded children, so the runtime image carries soffice, fonts, and libpdfium beside the binaries.
-FROM rust:1-slim AS chef
+FROM rust:1-slim-trixie AS chef
 RUN cargo install cargo-chef --locked --version 0.1.78
 WORKDIR /build
 

@@ -1,7 +1,7 @@
 # The sandbox cache daemon: a Rust binary that shells out to git, so the runtime image
 # carries git beside it. Built from this crate's source; the deploy runs it as a second container
 # in the sandbox-proxy pod, sharing loopback with `ufoctl proxy`.
-FROM rust:1-slim AS chef
+FROM rust:1-slim-trixie AS chef
 RUN cargo install cargo-chef --locked --version 0.1.78
 WORKDIR /build
 
