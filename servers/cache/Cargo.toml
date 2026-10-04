@@ -29,7 +29,7 @@ filetime = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 aws-config = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest"] }
-aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "rustls"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
 
 [dev-dependencies]
 tempfile = "3"
