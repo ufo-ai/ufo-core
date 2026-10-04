@@ -17,9 +17,12 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
 
-FROM debian:stable-slim
+FROM debian:stable-slim AS runtime-packages
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends git ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
+
+FROM runtime-packages AS runtime
 COPY --from=build /build/target/release/ufo-cache /usr/local/bin/ufo-cache
 ENTRYPOINT ["ufo-cache"]

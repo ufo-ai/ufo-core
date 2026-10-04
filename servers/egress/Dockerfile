@@ -25,9 +25,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked \
     && cp target/release/ufo-egress /usr/local/bin/ufo-egress
 
-FROM debian:stable-slim
+FROM debian:stable-slim AS runtime-packages
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+FROM runtime-packages AS runtime
 COPY --from=build /usr/local/bin/ufo-egress /usr/local/bin/ufo-egress
 ENTRYPOINT ["ufo-egress"]
