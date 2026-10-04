@@ -340,9 +340,17 @@ class GoogleSheetsConnector(RestConnector):
             except httpx.HTTPStatusError as error:
                 detail = google.error_detail(error)
                 if error.response.status_code == 400:
+                    reasons = "; ".join(
+                        dict.fromkeys(
+                            item["reason"]
+                            for item in list_or_empty(detail.get("errors"))
+                            + list_or_empty(detail.get("details"))
+                            if isinstance(item.get("reason"), str) and item["reason"]
+                        )
+                    )
                     raise StreamFault(
                         f"googlesheets: values:batchGet on spreadsheet {spreadsheet_id} refused "
-                        f"(400 {_str(detail.get('status'))}): {_str(detail.get('message'))}"
+                        f"(400 {_str(detail.get('status'))})" + (f": {reasons}" if reasons else "")
                     ) from error
                 if not _is_per_file_refusal(error.response.status_code, detail):
                     raise

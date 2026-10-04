@@ -405,7 +405,7 @@ async def test_sheet_values_requests_only_grid_tabs() -> None:
     }
 
 
-async def test_sheet_values_faults_with_googles_reason_on_a_refused_batch() -> None:
+async def test_sheet_values_fault_carries_googles_enumerated_reason_without_its_message() -> None:
     def refused(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json=NON_GRID_TAB_RANGE)
 
@@ -413,9 +413,9 @@ async def test_sheet_values_faults_with_googles_reason_on_a_refused_batch() -> N
         await _fetch("sheet_values", _handler(values_response=refused))
 
     assert raised.value.reason == (
-        "googlesheets: values:batchGet on spreadsheet s1 refused (400 INVALID_ARGUMENT): "
-        "Unable to parse range: 'Revenue chart'"
+        "googlesheets: values:batchGet on spreadsheet s1 refused (400 INVALID_ARGUMENT): badRequest"
     )
+    assert "Revenue chart" not in raised.value.reason
 
 
 AMBIGUOUS_TABS = ("Summary", "Q1", "ROI Annual Billing - Premium", "Owner's View")
