@@ -49,8 +49,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::config::{ResolverConfig, GOOGLE};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::proto::rr::RData;
+use hickory_resolver::TokioResolver;
 use rustls::pki_types::ServerName;
 use rustls::ClientConfig;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -204,14 +206,19 @@ impl EgressProxy {
     ) -> anyhow::Result<()> {
         // Resolve through the pod's own resolver; the DNS library default's public servers would
         // leave the cluster. See the module doc.
-        let dns = self.dns.clone().unwrap_or_else(|| {
-            Arc::new(Dns::System(Box::new(
-                TokioAsyncResolver::tokio_from_system_conf().unwrap_or_else(|error| {
+        let dns = match self.dns.clone() {
+            Some(dns) => dns,
+            None => {
+                let resolver = TokioResolver::builder_tokio().unwrap_or_else(|error| {
                     tracing::warn!(error = %error, "egress.resolv_conf_unreadable");
-                    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-                }),
-            )))
-        });
+                    TokioResolver::builder_with_config(
+                        fallback_dns_config(),
+                        TokioRuntimeProvider::default(),
+                    )
+                });
+                Arc::new(Dns::System(Box::new(resolver.build()?)))
+            }
+        };
         let shared = Arc::new(Shared {
             control: self.control.clone(),
             leaves: self.leaves.clone(),
@@ -251,6 +258,10 @@ impl EgressProxy {
         tasks.shutdown().await;
         Ok(())
     }
+}
+
+fn fallback_dns_config() -> ResolverConfig {
+    ResolverConfig::udp_and_tcp(&GOOGLE)
 }
 
 /// The `'static` slice of `EgressProxy` each connection task shares — the control client, the leaf
@@ -1537,7 +1548,7 @@ enum ResolveError {
 /// pins fixed answers so one name can answer a public address here while the system resolver a
 /// connect-by-name would use answers a private one.
 pub enum Dns {
-    System(Box<TokioAsyncResolver>),
+    System(Box<TokioResolver>),
     Fixed(HashMap<String, Vec<Ipv4Addr>>),
 }
 
@@ -1545,7 +1556,14 @@ impl Dns {
     async fn ipv4(&self, host: &str) -> Result<Vec<Ipv4Addr>, ResolveError> {
         match self {
             Dns::System(resolver) => match resolver.ipv4_lookup(host).await {
-                Ok(lookup) => Ok(lookup.iter().map(|a| a.0).collect()),
+                Ok(lookup) => Ok(lookup
+                    .answers()
+                    .iter()
+                    .filter_map(|record| match &record.data {
+                        RData::A(address) => Some(address.0),
+                        _ => None,
+                    })
+                    .collect()),
                 Err(_) => Err(ResolveError::Unreachable),
             },
             Dns::Fixed(answers) => answers.get(host).cloned().ok_or(ResolveError::Unreachable),
@@ -1802,6 +1820,81 @@ fn reason_phrase(status: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hickory_resolver::config::NameServerConfig;
+    use hickory_resolver::proto::op::{Message, MessageType, OpCode};
+    use hickory_resolver::proto::rr::{rdata::A, Record};
+    use tokio::net::UdpSocket;
+
+    #[test]
+    fn fallback_dns_has_the_public_servers_when_system_configuration_is_unreadable() {
+        let config = fallback_dns_config();
+        assert_eq!(config.name_servers.len(), 4);
+        assert!(config
+            .name_servers
+            .iter()
+            .any(|server| server.ip == Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(config
+            .name_servers
+            .iter()
+            .any(|server| server.ip == Ipv4Addr::new(8, 8, 4, 4)));
+        assert!(config
+            .name_servers
+            .iter()
+            .all(|server| !server.connections.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn system_dns_preserves_all_ipv4_answers_for_the_private_address_gate() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let replies = tokio::spawn(async move {
+            let mut bytes = [0_u8; 4096];
+            for _ in 0..2 {
+                let (length, peer) = server.recv_from(&mut bytes).await.unwrap();
+                let request = Message::from_vec(&bytes[..length]).unwrap();
+                let query = request.queries[0].clone();
+                let mut response =
+                    Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+                response.metadata.recursion_available = true;
+                response.metadata.recursion_desired = request.metadata.recursion_desired;
+                response.add_query(query.clone());
+                response.add_answer(Record::from_rdata(
+                    query.name().clone(),
+                    60,
+                    RData::A(A(Ipv4Addr::new(8, 8, 8, 8))),
+                ));
+                if query.name().to_ascii() == "mixed.example." {
+                    response.add_answer(Record::from_rdata(
+                        query.name().clone(),
+                        60,
+                        RData::A(A(Ipv4Addr::new(10, 0, 0, 1))),
+                    ));
+                }
+                server
+                    .send_to(&response.to_vec().unwrap(), peer)
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut nameserver = NameServerConfig::udp(address.ip());
+        nameserver.connections[0].port = address.port();
+        let resolver = TokioResolver::builder_with_config(
+            ResolverConfig::from_name_servers(vec![nameserver]),
+            TokioRuntimeProvider::default(),
+        )
+        .build()
+        .unwrap();
+        let dns = Dns::System(Box::new(resolver));
+        assert!(matches!(resolve_public(&dns, "public.example.").await, Ok(ip) if ip == "8.8.8.8"));
+        let mixed = dns.ipv4("mixed.example.").await.ok().unwrap();
+        assert_eq!(mixed.len(), 2);
+        assert!(mixed.contains(&Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(matches!(
+            resolve_public(&dns, "mixed.example.").await,
+            Err(ResolveError::Forbidden)
+        ));
+        replies.await.unwrap();
+    }
 
     fn header_lines(raw: &[&str]) -> Vec<Vec<u8>> {
         raw.iter().map(|l| l.as_bytes().to_vec()).collect()
