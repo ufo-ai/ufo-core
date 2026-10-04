@@ -355,6 +355,69 @@ async def test_sheet_values_skips_malformed_tabs_and_reads_the_valid_one() -> No
     assert [page.source_ref for page in result.pages] == ["sheet_values/s1:2:values"]
 
 
+NON_GRID_TAB_RANGE = {
+    "error": {
+        "code": 400,
+        "message": "Unable to parse range: 'Revenue chart'",
+        "errors": [
+            {
+                "message": "Unable to parse range: 'Revenue chart'",
+                "domain": "global",
+                "reason": "badRequest",
+            }
+        ],
+        "status": "INVALID_ARGUMENT",
+    }
+}
+
+
+async def test_sheet_values_requests_only_grid_tabs() -> None:
+    value_requests: list[httpx.Request] = []
+    metadata = {
+        **SPREADSHEET_META,
+        "sheets": [
+            {"properties": {"sheetId": 0, "title": "Summary", "sheetType": "GRID"}},
+            {"properties": {"sheetId": 1, "title": "Revenue chart", "sheetType": "OBJECT"}},
+            {"properties": {"sheetId": 2, "title": "Warehouse", "sheetType": "DATA_SOURCE"}},
+            {"properties": {"sheetId": 3, "title": "Detail"}},
+        ],
+    }
+
+    def grid_only(request: httpx.Request) -> httpx.Response:
+        ranges = request.url.params.get_list("ranges")
+        if {"'Revenue chart'", "'Warehouse'"} & set(ranges):
+            return httpx.Response(400, json=NON_GRID_TAB_RANGE)
+        return httpx.Response(
+            200, json={"valueRanges": [{"range": value, "values": []} for value in ranges]}
+        )
+
+    result = await _fetch(
+        "sheet_values",
+        _handler(
+            value_requests=value_requests, spreadsheet_meta=metadata, values_response=grid_only
+        ),
+    )
+
+    assert value_requests[0].url.params.get_list("ranges") == ["'Summary'", "'Detail'"]
+    assert {page.source_ref for page in result.pages} == {
+        "sheet_values/s1:0:values",
+        "sheet_values/s1:3:values",
+    }
+
+
+async def test_sheet_values_faults_with_googles_reason_on_a_refused_batch() -> None:
+    def refused(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json=NON_GRID_TAB_RANGE)
+
+    with pytest.raises(StreamFault) as raised:
+        await _fetch("sheet_values", _handler(values_response=refused))
+
+    assert raised.value.reason == (
+        "googlesheets: values:batchGet on spreadsheet s1 refused (400 INVALID_ARGUMENT): "
+        "Unable to parse range: 'Revenue chart'"
+    )
+
+
 AMBIGUOUS_TABS = ("Summary", "Q1", "ROI Annual Billing - Premium", "Owner's View")
 REFERENCE_SHAPED_TABS = ("Summary", "Q1")
 UNPARSEABLE_RANGE = {
