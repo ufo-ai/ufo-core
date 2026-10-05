@@ -1,7 +1,7 @@
 """Token pricing, the ledger's writes, and the spend caps decided against the ledger."""
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
@@ -1012,6 +1012,12 @@ class DimensionTotal:
 
 
 @dataclass(frozen=True, slots=True)
+class ServiceTotal:
+    service: str
+    priced_micro_usd: int
+
+
+@dataclass(frozen=True, slots=True)
 class SubjectTotal:
     subject_id: UUID | None
     label: str
@@ -1081,11 +1087,12 @@ class _LedgerRollup:
 @dataclass(frozen=True, slots=True)
 class SpendReport:
     """A selected range and all-time workspace ledger, with daily, execution, model, dimension,
-    member, agent, origin, and price-table totals."""
+    service, member, agent, origin, and price-table totals."""
 
     window_seconds: int | None
     total_micro_usd: int
     by_dimension: tuple[DimensionTotal, ...]
+    by_service: tuple[ServiceTotal, ...]
     by_member: tuple[SubjectTotal, ...]
     by_agent: tuple[SubjectTotal, ...]
     by_origin: tuple[OriginTotal, ...]
@@ -1112,6 +1119,13 @@ class MemberSpendReport:
 
 
 TOKEN_DIMENSIONS = (TOKENS_DIMENSION, SANDBOX_TOKENS_DIMENSION)
+SERVICE_OF_DIMENSION: Mapping[str, str] = {
+    TOKENS_DIMENSION: "models",
+    SANDBOX_TOKENS_DIMENSION: "models",
+    IMAGES_DIMENSION: "models",
+    VIDEOS_DIMENSION: "models",
+    EGRESS_DIMENSION: "proxy",
+}
 WORKSPACE_JOB_LABEL = "Workspace jobs"
 SELECTED_PERIOD = "selected"
 PREVIOUS_PERIOD = "previous"
@@ -1569,6 +1583,16 @@ class SpendRollup:
             None,
             rolled,
         )
+        totals: dict[str, int] = {}
+        for line in ledger.by_dimension:
+            service = SERVICE_OF_DIMENSION[line.dimension]
+            totals[service] = totals.get(service, 0) + line.priced_micro_usd
+        by_service = tuple(
+            sorted(
+                (ServiceTotal(service, priced) for service, priced in totals.items()),
+                key=lambda total: (-total.priced_micro_usd, total.service),
+            )
+        )
         by_member = tuple(
             SubjectTotal(row.member_id, row.email, int(row.tokens), int(row.priced))
             for row in await connection.execute(
@@ -1640,6 +1664,7 @@ class SpendRollup:
             window_seconds,
             ledger.total_micro_usd,
             ledger.by_dimension,
+            by_service,
             by_member,
             by_agent,
             by_origin,

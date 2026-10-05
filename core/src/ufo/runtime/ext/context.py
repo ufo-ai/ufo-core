@@ -49,6 +49,8 @@ from ufo.runtime.billing.accounting import (
     Ledger,
     OffTurnSpendRefused,
     SpendEvaluator,
+    SpendReport,
+    SpendRollup,
     UsageExport,
     ack_usage_exports,
     mint_usage_exports,
@@ -1785,6 +1787,11 @@ class ExtensionContext:
         `conversations_awaiting_title`. A summary the model wrote nothing usable for still records
         the attempt, so one conversation costs one summary."""
         await summarize_conversation_title(self.workspace_id, conversation_id, title)
+
+    async def spend_rollup(self, window_seconds: int | None) -> SpendReport:
+        """The workspace's metered spend over the window, as the operator rollup reads it."""
+        async with workspace_tx() as connection:
+            return await SpendRollup(self.workspace_id).read(connection, window_seconds)
 
     async def pending_usage_exports(self, floor: datetime, limit: int) -> tuple[UsageExport, ...]:
         """This extension's settled, unacknowledged usage deltas, at most `limit`, minting new

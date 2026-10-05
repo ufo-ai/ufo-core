@@ -52,6 +52,7 @@ from ufo.runtime.workspace import (
 )
 from ufo.schema import tables
 from ufo.schema.records import Usage, ledger_id_for
+from ufo.sdk.accounting import ServiceTotal
 
 FULL_USAGE = Usage(
     input_tokens=1000,
@@ -717,6 +718,50 @@ async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
     assert [(p.price_digest, p.priced_micro_usd) for p in report.by_price_digest] == [
         (PRICE_DIGEST, 96_500)
     ]
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_spend_rollup_totals_each_service_over_the_dimensions_it_meters(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_egress_request(connection, workspace_id, turn_id)
+        await UNGATED_LEDGER.record_turn_usage(
+            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+        )
+        await UNGATED_LEDGER.record_image_usage(
+            connection, workspace_id, turn_id, "openai/gpt-image-2", 1, 130_000
+        )
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, None)
+    assert report.by_service == (
+        ServiceTotal("models", 96_500 + 130_000),
+        ServiceTotal("proxy", 0),
+    )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_spend_rollup_lists_a_costlier_service_first(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await UNGATED_LEDGER.record_turn_usage(
+            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+        )
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                dimension="egress",
+                amount=1,
+                priced_micro_usd=100_000,
+                model="",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, None)
+    assert report.by_service == (ServiceTotal("proxy", 100_000), ServiceTotal("models", 96_500))
 
 
 async def _spawn_child_turn(

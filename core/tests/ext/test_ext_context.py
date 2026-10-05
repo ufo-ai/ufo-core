@@ -52,7 +52,14 @@ from ufo.harness.sandbox.session import (
 from ufo.harness.sandbox.terminal import TerminalGone
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
-from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger, OffTurnSpendRefused
+from ufo.runtime.billing.accounting import (
+    UNGATED_LEDGER,
+    Ledger,
+    OffTurnSpendRefused,
+    ServiceTotal,
+    SpendRollup,
+    record_probe_egress_request,
+)
 from ufo.runtime.billing.spend import NO_SPEND_GATES, PARK, GateDeploy, SpendDecision, SpendGates
 from ufo.runtime.ext.context import (
     CORE_EXTENSION,
@@ -1359,3 +1366,21 @@ async def test_a_context_wired_with_no_spend_refuses_to_read_or_meter_it(db: Non
             model_job=JOB,
             ledger=UNGATED_LEDGER,
         )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_spend_rollup_reads_the_bound_workspaces_ledger(db: None) -> None:
+    workspace_id, neighbor = await _workspace(), await _workspace()
+    context = context_for("core", frozenset(), ledger=UNGATED_LEDGER)
+    price = ModelPrice(42_000, 0, 0, 0, 0)
+    with ws(neighbor):
+        await context.meter_tokens(uuid4(), MODEL, Usage(input_tokens=1_000), price, byok=False)
+    with ws(workspace_id):
+        await context.meter_tokens(uuid4(), MODEL, Usage(input_tokens=2_000), price, byok=False)
+        async with workspace_tx() as connection:
+            await record_probe_egress_request(connection, workspace_id)
+        rollup = await context.spend_rollup(None)
+        async with workspace_tx() as connection:
+            direct = await SpendRollup(workspace_id).read(connection, None)
+    assert rollup.by_service == direct.by_service
+    assert rollup.by_service == (ServiceTotal("models", 84), ServiceTotal("proxy", 0))
