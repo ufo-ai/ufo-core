@@ -25,7 +25,7 @@ from dbos import DBOS, DBOSClient
 from fastapi import FastAPI, WebSocket
 from openfeature.provider import FeatureProvider
 from starlette.requests import Request
-from starlette.responses import RedirectResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -1123,7 +1123,15 @@ def _mount_ext_routes(
             ) -> Response:
                 identified = identify(request)
                 if identified is None:
-                    return Response("unauthorized", status_code=401)
+                    return JSONResponse(
+                        {
+                            "error": {
+                                "code": "unauthorized",
+                                "message": "The request names no workspace.",
+                            }
+                        },
+                        status_code=401,
+                    )
                 with ws(identified):
                     return await handler(extension_context, request)
 

@@ -536,8 +536,8 @@ def new_migration(slug: str) -> None:
     default=WHOLE_FLEET.name,
     show_default=True,
     help=(
-        "The durable work this process claims: turns and their surfaces, background jobs, none, "
-        "or all."
+        "The durable work this process claims: turns and their surfaces, background jobs, routes "
+        "and recurring job ticks (api), or all."
     ),
 )
 def serve(fleet: str) -> None:

@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -27,6 +28,7 @@ from ufo.runtime.billing.accounting import (
     MEMBER_SCOPE,
     SANDBOX_TOKENS_ATTEMPT,
     SANDBOX_TOKENS_DIMENSION,
+    SERVICE_OF_DIMENSION,
     TOKENS_DIMENSION,
     UNGATED_LEDGER,
     JobDayRollup,
@@ -762,6 +764,15 @@ async def test_spend_rollup_lists_a_costlier_service_first(db: None) -> None:
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, None)
     assert report.by_service == (ServiceTotal("proxy", 100_000), ServiceTotal("models", 96_500))
+
+
+def test_every_ledger_dimension_belongs_to_a_service() -> None:
+    check = next(
+        c
+        for c in tables.ledger.constraints
+        if isinstance(c, sa.CheckConstraint) and c.name == "ledger_dimension"
+    )
+    assert set(SERVICE_OF_DIMENSION) == set(re.findall(r"'([a-z_]+)'", str(check.sqltext)))
 
 
 async def _spawn_child_turn(

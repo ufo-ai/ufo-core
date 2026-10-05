@@ -1766,8 +1766,8 @@ class SpendRollup:
     async def read_totals(
         self, connection: AsyncConnection, window_seconds: int | None
     ) -> SpendTotals:
-        """The workspace totals `read` reports, without reading its member, agent, origin, or
-        price-table breakdowns."""
+        """The workspace totals `read` reports, without reading its member, agent, or origin
+        breakdowns."""
         now = datetime.now(UTC)
         cutoff = None if window_seconds is None else now - timedelta(seconds=window_seconds)
         ledger = await self._ledger(
