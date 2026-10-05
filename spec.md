@@ -1173,8 +1173,8 @@ ID, token counts, price, and funding source. The ledger binds them to the worksp
 calls, the turn. Repeated writes for one call are deduplicated.
 Realtime visibility: live per-turn cost on the stream, workspace/member/agent rollups in
 `ufoctl spend`, the surface reads (`spend_rollup`, `member_spend`), and an extension handler's
-`ctx.spend_rollup`; the workspace rollup also groups spend by the service each dimension belongs
-to (`by_service`). Caps
+`ctx.spend_rollup`, the workspace totals naming no member or agent; the workspace rollup also groups
+spend by the service each dimension belongs to (`by_service`). Caps
 evaluated at inbound and per-step; `reject` refuses new turns, `park` suspends. Prices are a pinned
 table per model; usage a key that is not the deploy's paid for still meters (visibility without
 billing).

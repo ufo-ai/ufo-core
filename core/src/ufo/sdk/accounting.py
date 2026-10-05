@@ -1,6 +1,6 @@
 """Public re-export: a surface renders a workspace spend rollup (`SurfaceContext.spend_rollup`) and
-an extension handler reads one (`ExtensionContext.spend_rollup`) from these accounting value
-objects — the same sums `ufoctl spend` prints.
+an extension handler reads its totals, naming no member or agent (`ExtensionContext.spend_rollup`),
+from these accounting value objects — the same sums `ufoctl spend` prints.
 
 `ufo.sdk` is a package of thin re-export modules with an empty `__init__.py`, so the public
 surface lives in named modules like this one."""
@@ -19,6 +19,9 @@ from ufo.runtime.billing.accounting import (
 )
 from ufo.runtime.billing.accounting import (
     SpendReport as SpendReport,
+)
+from ufo.runtime.billing.accounting import (
+    SpendTotals as SpendTotals,
 )
 from ufo.runtime.billing.accounting import (
     UsageExport as UsageExport,

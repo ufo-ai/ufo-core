@@ -1083,6 +1083,19 @@ class _LedgerRollup:
     by_price_digest: tuple[PriceDigestTotal, ...]
     usage: UsageDetails
 
+    @property
+    def by_service(self) -> tuple[ServiceTotal, ...]:
+        totals: dict[str, int] = {}
+        for line in self.by_dimension:
+            service = SERVICE_OF_DIMENSION[line.dimension]
+            totals[service] = totals.get(service, 0) + line.priced_micro_usd
+        return tuple(
+            sorted(
+                (ServiceTotal(service, priced) for service, priced in totals.items()),
+                key=lambda total: (-total.priced_micro_usd, total.service),
+            )
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class SpendReport:
@@ -1097,6 +1110,18 @@ class SpendReport:
     by_agent: tuple[SubjectTotal, ...]
     by_origin: tuple[OriginTotal, ...]
     by_price_digest: tuple[PriceDigestTotal, ...]
+    usage: UsageDetails
+
+
+@dataclass(frozen=True, slots=True)
+class SpendTotals:
+    """A selected range and all-time workspace ledger, with daily, execution, model, dimension,
+    and service totals, naming no member or agent."""
+
+    window_seconds: int | None
+    total_micro_usd: int
+    by_dimension: tuple[DimensionTotal, ...]
+    by_service: tuple[ServiceTotal, ...]
     usage: UsageDetails
 
 
@@ -1565,34 +1590,7 @@ class SpendRollup:
         if cutoff is not None:
             window &= tables.ledger.c.created_at >= cutoff
         member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
-        rolled_through = await _rolled_through(connection, self.workspace_id)
-        rolled = (
-            None
-            if rolled_through is None
-            else rolled_days(
-                self.workspace_id, rolled_through, cutoff, _previous_start(cutoff, now)
-            )
-        )
-        mine = tables.ledger.c.workspace_id == self.workspace_id
-        ledger = await _ledger_rollup(
-            connection,
-            tables.ledger,
-            mine if rolled is None else mine & rolled.skip,
-            cutoff,
-            now,
-            None,
-            rolled,
-        )
-        totals: dict[str, int] = {}
-        for line in ledger.by_dimension:
-            service = SERVICE_OF_DIMENSION[line.dimension]
-            totals[service] = totals.get(service, 0) + line.priced_micro_usd
-        by_service = tuple(
-            sorted(
-                (ServiceTotal(service, priced) for service, priced in totals.items()),
-                key=lambda total: (-total.priced_micro_usd, total.service),
-            )
-        )
+        ledger = await self._ledger(connection, tables.ledger, None, cutoff, now)
         by_member = tuple(
             SubjectTotal(row.member_id, row.email, int(row.tokens), int(row.priced))
             for row in await connection.execute(
@@ -1664,12 +1662,39 @@ class SpendRollup:
             window_seconds,
             ledger.total_micro_usd,
             ledger.by_dimension,
-            by_service,
+            ledger.by_service,
             by_member,
             by_agent,
             by_origin,
             ledger.by_price_digest,
             replace(ledger.usage, by_execution=by_execution),
+        )
+
+    async def _ledger(
+        self,
+        connection: AsyncConnection,
+        source: sa.FromClause,
+        execution_column: sa.ColumnElement[str] | None,
+        cutoff: datetime | None,
+        now: datetime,
+    ) -> _LedgerRollup:
+        rolled_through = await _rolled_through(connection, self.workspace_id)
+        rolled = (
+            None
+            if rolled_through is None
+            else rolled_days(
+                self.workspace_id, rolled_through, cutoff, _previous_start(cutoff, now)
+            )
+        )
+        mine = tables.ledger.c.workspace_id == self.workspace_id
+        return await _ledger_rollup(
+            connection,
+            source,
+            mine if rolled is None else mine & rolled.skip,
+            cutoff,
+            now,
+            execution_column,
+            rolled,
         )
 
     async def _by_origin(
@@ -1736,6 +1761,28 @@ class SpendRollup:
                 .group_by(conversation.c.surface, label)
                 .order_by(sa.desc("priced"))
             )
+        )
+
+    async def read_totals(
+        self, connection: AsyncConnection, window_seconds: int | None
+    ) -> SpendTotals:
+        """The workspace totals `read` reports, without reading its member, agent, origin, or
+        price-table breakdowns."""
+        now = datetime.now(UTC)
+        cutoff = None if window_seconds is None else now - timedelta(seconds=window_seconds)
+        ledger = await self._ledger(
+            connection,
+            tables.ledger.outerjoin(tables.turn),
+            tables.turn.c.subagent_profile,
+            cutoff,
+            now,
+        )
+        return SpendTotals(
+            window_seconds,
+            ledger.total_micro_usd,
+            ledger.by_dimension,
+            ledger.by_service,
+            ledger.usage,
         )
 
     async def read_member(
