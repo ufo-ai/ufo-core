@@ -25,7 +25,7 @@ from ufo_testsupport.index import default_index
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
-from ufo.runtime.billing.accounting import UNGATED_LEDGER, SpendEvaluator
+from ufo.runtime.billing.accounting import SANDBOX_TOKENS_DIMENSION, SpendEvaluator
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.ext.source_reader import SourceReader
 from ufo.runtime.indexing import TextChunker
@@ -40,16 +40,8 @@ from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Usage
 
 pytestmark = pytest.mark.integration
-
-HEAVY_USAGE = Usage(
-    input_tokens=1000,
-    output_tokens=2000,
-    cache_read_tokens=3000,
-    cache_write_1h_tokens=4000,
-)
 
 
 class StubEmbed:
@@ -313,8 +305,18 @@ async def test_metered_sandbox_tokens_breach_a_member_cap_and_park(db: None) -> 
         turn_id = await _seed_running_turn(
             connection, workspace_id, conversation_id, agent_id, speaker_member_id=member_id
         )
-        await UNGATED_LEDGER.record_sandbox_tokens(
-            connection, workspace_id, turn_id, "claude-opus-4-8", HEAVY_USAGE
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                dimension=SANDBOX_TOKENS_DIMENSION,
+                amount=10_000,
+                priced_micro_usd=96_500,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
         )
         decision = await evaluator.decide(connection, 0)
     assert decision.outcome == "park"

@@ -1,8 +1,7 @@
-"""Resolve one capability token's egress rule set — the control-plane logic core `serve` runs
-behind the egress-control RPC. `PerAgentRules` derives each turn's rules fresh from its token: the
-workspace-wide model base, that workspace's keyed-credential injections, and that agent's OAuth
-grants, plus the liveness gate that authorizes each CONNECT. It reaches the DB under the request's
-own workspace scope; the Rust data-plane proxy calls it, never touching this logic or the keys."""
+"""Compile one session's egress policy, and answer the two questions the tool bridge and the cache
+daemon still ask of a run: whether its turn is live, and which git credential a cached fetch rides.
+`PerAgentRules` derives everything fresh each call from the deploy's own declarations, the
+workspace's keyed credentials, and the bound agent's grants, under the caller's workspace scope."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -13,19 +12,22 @@ import sqlalchemy as sa
 
 from ufo.db import workspace_tx
 from ufo.harness.o11y import warn
-from ufo.harness.sandbox.preview import PREVIEW_AUTH_HEADER, PREVIEW_HOST, PREVIEW_SENTINEL
-from ufo.harness.sandbox.session import SENTINEL_MODEL_KEY, ProbeToken, RunToken
+from ufo.harness.sandbox.preview import PREVIEW_HOST
+from ufo.harness.sandbox.session import ProbeToken, RunToken
 from ufo.runtime.access.connectors import CliCredential, GitWire
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.egress_rules import (
+    RUN_HEADER,
+    Bind,
     ConnectorTransferHosts,
-    InjectionRule,
-    InternetRule,
-    Rule,
-    ServiceRule,
-    derive_cli_rules,
-    derive_credential_rules,
-    derive_grant_rules,
+    HostEntry,
+    PolicyScope,
+    Route,
+    SessionPolicy,
+    derive_cli_binds,
+    derive_credential_binds,
+    derive_grant_hosts,
+    policy_hosts,
 )
 from ufo.runtime.access.grants import GrantStore, cli_accounts
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
@@ -33,119 +35,81 @@ from ufo.runtime.agent_scope import agent
 from ufo.runtime.tools.bridge import TOOL_BRIDGE_HOST, ToolBridgePrincipal
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import RUNNING, TurnRuntimeConfig
+from ufo.schema.records import RUNNING
 
 EgressPrincipal = RunToken | ProbeToken
-"""What a CONNECT presents itself as: a turn's run token, or one probe exec's own token. Both are
-signed by the one deploy secret and name their own domain, so the wire cannot pass one as the
-other."""
+"""What a git-credential call presents: a turn's run token, or one probe exec's own token. Both
+are signed by the one deploy secret and name their own domain, so neither passes as the other."""
 
 
 @dataclass(frozen=True, slots=True)
 class _Scope:
-    """A run token also answers for a turn's detached commands until `detached_until`; those keep
-    the turn's network but never the model key or the tool bridge."""
+    """A run token also answers for a turn's detached commands until `detached_until`; only a
+    running turn reaches the tool bridge."""
 
     agent_id: UUID
-    internet_access_allowed: bool
     member_id: UUID | None
     running: bool
 
 
-def _turn_answers(now: datetime) -> sa.ColumnElement[bool]:
-    """The rows a run token still speaks for: a turn the DB reports running, or one whose detached
-    commands the deploy follows until `detached_until`."""
-    return sa.or_(
-        tables.turn.c.status == RUNNING,
-        tables.turn.c.detached_until > now,
-    )
-
-
 @dataclass(frozen=True)
 class PerAgentRules:
-    """Resolve the proxy's rule set for one token's agent and live scope each call: the
-    workspace-wide model base, that workspace's own keyed-credential rules, and that agent's own
-    OAuth grant rules. Per-agent authentication is the wire's isolation — agent A's turn resolves
-    only A's grants, so A cannot inject or forward through another agent's account — and
-    per-workspace resolution is the tenant's: a stored secret is read against the run token's own
-    `workspace_id`, so one shared proxy injects for every workspace and none of them holds another's
-    key. A missing or forged token yields the base alone; a verified token whose run is no longer
-    live yields no rules. A resolution error raises to the proxy, which returns service
-    unavailable without caching it — never a policy denial, broad allow, or another workspace's
-    secret. Deriving each call (not once at boot) is the liveness: a grant recorded or a slot filled
-    mid-serve is live for the next turn.
+    """Compile the session policy for one acting scope each call: the deploy's own hosts and model
+    binds, that workspace's keyed-credential binds, and the bound agent's grant hosts and CLI binds.
+    Per-agent compilation is the wire's isolation — agent A's session names only A's grants, so A
+    cannot reach another agent's account — and per-workspace compilation is the tenant's: a slot is
+    bound only for the workspace that holds its value. Deriving each call (not once at boot) is the
+    liveness: a grant recorded or a slot filled mid-serve is in the next compile.
 
-    A probe token resolves the same chain under the same agent, reached through its conversation
-    rather than a turn, minus the deployment's model key."""
+    `hosts` and `binds` are the deploy's own: its model providers bound to `ufo/models` and its
+    artifact store. `bridge_upstream` and `preview_upstream` are the routes core serves for a
+    running turn, each stamped with the turn's run token."""
 
-    base: tuple[Rule, ...]
-    grants: GrantStore | None
+    hosts: tuple[HostEntry, ...] = ()
+    binds: tuple[Bind, ...] = ()
+    grants: GrantStore | None = None
     credentials: CredentialStore | None = None
     slots: WorkspaceSlots = field(default_factory=WorkspaceSlots)
-    internet: tuple[InternetRule, ...] = ()
-    cache_host: str | None = None
-    cache_pkg_hosts: tuple[str, ...] = ()
-    preview_token: str | None = None
+    internet: bool = False
     transfer_hosts: ConnectorTransferHosts = field(
         default_factory=lambda: ConnectorTransferHosts(explicit={})
     )
     clis: Mapping[str, CliCredential] = field(default_factory=dict)
+    bridge_upstream: str | None = None
+    preview_upstream: str | None = None
 
-    async def resolve(self, principal: EgressPrincipal | None) -> tuple[Rule, ...]:
-        if principal is None:
-            return self.base
-        with ws(principal.workspace_id):
-            match principal:
-                case RunToken():
-                    scope = await self._turn_of(principal)
-                case ProbeToken():
-                    scope = await self._conversation_of(principal)
-            if scope is None:
-                return ()
-            with agent(scope.agent_id):
-                internet_allowed = scope.internet_access_allowed and bool(self.internet)
-                rules = (*self.base, *self.internet) if internet_allowed else self.base
-                if isinstance(principal, RunToken):
-                    rules = (*rules, ServiceRule(host=TOOL_BRIDGE_HOST))
-                if self.cache_host is not None and internet_allowed:
-                    rules = (
-                        *rules,
-                        ServiceRule(host=self.cache_host),
-                        *(
-                            ServiceRule(host=host, daemon_prefix=f"/pkg/{host}")
-                            for host in self.cache_pkg_hosts
-                        ),
-                    )
-                if self.preview_token is not None:
-                    rules = (
-                        *rules,
-                        ServiceRule(host=PREVIEW_HOST),
-                        InjectionRule(
-                            host=PREVIEW_HOST,
-                            header=PREVIEW_AUTH_HEADER,
-                            sentinel=PREVIEW_SENTINEL,
-                            real=self.preview_token,
-                        ),
-                    )
-                if self.credentials is not None and self.slots:
-                    rules = (
-                        *rules,
-                        *await derive_credential_rules(
-                            self.slots, principal.workspace_id, self.credentials
-                        ),
-                    )
-                if self.grants is not None:
-                    granted = await self.grants.active_grants()
-                    rules = (
-                        *rules,
-                        *derive_grant_rules(granted, self.transfer_hosts, scope.member_id),
-                        *await derive_cli_rules(
-                            granted, self.clis, principal.workspace_id, scope.member_id
-                        ),
-                    )
-                if not scope.running:
-                    return self._without_the_model_key(rules)
-                return rules
+    async def session_policy(self, scope: PolicyScope) -> SessionPolicy:
+        """The policy a session acting in `scope` runs under, naming every secret and carrying no
+        value. Runs under the caller's `ws()` and `agent()`. Only a running scope binds the deploy's
+        model key and the routes core serves; a public host beyond the named ones needs both the
+        deploy and the agent to allow the internet."""
+        credential_binds = (
+            await derive_credential_binds(self.slots, scope.workspace_id, self.credentials)
+            if self.credentials is not None and self.slots
+            else ()
+        )
+        granted = await self.grants.active_grants() if self.grants is not None else ()
+        cli_binds = derive_cli_binds(granted, self.clis, scope.member_id)
+        grant_hosts = derive_grant_hosts(granted, self.transfer_hosts, scope.member_id)
+        binds = (*(self.binds if scope.running else ()), *credential_binds, *cli_binds)
+        return SessionPolicy(
+            internet=scope.internet_access_allowed and self.internet,
+            hosts=policy_hosts(
+                *(entry.host for entry in (*self.hosts, *grant_hosts)),
+                *(bind.host for bind in (*credential_binds, *cli_binds)),
+            ),
+            bind=tuple(sorted(binds, key=lambda bind: (bind.host, bind.header, bind.env))),
+            routes=self._routes(scope),
+        )
+
+    def _routes(self, scope: PolicyScope) -> tuple[Route, ...]:
+        if scope.run_token is None or not scope.running or self.bridge_upstream is None:
+            return ()
+        stamp = {RUN_HEADER: scope.run_token}
+        routes = [Route(host=TOOL_BRIDGE_HOST, upstream=self.bridge_upstream, headers=stamp)]
+        if self.preview_upstream is not None:
+            routes.append(Route(host=PREVIEW_HOST, upstream=self.preview_upstream, headers=stamp))
+        return tuple(sorted(routes, key=lambda route: route.host))
 
     async def git_credential(
         self, principal: EgressPrincipal, host: str
@@ -159,10 +123,10 @@ class PerAgentRules:
         account for it — the daemon then fetches anonymously.
 
         Reading the account's token is a call to the broker, so one account's fault withholds that
-        account and nothing more, exactly as `derive_cli_rules` withholds one grant. An account the
-        broker will not authenticate and a broker that cannot be reached both end here as an
-        anonymous fetch: the alternative is this call answering 500, the daemon answering 502, and
-        a public clone that needs no credential at all failing with it."""
+        account and nothing more. An account the broker will not authenticate and a broker that
+        cannot be reached both end here as an anonymous fetch: the alternative is this call
+        answering 500, the daemon answering 502, and a public clone that needs no credential at all
+        failing with it."""
         with ws(principal.workspace_id):
             match principal:
                 case RunToken():
@@ -203,13 +167,11 @@ class PerAgentRules:
         )
 
     async def _turn_of(self, run: RunToken) -> _Scope | None:
-        """The turn's agent and effective internet policy in one indexed read."""
+        """The turn's agent, the member a run acts for, and whether it runs, in one indexed read."""
         query = (
             sa.select(
                 tables.turn.c.agent_id,
                 tables.turn.c.member_id,
-                tables.turn.c.runtime_config,
-                tables.agent.c.internet_access_allowed,
                 (tables.turn.c.status == RUNNING).label("running"),
             )
             .select_from(
@@ -221,7 +183,10 @@ class PerAgentRules:
             .where(
                 tables.turn.c.id == run.turn_id,
                 tables.turn.c.workspace_id == run.workspace_id,
-                _turn_answers(datetime.now(UTC)),
+                sa.or_(
+                    tables.turn.c.status == RUNNING,
+                    tables.turn.c.detached_until > datetime.now(UTC),
+                ),
                 tables.agent.c.workspace_id == run.workspace_id,
             )
         )
@@ -229,17 +194,8 @@ class PerAgentRules:
             row = (await connection.execute(query)).one_or_none()
         if row is None:
             return None
-        runtime_config = (
-            None
-            if row.runtime_config is None
-            else TurnRuntimeConfig.model_validate(row.runtime_config)
-        )
-        internet_access_allowed = row.internet_access_allowed and (
-            runtime_config is None or runtime_config.internet_access is None
-        )
         return _Scope(
             row.agent_id,
-            internet_access_allowed,
             (
                 row.member_id
                 if run.acts_for == "turn"
@@ -256,10 +212,7 @@ class PerAgentRules:
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
-                    sa.select(
-                        tables.conversation.c.agent_id,
-                        tables.agent.c.internet_access_allowed,
-                    )
+                    sa.select(tables.conversation.c.agent_id)
                     .select_from(
                         tables.conversation.join(
                             tables.agent,
@@ -275,71 +228,4 @@ class PerAgentRules:
             ).one_or_none()
         if row is None:
             return None
-        return _Scope(
-            row.agent_id,
-            row.internet_access_allowed and probe.internet_access is None,
-            probe.member_id,
-            running=False,
-        )
-
-    def _without_the_model_key(self, rules: tuple[Rule, ...]) -> tuple[Rule, ...]:
-        """A probe exports no model sentinel but a carrier's base environment does, so the key is
-        withheld here at enforcement."""
-        return tuple(
-            rule
-            for rule in rules
-            if not (isinstance(rule, InjectionRule) and SENTINEL_MODEL_KEY in rule.sentinel)
-        )
-
-    async def turn_live(self, run: RunToken) -> int | None:
-        """The egress-authorization gate: the workspace's egress-rules generation while the run
-        token names a turn the DB still reports running, None otherwise. A keyed host's real-key
-        injection is applied only for a live turn, so a token for a turn that has ended or never
-        existed is denied at CONNECT and the key never reaches the wire. Read fresh per request —
-        never the per-turn rule cache — so a turn that ends between requests can no longer draw the
-        key; the generation rides the same one indexed read, so the rule cache pins what it derived
-        from without a second round-trip."""
-        with ws(run.workspace_id):
-            query = (
-                sa.select(
-                    tables.workspace.c.egress_rules_generation,
-                )
-                .select_from(
-                    tables.turn.join(
-                        tables.workspace,
-                        tables.workspace.c.id == tables.turn.c.workspace_id,
-                    )
-                )
-                .where(
-                    tables.turn.c.id == run.turn_id,
-                    tables.turn.c.workspace_id == run.workspace_id,
-                    _turn_answers(datetime.now(UTC)),
-                )
-            )
-            async with workspace_tx() as connection:
-                row = (await connection.execute(query)).one_or_none()
-        if row is None:
-            return None
-        return row.egress_rules_generation
-
-    async def probe_live(self, probe: ProbeToken) -> int | None:
-        """The current rules generation while the probe is unexpired and its conversation exists."""
-        if probe.expires_at <= int(datetime.now(UTC).timestamp()):
-            return None
-        with ws(probe.workspace_id):
-            async with workspace_tx() as connection:
-                return (
-                    await connection.execute(
-                        sa.select(tables.workspace.c.egress_rules_generation)
-                        .select_from(
-                            tables.conversation.join(
-                                tables.workspace,
-                                tables.workspace.c.id == tables.conversation.c.workspace_id,
-                            )
-                        )
-                        .where(
-                            tables.conversation.c.id == probe.conversation_id,
-                            tables.conversation.c.workspace_id == probe.workspace_id,
-                        )
-                    )
-                ).scalar_one_or_none()
+        return _Scope(row.agent_id, probe.member_id, running=False)

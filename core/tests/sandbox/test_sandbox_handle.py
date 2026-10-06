@@ -56,7 +56,7 @@ from ufo.harness.sandbox.terminal import TerminalCarrier, TerminalGone, Terminal
 from ufo.runtime.access.connectors import CliCredential, GitWire
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
 from ufo.runtime.access.egress_resolver import PerAgentRules
-from ufo.runtime.access.egress_rules import ScopeRule
+from ufo.runtime.access.egress_rules import HostEntry, PolicyScope
 from ufo.runtime.access.grants import CommitIdentity, GrantStore, grant_sentinel
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
@@ -555,8 +555,11 @@ async def test_sandbox_authorizer_binds_the_run_token_and_cli_env_to_the_acting_
 
     run = decoded(authorized)
     assert run == RunToken(workspace_id, turn.id, acts_for=member_id)
-    rules = await PerAgentRules(base=(), grants=GrantStore()).resolve(run)
-    assert ScopeRule(allowed_hosts=frozenset({"api.hub.test"})) in rules
+    with ws(workspace_id), agent(agent_id):
+        acting = await PerAgentRules(grants=GrantStore()).session_policy(
+            PolicyScope(workspace_id, member_id, True, True, None)
+        )
+    assert HostEntry(host="api.hub.test") in acting.hosts
     assert authorized.handle.egress_env["HUB_TOKEN"] == grant_sentinel("acct-1")
     assert "HUB_TOKEN" not in base.handle.egress_env
     assert decoded(nobody) == RunToken(workspace_id, turn.id)
@@ -572,10 +575,12 @@ async def test_sandbox_authorizer_binds_the_run_token_and_cli_env_to_the_acting_
     with ws(workspace_id), agent(agent_id):
         as_its_turn = cast(SandboxSession, await own.authorize(member_id))
         as_nobody = cast(SandboxSession, await own.authorize(None))
-        nobody_rules = await PerAgentRules(base=(), grants=GrantStore()).resolve(decoded(as_nobody))
+        nobody_policy = await PerAgentRules(grants=GrantStore()).session_policy(
+            PolicyScope(workspace_id, None, True, True, None)
+        )
     assert decoded(as_its_turn) == RunToken(workspace_id, turn.id)
     assert decoded(as_nobody) == RunToken(workspace_id, turn.id, acts_for="nobody")
-    assert ScopeRule(allowed_hosts=frozenset({"api.hub.test"})) not in nobody_rules
+    assert HostEntry(host="api.hub.test") not in nobody_policy.hosts
     assert "HUB_TOKEN" not in as_nobody.handle.egress_env
 
 

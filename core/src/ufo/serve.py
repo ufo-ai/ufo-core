@@ -56,15 +56,8 @@ from ufo.harness.document_renderer import DocumentRenderer
 from ufo.harness.durability import ReplaySafeSerializer, replay_safe_client
 from ufo.harness.models.catalog_skill import model_catalog_skill
 from ufo.harness.models.interface import AUTO_MODEL
-from ufo.harness.models.pricing import Pricing
 from ufo.harness.models.registry import ModelRegistry, model_registry
 from ufo.harness.o11y import init_o11y, init_service_checks, log, warn
-from ufo.harness.sandbox.cache import (
-    CACHE_CONTROL_TOKEN_ENV,
-    CACHE_HOST,
-    CACHE_PKG_HOSTS,
-    parse_cache_daemon,
-)
 from ufo.harness.sandbox.conversation import ConversationSandbox
 from ufo.harness.sandbox.exec_env import ProbeEnv
 from ufo.harness.sandbox.preview import parse_preview_service
@@ -101,7 +94,7 @@ from ufo.host.ext.loader import (
     workspace_slot_source,
 )
 from ufo.product import ProductCensus
-from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
+from ufo.proxy_serve import OWNER_DSN_ENV, model_bindings
 from ufo.runtime.access.connectors import (
     AuthProxy,
     ConnectorEntry,
@@ -112,13 +105,12 @@ from ufo.runtime.access.credentials import (
     CredentialStore,
     deploy_env,
 )
-from ufo.runtime.access.egress_control import EgressControl
+from ufo.runtime.access.egress_control import CACHE_CONTROL_TOKEN_ENV, EgressControl
 from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import (
     connector_transfer_hosts,
-    derive_artifact_store_rules,
-    derive_manifest_rules,
-    derive_residential_rules,
+    derive_artifact_store_hosts,
+    derive_manifest_internet,
 )
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from ufo.runtime.background_tasks import BackgroundTaskSweep
@@ -445,15 +437,7 @@ def run(fleet: Fleet) -> None:
         resume_carriers=carriers.resume,
         image_ref=config.sandbox.image_ref,
         proxy=_proxy_endpoint(
-            app,
-            config,
-            manifests,
-            credentials,
-            registry.pricing,
-            run_tokens,
-            blob_backend,
-            tool_bridge,
-            ledger,
+            app, config, manifests, credentials, run_tokens, blob_backend, tool_bridge
         ),
         workspace_root=config.sandbox.workspace_root,
         terminals=_select_terminal_transport(config, manifests, fleet_blob),
@@ -1513,11 +1497,9 @@ def _proxy_endpoint(
     config: Config,
     manifests: tuple[Manifest, ...],
     credentials: CredentialStore | None,
-    pricing: Pricing,
     run_tokens: RunTokenCodec,
     blob: FilesystemBlobStore | S3BlobStore,
     bridge: ToolBridge | None,
-    ledger: Ledger,
 ) -> ProxyEndpoint:
     """A local `ufoctl serve` with no `ufo-egress` beside it mounts the control RPC under a
     throwaway CA, so an in-sandbox CONNECT to the unmanned proxy port is refused."""
@@ -1538,40 +1520,30 @@ def _proxy_endpoint(
     else:
         ca_cert = os.environ.get(EGRESS_CA_CERT_ENV) or _ephemeral_egress_ca()
         control_token = os.environ.get(EGRESS_CONTROL_TOKEN_ENV) or secrets.token_urlsafe(32)
-    cache_daemon = parse_cache_daemon(config.sandbox.cache_daemon)
     preview = _preview_settings(config)
-    cache_control_token = os.environ.get(CACHE_CONTROL_TOKEN_ENV)
-    if cache_daemon is not None and not cache_control_token:
-        raise RuntimeError(
-            f"{CACHE_CONTROL_TOKEN_ENV} must be set when the sandbox cache is enabled so the cache "
-            "daemon authenticates to serve's git-credential route; without it every cache-routed "
-            "git request is refused"
-        )
-    clis = connector_clis(manifests)
+    model_hosts, model_binds = model_bindings(config)
+    public_base_url = config.connect.public_base_url
+    served = None if public_base_url is None else public_base_url.rstrip("/")
     resolver = PerAgentRules(
-        base=(
-            *model_rule_base(config),
-            *_one_shot(derive_artifact_store_rules(blob)),
-            *derive_residential_rules(config.sandbox.residential_hosts),
-        ),
+        hosts=(*model_hosts, *_one_shot(derive_artifact_store_hosts(blob))),
+        binds=model_binds,
         grants=GrantStore() if credentials is not None else None,
         credentials=credentials,
         slots=workspace_slot_source(manifests),
-        internet=derive_manifest_rules(manifests),
+        internet=derive_manifest_internet(manifests),
         transfer_hosts=connector_transfer_hosts(manifests),
-        clis=clis,
-        cache_host=CACHE_HOST if cache_daemon is not None else None,
-        cache_pkg_hosts=CACHE_PKG_HOSTS if cache_daemon is not None else (),
-        preview_token=None if preview is None else preview[1],
+        clis=connector_clis(manifests),
+        bridge_upstream=None if served is None else f"{served}/internal/egress/tool-bridge",
+        preview_upstream=(
+            None if served is None or preview is None else f"{served}/internal/egress/preview"
+        ),
     )
     control = EgressControl(
         control_token=control_token,
-        cache_control_token=cache_control_token or secrets.token_urlsafe(32),
+        cache_control_token=os.environ.get(CACHE_CONTROL_TOKEN_ENV) or secrets.token_urlsafe(32),
         resolver=resolver,
-        pricing=pricing,
         run_tokens=run_tokens,
         bridge=bridge,
-        ledger=ledger,
     )
     app.include_router(control.router())
     app.include_router(control.git_credential_router())

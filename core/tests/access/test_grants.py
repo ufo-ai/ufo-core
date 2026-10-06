@@ -15,7 +15,6 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from ufo.db import workspace_tx
-from ufo.harness.sandbox.session import RunToken
 from ufo.host.ext.loader import connection_hooks
 from ufo.host.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.runtime.access.connectors import CliCredential
@@ -23,9 +22,10 @@ from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import (
     ConnectorTransferHosts,
-    InjectionRule,
-    InternetRule,
-    ScopeRule,
+    HostEntry,
+    PolicyScope,
+    SessionPolicy,
+    policy_hosts,
 )
 from ufo.runtime.access.grants import (
     CommitIdentity,
@@ -45,6 +45,7 @@ from ufo.runtime.access.grants import (
     _tenant_url,
     cli_accounts,
     connection_summaries,
+    grant_sentinel,
     grant_summaries,
     install_connect_flow,
 )
@@ -216,6 +217,19 @@ async def _summaries(workspace_id: UUID, agent_id: UUID) -> tuple[GrantSummary, 
         return await grant_summaries()
 
 
+async def _policy(
+    rules: PerAgentRules, workspace_id: UUID, agent_id: UUID, member_id: UUID
+) -> SessionPolicy:
+    with ws(workspace_id), agent(agent_id):
+        return await rules.session_policy(PolicyScope(workspace_id, member_id, True, True, None))
+
+
+def test_grant_sentinel_is_deterministic_per_account() -> None:
+    assert grant_sentinel("acct-1") == grant_sentinel("acct-1")
+    assert grant_sentinel("acct-1") != grant_sentinel("acct-2")
+    assert "acct-1" in grant_sentinel("acct-1")
+
+
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_grant_store_requires_an_agent_boundary(db: None) -> None:
     with ws(await _workspace()), pytest.raises(AgentUnbound):
@@ -226,13 +240,10 @@ TRANSFER_HOST = "stash.broker.test"
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_resolver_folds_the_transfer_hosts_into_the_turns_rules(db: None) -> None:
-    """The per-turn resolver carries the manifests' provider→transfer-hosts map, so a granted
-    provider's broker file store is reachable for exactly the turns its grant covers."""
+async def test_resolver_folds_the_transfer_hosts_into_the_session_policy(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
-    turn_id = await _turn(workspace_id, agent_id, conversation_id)
     store = GrantStore()
     await _record(
         store,
@@ -246,11 +257,11 @@ async def test_resolver_folds_the_transfer_hosts_into_the_turns_rules(db: None) 
         shared=False,
     )
     resolver = PerAgentRules(
-        base=(), grants=store, transfer_hosts=ConnectorTransferHosts({"stub": (TRANSFER_HOST,)})
+        grants=store, transfer_hosts=ConnectorTransferHosts({"stub": (TRANSFER_HOST,)})
     )
-    rules = await resolver.resolve(RunToken(workspace_id, turn_id, acts_for=member_id))
-    assert any(isinstance(r, ScopeRule) and TRANSFER_HOST in r.allowed_hosts for r in rules)
-    assert not any(isinstance(r, InjectionRule) for r in rules)
+    policy = await _policy(resolver, workspace_id, agent_id, member_id)
+    assert policy.hosts == policy_hosts(GRANTED_HOST, TRANSFER_HOST)
+    assert policy.bind == ()
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -770,7 +781,6 @@ async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> N
     member_id, agent_a = await _member_agent(workspace_id)
     agent_b = await _agent(workspace_id, "assistant-b")
     conversation_id = await _conversation(workspace_id, member_id)
-    turn_a = await _turn(workspace_id, agent_a, conversation_id)
     store = GrantStore()
     await _record(
         store,
@@ -795,34 +805,29 @@ async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> N
         shared=False,
     )
     resolver = PerAgentRules(
-        base=(),
         grants=store,
-        internet=(InternetRule(),),
+        internet=True,
         clis={
             "stub": CliCredential(env="STUB_TOKEN", header="authorization", secret=_UnaskedSecret())
         },
     )
-    rules_a = await resolver.resolve(RunToken(workspace_id, turn_a, acts_for=member_id))
-    assert any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_a)
-    assert not any(isinstance(r, ScopeRule) and HOST_B in r.allowed_hosts for r in rules_a)
-    assert not any(isinstance(r, InjectionRule) and r.host == HOST_B for r in rules_a)
-    assert InternetRule() in rules_a
+    policy_a = await _policy(resolver, workspace_id, agent_a, member_id)
+    assert HostEntry(host=HOST_A) in policy_a.hosts
+    assert HostEntry(host=HOST_B) not in policy_a.hosts
+    assert not any(bind.host == HOST_B for bind in policy_a.bind)
+    assert policy_a.internet
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) -> None:
-    """The resolver derives each call, so a grant recorded after it was built is live on the next
-    turn's resolve — nothing pins a snapshot at boot."""
+async def test_a_grant_recorded_after_start_is_live_for_the_next_compile(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
-    turn_1 = await _turn(workspace_id, agent_id, conversation_id, seq=1)
-    turn_2 = await _turn(workspace_id, agent_id, conversation_id, seq=2)
     store = GrantStore()
-    resolver = PerAgentRules(base=(), grants=store)
+    resolver = PerAgentRules(grants=store)
 
-    rules_1 = await resolver.resolve(RunToken(workspace_id, turn_1, acts_for=member_id))
-    assert not any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_1)
+    before = await _policy(resolver, workspace_id, agent_id, member_id)
+    assert HostEntry(host=HOST_A) not in before.hosts
     await _record(
         store,
         workspace_id,
@@ -834,8 +839,8 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
         conversation_id=conversation_id,
         shared=False,
     )
-    rules_2 = await resolver.resolve(RunToken(workspace_id, turn_2, acts_for=member_id))
-    assert any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_2)
+    after = await _policy(resolver, workspace_id, agent_id, member_id)
+    assert HostEntry(host=HOST_A) in after.hosts
 
 
 def _turn_context(
@@ -1716,26 +1721,6 @@ async def _agent(workspace_id: UUID, name: str) -> UUID:
             )
         )
     return agent_id
-
-
-async def _turn(workspace_id: UUID, agent_id: UUID, conversation_id: UUID, seq: int = 1) -> UUID:
-    turn_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=turn_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=seq,
-                status="running",
-                inbound="hi",
-                terminal=None,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    return turn_id
 
 
 async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:

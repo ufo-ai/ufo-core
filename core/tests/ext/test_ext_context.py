@@ -53,13 +53,13 @@ from ufo.harness.sandbox.terminal import TerminalGone
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.billing.accounting import (
+    EGRESS_DIMENSION,
     UNGATED_LEDGER,
     Ledger,
     OffTurnSpendRefused,
     ServiceTotal,
     SpendRollup,
     SpendTotals,
-    record_probe_egress_request,
 )
 from ufo.runtime.billing.spend import NO_SPEND_GATES, PARK, GateDeploy, SpendDecision, SpendGates
 from ufo.runtime.ext.context import (
@@ -1391,7 +1391,19 @@ async def test_spend_rollup_reads_the_bound_workspaces_totals_naming_no_member_o
             await UNGATED_LEDGER.record_turn_usage(
                 connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1_000)
             )
-            await record_probe_egress_request(connection, workspace_id)
+            await connection.execute(
+                sa.insert(tables.ledger).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    turn_id=None,
+                    dimension=EGRESS_DIMENSION,
+                    amount=1,
+                    priced_micro_usd=0,
+                    model="",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
         totals = await context.spend_rollup(None)
         async with workspace_tx() as connection:
             report = await SpendRollup(workspace_id).read(connection, None)

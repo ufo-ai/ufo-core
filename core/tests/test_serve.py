@@ -28,8 +28,10 @@ from ufo.config import (
     DEFAULT_BACKGROUND_JOBS_MODEL,
     BlobConfig,
     Config,
+    ConnectConfig,
     DatabaseConfig,
     DebuggerConfig,
+    ModelsConfig,
     OperatorConfig,
     PackConfig,
     SandboxConfig,
@@ -44,19 +46,28 @@ from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import EGRESS_CA_CERT_ENV, RunTokenCodec
 from ufo.host.ext.loader import deploy_claims, load_manifests
-from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
+from ufo.proxy_serve import MODEL_KEY_ENVS, OWNER_DSN_ENV, model_bindings
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.access.egress_rules import InjectionRule, ScopeRule
+from ufo.runtime.access.egress_resolver import PerAgentRules
+from ufo.runtime.access.egress_rules import (
+    RUN_HEADER,
+    UFO_MODELS_SECRET,
+    Bind,
+    HostEntry,
+    PolicyScope,
+    Route,
+    SessionPolicy,
+)
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
-from ufo.runtime.billing.accounting import UNGATED_LEDGER
+from ufo.runtime.agent_scope import agent
 from ufo.runtime.billing.spend import GateDeploy
 from ufo.runtime.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget, Manifest
 from ufo.runtime.ext.operator import install_operator, installed_operator
 from ufo.runtime.ext.surface import SurfaceSpec
 from ufo.runtime.jobs import model_key_slots
 from ufo.runtime.sources.sync import FOLDER_BACKEND
-from ufo.runtime.workspace import SeveralWorkspaces
+from ufo.runtime.workspace import SeveralWorkspaces, ws
 from ufo.schema import tables
 
 CA_PEM = "-----BEGIN CERTIFICATE-----\nshared\n-----END CERTIFICATE-----\n"
@@ -588,26 +599,61 @@ def test_dbos_destroy_contract_for_the_executor_drain(tmp_path: Path) -> None:
     assert evidence["destroy_seconds"] < 30
 
 
-def test_model_rule_base_prefers_the_ufo_prefixed_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "sk-ant-ufo-scoped")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    injected = [r for r in model_rule_base(_hosted_config()) if isinstance(r, InjectionRule)]
-    assert [rule.real for rule in injected] == ["sk-ant-ufo-scoped"]
-
-    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "")
-    injected = [r for r in model_rule_base(_hosted_config()) if isinstance(r, InjectionRule)]
-    assert [rule.real for rule in injected] == [ANTHROPIC_KEY]
-
-
-def test_model_rule_base_boots_on_the_ufo_prefixed_key_alone(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_model_bindings_prefers_the_ufo_prefixed_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "sk-ant-ufo-scoped")
-    injected = [r for r in model_rule_base(_hosted_config()) if isinstance(r, InjectionRule)]
-    assert [rule.real for rule in injected] == ["sk-ant-ufo-scoped"]
+    anthropic = Bind(
+        host="api.anthropic.com",
+        header="x-api-key",
+        secret=UFO_MODELS_SECRET,
+        env="ANTHROPIC_API_KEY",
+    )
+    assert model_bindings(_hosted_config()) == (
+        (HostEntry(host="api.anthropic.com"),),
+        (anthropic,),
+    )
+    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    assert model_bindings(_hosted_config())[1] == (anthropic,)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    hosts, binds = model_bindings(_hosted_config())
+    assert hosts == (HostEntry(host="api.anthropic.com"), HostEntry(host="api.openai.com"))
+    assert binds == (
+        anthropic,
+        Bind(
+            host="api.openai.com",
+            header="authorization",
+            secret=UFO_MODELS_SECRET,
+            env="OPENAI_API_KEY",
+        ),
+    )
+
+
+def test_model_key_envs_name_each_provider_hosts_key_env() -> None:
+    assert MODEL_KEY_ENVS(_hosted_config()) == {
+        "api.anthropic.com": "ANTHROPIC_API_KEY",
+        "api.openai.com": "OPENAI_API_KEY",
+        "openrouter.ai": "OPENROUTER_API_KEY",
+    }
+    renamed = _hosted_config().model_copy(
+        update={
+            "models": ModelsConfig(
+                anthropic_api_key_env="DEPLOY_ANTHROPIC", openai_api_key_env="DEPLOY_OPENAI"
+            )
+        }
+    )
+    assert MODEL_KEY_ENVS(renamed)["api.anthropic.com"] == "DEPLOY_ANTHROPIC"
+    assert MODEL_KEY_ENVS(renamed)["api.openai.com"] == "DEPLOY_OPENAI"
+
+
+def test_model_bindings_fails_loud_with_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "")
+    with pytest.raises(RuntimeError, match="no model provider key set"):
+        model_bindings(_hosted_config())
 
 
 def test_proxy_endpoint_is_built_from_config_and_the_shared_ca(
@@ -618,15 +664,13 @@ def test_proxy_endpoint_is_built_from_config_and_the_shared_ca(
     monkeypatch.setenv(EGRESS_CA_CERT_ENV, CA_PEM)
     monkeypatch.setenv(serve.EGRESS_CONTROL_TOKEN_ENV, CONTROL_TOKEN)
     app = FastAPI()
-    endpoint = serve._proxy_endpoint(
-        app, _hosted_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob(), None, UNGATED_LEDGER
-    )
+    endpoint = serve._proxy_endpoint(app, _hosted_config(), (), None, RUN_TOKENS, _blob(), None)
     assert (endpoint.port, endpoint.ca_cert, endpoint.public_url) == (
         9443,
         CA_PEM,
         "https://proxy.test",
     )
-    mounted = TestClient(app).post("/internal/egress/resolve", json={"proxy_auth": ""})
+    mounted = TestClient(app).post("/internal/egress/tool-bridge", json={"proxy_auth": ""})
     assert mounted.status_code == 401
 
 
@@ -635,17 +679,7 @@ def test_proxy_endpoint_fails_loud_without_the_shared_ca(
 ) -> None:
     monkeypatch.delenv(EGRESS_CA_CERT_ENV, raising=False)
     with pytest.raises(RuntimeError, match=EGRESS_CA_CERT_ENV):
-        serve._proxy_endpoint(
-            FastAPI(),
-            _hosted_config(),
-            (),
-            None,
-            CORE_PRICING,
-            RUN_TOKENS,
-            _blob(),
-            None,
-            UNGATED_LEDGER,
-        )
+        serve._proxy_endpoint(FastAPI(), _hosted_config(), (), None, RUN_TOKENS, _blob(), None)
 
 
 def test_proxy_endpoint_fails_loud_without_the_control_token(
@@ -654,39 +688,7 @@ def test_proxy_endpoint_fails_loud_without_the_control_token(
     monkeypatch.setenv(EGRESS_CA_CERT_ENV, CA_PEM)
     monkeypatch.delenv(serve.EGRESS_CONTROL_TOKEN_ENV, raising=False)
     with pytest.raises(RuntimeError, match=serve.EGRESS_CONTROL_TOKEN_ENV):
-        serve._proxy_endpoint(
-            FastAPI(),
-            _hosted_config(),
-            (),
-            None,
-            CORE_PRICING,
-            RUN_TOKENS,
-            _blob(),
-            None,
-            UNGATED_LEDGER,
-        )
-
-
-def test_proxy_endpoint_fails_loud_when_the_cache_is_on_without_its_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(EGRESS_CA_CERT_ENV, CA_PEM)
-    monkeypatch.setenv(serve.EGRESS_CONTROL_TOKEN_ENV, CONTROL_TOKEN)
-    monkeypatch.delenv(serve.CACHE_CONTROL_TOKEN_ENV, raising=False)
-    config = Config(
-        database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db"),
-        blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
-        sandbox=SandboxConfig(
-            backend="local",
-            proxy_port=9443,
-            proxy_public_url="https://proxy.test",
-            cache_daemon="127.0.0.1:9110",
-        ),
-    )
-    with pytest.raises(RuntimeError, match=serve.CACHE_CONTROL_TOKEN_ENV):
-        serve._proxy_endpoint(
-            FastAPI(), config, (), None, CORE_PRICING, RUN_TOKENS, _blob(), None, UNGATED_LEDGER
-        )
+        serve._proxy_endpoint(FastAPI(), _hosted_config(), (), None, RUN_TOKENS, _blob(), None)
 
 
 def test_preview_settings_pair_the_service_with_its_real_token(
@@ -724,12 +726,10 @@ def test_proxy_endpoint_boots_a_local_serve_without_a_shared_ca(
     monkeypatch.delenv(EGRESS_CA_CERT_ENV, raising=False)
     monkeypatch.delenv(serve.EGRESS_CONTROL_TOKEN_ENV, raising=False)
     app = FastAPI()
-    endpoint = serve._proxy_endpoint(
-        app, _local_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob(), None, UNGATED_LEDGER
-    )
+    endpoint = serve._proxy_endpoint(app, _local_config(), (), None, RUN_TOKENS, _blob(), None)
     assert endpoint.port == 0
     assert "BEGIN CERTIFICATE" in endpoint.ca_cert
-    mounted = TestClient(app).post("/internal/egress/resolve", json={"proxy_auth": ""})
+    mounted = TestClient(app).post("/internal/egress/tool-bridge", json={"proxy_auth": ""})
     assert mounted.status_code == 401
 
 
@@ -760,8 +760,24 @@ def test_shared_owner_dsn_fails_loud_when_unset(monkeypatch: pytest.MonkeyPatch)
         serve._shared_owner_dsn(_local_config())
 
 
-def test_the_proxy_resolver_reads_keyed_slots_per_workspace(
-    monkeypatch: pytest.MonkeyPatch,
+def _captured_rules(monkeypatch: pytest.MonkeyPatch) -> list[PerAgentRules]:
+    built: list[PerAgentRules] = []
+
+    def capture(**fields: object) -> PerAgentRules:
+        built.append(PerAgentRules(**fields))
+        return built[-1]
+
+    monkeypatch.setattr(serve, "PerAgentRules", capture)
+    return built
+
+
+async def _compiled(rules: PerAgentRules, workspace_id: UUID, agent_id: UUID) -> SessionPolicy:
+    with ws(workspace_id), agent(agent_id):
+        return await rules.session_policy(PolicyScope(workspace_id, None, True, True, "run-token"))
+
+
+async def test_the_proxy_resolver_reads_keyed_slots_per_workspace(
+    db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -770,35 +786,62 @@ def test_the_proxy_resolver_reads_keyed_slots_per_workspace(
     slot = CredentialSlot(
         name="byok",
         description="a workspace key the proxy swaps onto the wire",
-        injection=InjectionTarget(host="api.inj.test", header="authorization", sentinel="S"),
+        injection=InjectionTarget(
+            host="api.inj.test", header="authorization", sentinel="S", env="BYOK_KEY"
+        ),
     )
     manifest = Manifest(name="inj", version="1", credentials=(slot,))
-    captured: dict[str, object] = {}
-
-    def rules(**kwargs: object) -> object:
-        captured.update(kwargs)
-        return SimpleNamespace(resolve=None, turn_live=None, rules_generation=None)
-
-    monkeypatch.setattr(serve, "PerAgentRules", rules)
+    built = _captured_rules(monkeypatch)
     credentials = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    config = _local_config()
-    serve._proxy_endpoint(
+    await asyncio.to_thread(
+        serve._proxy_endpoint,
         FastAPI(),
-        config,
+        _local_config(),
         (manifest,),
         credentials,
-        CORE_PRICING,
         RUN_TOKENS,
         _blob(),
         None,
-        UNGATED_LEDGER,
     )
-    assert captured["credentials"] is credentials
+    (rules,) = built
     claims = deploy_claims((manifest,))
-    assert captured["slots"] == WorkspaceSlots(
+    assert rules.slots == WorkspaceSlots(
         deploy=(slot,), claimed_slots=claims.slots, claimed_env=claims.env
     )
-    assert captured["base"] == model_rule_base(config)
+    keyed, unkeyed = await _workspace_agent(), await _workspace_agent()
+    with ws(keyed[0]):
+        await credentials.put(keyed[0], "byok", "byok-real-secret")
+
+    filled = await _compiled(rules, *keyed)
+    empty = await _compiled(rules, *unkeyed)
+
+    byok = Bind(host="api.inj.test", header="authorization", secret="byok", env="BYOK_KEY")
+    assert byok in filled.bind
+    assert byok not in empty.bind
+    assert filled.hosts == (HostEntry(host="api.anthropic.com"), HostEntry(host="api.inj.test"))
+    assert "byok-real-secret" not in filled.model_dump_json()
+
+
+async def _workspace_agent() -> tuple[UUID, UUID]:
+    workspace_id, agent_id = uuid4(), uuid4()
+    async with ufo.db.workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return workspace_id, agent_id
 
 
 def test_the_proxy_resolver_base_admits_the_s3_artifact_store_host(
@@ -811,20 +854,56 @@ def test_the_proxy_resolver_base_admits_the_s3_artifact_store_host(
     monkeypatch.delenv("AWS_PROFILE", raising=False)
     monkeypatch.setenv(EGRESS_CA_CERT_ENV, CA_PEM)
     monkeypatch.setenv(serve.EGRESS_CONTROL_TOKEN_ENV, CONTROL_TOKEN)
-    captured: dict[str, object] = {}
-
-    def rules(**kwargs: object) -> object:
-        captured.update(kwargs)
-        return SimpleNamespace(resolve=None, turn_live=None, rules_generation=None)
-
-    monkeypatch.setattr(serve, "PerAgentRules", rules)
+    built = _captured_rules(monkeypatch)
     store = S3BlobStore(bucket="ufo-blobs", region="us-east-1")
 
-    serve._proxy_endpoint(
-        FastAPI(), _local_config(), (), None, CORE_PRICING, RUN_TOKENS, store, None, UNGATED_LEDGER
-    )
+    serve._proxy_endpoint(FastAPI(), _local_config(), (), None, RUN_TOKENS, store, None)
 
-    assert ScopeRule(allowed_hosts=frozenset({"ufo-blobs.s3.amazonaws.com"})) in captured["base"]
+    (rules,) = built
+    policy = asyncio.run(_compiled(rules, uuid4(), uuid4()))
+    assert policy.hosts == (
+        HostEntry(host="api.anthropic.com"),
+        HostEntry(host="ufo-blobs.s3.amazonaws.com"),
+    )
+    assert [bind.host for bind in policy.bind] == ["api.anthropic.com"]
+
+
+def test_the_proxy_resolver_routes_the_bridge_and_preview_to_the_public_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.setenv(serve.PREVIEW_TOKEN_ENV, "preview-real")
+    built = _captured_rules(monkeypatch)
+    previewing = SandboxConfig(
+        backend="local", proxy_port=0, preview_service="ufo-preview.test:8930"
+    )
+    served = _local_config().model_copy(
+        update={
+            "sandbox": previewing,
+            "connect": ConnectConfig(public_base_url="https://serve.test/"),
+        }
+    )
+    unserved = served.model_copy(update={"connect": ConnectConfig()})
+
+    serve._proxy_endpoint(FastAPI(), served, (), None, RUN_TOKENS, _blob(), None)
+    serve._proxy_endpoint(FastAPI(), unserved, (), None, RUN_TOKENS, _blob(), None)
+
+    routed, unrouted = built
+    stamp = {RUN_HEADER: "run-token"}
+    assert asyncio.run(_compiled(routed, uuid4(), uuid4())).routes == (
+        Route(
+            host="preview.ufo.internal",
+            upstream="https://serve.test/internal/egress/preview",
+            headers=stamp,
+        ),
+        Route(
+            host="tools.ufo.internal",
+            upstream="https://serve.test/internal/egress/tool-bridge",
+            headers=stamp,
+        ),
+    )
+    assert (unrouted.bridge_upstream, unrouted.preview_upstream) == (None, None)
+    assert asyncio.run(_compiled(unrouted, uuid4(), uuid4())).routes == ()
 
 
 def _home_manifest(name: str, home: bool) -> Manifest:

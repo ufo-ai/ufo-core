@@ -31,7 +31,6 @@ from ufo.schema.records import TurnStatus, Usage, ledger_id_for
 TOKENS_DIMENSION = "tokens"
 EGRESS_DIMENSION = "egress"
 SANDBOX_TOKENS_DIMENSION = "sandbox_tokens"
-SANDBOX_TOKENS_ATTEMPT = "sandbox"
 IMAGES_DIMENSION = "images"
 VIDEOS_DIMENSION = "videos"
 UNCACHED_PROMPT_WARN_TOKENS = 20_000
@@ -370,87 +369,6 @@ class Ledger:
             connection, ledger_id, workspace_id, None, TOKENS_DIMENSION, priced, not byok
         )
 
-    async def record_sandbox_tokens(
-        self,
-        connection: AsyncConnection,
-        workspace_id: UUID,
-        turn_id: UUID,
-        model: str,
-        usage: Usage,
-        pricing: Pricing = CORE_PRICING,
-    ) -> None:
-        """Meter a model call the sandbox made through the egress proxy as a `sandbox_tokens` ledger
-        row per turn, its tokens and priced cost accumulated atomically so several in-sandbox calls
-        on one turn never lose a burn. Disjoint from the host turn loop's `tokens` bill: that path
-        runs the model host-side and never touches the proxy, so the two sources never overlap and
-        metering here is additive, not a double-count. Priced through the deploy's merged `pricing`
-        (core plus every provider-contributed rate, `CORE_PRICING` when none) and stamped with its
-        digest — the same table and stamp the host turn's `tokens` bill uses, so a contributed slug
-        is billed at its real rate and sandbox rows reconcile with turn rows by digest. Keyed with
-        an empty attempt under a dimension distinct from `tokens`, so its id can never collide with
-        the host row `Ledger.record_turn_usage` writes for the same turn. The row carries the burn's
-        prompt split beside its total, exactly as the host row does, so `read_turn_cost` reads this
-        dimension's cache share off the same row its tokens and cost come from.
-
-        The model host's key comes from the proxy's environment, so an in-sandbox call is always
-        served by the platform: its charge is `platform_paid` whatever key the workspace holds for
-        the host loop."""
-        total = _total_tokens(usage)
-        if total == 0:
-            return
-        priced = pricing.micro_usd(model, usage)
-        prompt = _prompt_tokens(usage)
-        ledger_id = ledger_id_for(
-            workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION, SANDBOX_TOKENS_ATTEMPT
-        )
-        insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
-        await connection.execute(
-            insert(tables.ledger)
-            .values(
-                id=ledger_id,
-                workspace_id=workspace_id,
-                turn_id=turn_id,
-                dimension=SANDBOX_TOKENS_DIMENSION,
-                amount=total,
-                prompt_tokens=prompt,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cache_read_tokens=usage.cache_read_tokens,
-                cache_write_5m_tokens=usage.cache_write_5m_tokens,
-                cache_write_30m_tokens=usage.cache_write_30m_tokens,
-                cache_write_1h_tokens=usage.cache_write_1h_tokens,
-                token_classes_complete=True,
-                priced_micro_usd=priced,
-                model=model,
-                price_digest=pricing.digest,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-            .on_conflict_do_update(
-                index_elements=[tables.ledger.c.id],
-                set_={
-                    "amount": tables.ledger.c.amount + total,
-                    "prompt_tokens": tables.ledger.c.prompt_tokens + prompt,
-                    "input_tokens": tables.ledger.c.input_tokens + usage.input_tokens,
-                    "output_tokens": tables.ledger.c.output_tokens + usage.output_tokens,
-                    "cache_read_tokens": tables.ledger.c.cache_read_tokens
-                    + usage.cache_read_tokens,
-                    "cache_write_5m_tokens": tables.ledger.c.cache_write_5m_tokens
-                    + usage.cache_write_5m_tokens,
-                    "cache_write_30m_tokens": tables.ledger.c.cache_write_30m_tokens
-                    + usage.cache_write_30m_tokens,
-                    "cache_write_1h_tokens": tables.ledger.c.cache_write_1h_tokens
-                    + usage.cache_write_1h_tokens,
-                    "token_classes_complete": tables.ledger.c.token_classes_complete,
-                    "priced_micro_usd": tables.ledger.c.priced_micro_usd + priced,
-                    "updated_at": sa.func.now(),
-                },
-            )
-        )
-        await self._charged(
-            connection, ledger_id, workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION, priced, True
-        )
-
     async def record_image_usage(
         self,
         connection: AsyncConnection,
@@ -598,68 +516,6 @@ async def read_turn_cost(
         micro_usd=int(row[1]),
         model=row[2],
         cache_percent=round(100 * cache_read_tokens / prompt_tokens) if prompt_tokens else 0,
-    )
-
-
-async def record_egress_request(
-    connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, amount: int = 1
-) -> None:
-    """Meter one sandbox egress request as an `egress` ledger row per turn, incremented atomically
-    so concurrent proxy writes never lose a count. A request COUNT priced at zero, never a dollar
-    charge, under a dimension distinct from `tokens`: it neither re-bills the model tokens
-    `Ledger.record_turn_usage` bills at terminal nor moves a spend cap. Keyed with an empty attempt
-    — the egress proxy has no run attempt, and a turn's egress count is per turn, not per run — so
-    the id can never collide with a token row (different dimension) and a parked-then-resumed turn
-    keeps accumulating into the one row."""
-    ledger_id = ledger_id_for(workspace_id, turn_id, EGRESS_DIMENSION)
-    insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
-    await connection.execute(
-        insert(tables.ledger)
-        .values(
-            id=ledger_id,
-            workspace_id=workspace_id,
-            turn_id=turn_id,
-            dimension=EGRESS_DIMENSION,
-            amount=amount,
-            priced_micro_usd=0,
-            model="",
-            created_at=sa.func.now(),
-            updated_at=sa.func.now(),
-        )
-        .on_conflict_do_update(
-            index_elements=[tables.ledger.c.id],
-            set_={"amount": tables.ledger.c.amount + amount, "updated_at": sa.func.now()},
-        )
-    )
-
-
-async def record_probe_egress_request(
-    connection: AsyncConnection, workspace_id: UUID, amount: int = 1
-) -> None:
-    """Meter an off-turn probe's sandbox egress under the same `egress` dimension a turn's is: a
-    request COUNT priced at zero, on a row whose `turn_id` is NULL because a probe runs off every
-    turn. Reaching the network from a conversation's sandbox is one act with one meaning whether a
-    turn or a probe made it, so it is one dimension — the NULL FK is what separates them, and it
-    separates them the way a background job's model spend is separated from a turn's
-    (`Ledger.record_workspace_usage`): the row lands in the workspace total and every
-    workspace-scoped cap window, and drops out of per-member and per-agent attribution, which join
-    through `turn`.
-
-    The row carries a fresh id rather than a key derived from the probe, so each flushed batch bills
-    once and nothing accumulates onto a key a later probe could reuse; the proxy sums a batch per
-    principal before writing, so a probe's several CONNECTs in one window are one row."""
-    await connection.execute(
-        sa.insert(tables.ledger).values(
-            id=uuid4(),
-            workspace_id=workspace_id,
-            turn_id=None,
-            dimension=EGRESS_DIMENSION,
-            amount=amount,
-            priced_micro_usd=0,
-            model="",
-            created_at=sa.func.now(),
-            updated_at=sa.func.now(),
-        )
     )
 
 

@@ -9,13 +9,9 @@ from ufo.db import workspace_tx
 from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT
 from ufo.runtime.billing.accounting import (
     IMAGES_DIMENSION,
-    SANDBOX_TOKENS_ATTEMPT,
-    SANDBOX_TOKENS_DIMENSION,
     TOKENS_DIMENSION,
     VIDEOS_DIMENSION,
     Ledger,
-    record_egress_request,
-    record_probe_egress_request,
 )
 from ufo.runtime.billing.spend import GateDeploy
 from ufo.schema import tables
@@ -129,19 +125,13 @@ async def test_a_key_arriving_mid_turn_does_not_make_that_turn_free(db: None) ->
     assert remaining == DOLLAR - priced
 
 
-async def test_in_sandbox_and_media_spend_charge_each_increment_and_egress_charges_nothing(
-    db: None,
-) -> None:
-    usage = Usage(input_tokens=5_000, output_tokens=50)
+async def test_media_spend_charges_each_increment(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await allow(connection, workspace_id, DOLLAR, "park")
         for _ in range(2):
-            await LEDGER.record_sandbox_tokens(connection, workspace_id, turn_id, MODEL, usage)
-        await LEDGER.record_image_usage(connection, workspace_id, turn_id, "image", 1, 40_000)
+            await LEDGER.record_image_usage(connection, workspace_id, turn_id, "image", 1, 40_000)
         await LEDGER.record_video_usage(connection, workspace_id, turn_id, "video", 1, 60_000)
-        await record_egress_request(connection, workspace_id, turn_id)
-        await record_probe_egress_request(connection, workspace_id)
         remaining = (
             await connection.execute(
                 sa.select(ALLOWANCE_TABLE.c.remaining_micro_usd).where(
@@ -149,12 +139,11 @@ async def test_in_sandbox_and_media_spend_charge_each_increment_and_egress_charg
                 )
             )
         ).scalar_one()
-    sandbox = ledger_id_for(workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION, SANDBOX_TOKENS_ATTEMPT)
+    images = ledger_id_for(workspace_id, turn_id, IMAGES_DIMENSION)
     charges = await _charges(workspace_id)
     assert [(charge[0], charge[2], charge[4]) for charge in charges] == [
-        (sandbox, SANDBOX_TOKENS_DIMENSION, True),
-        (sandbox, SANDBOX_TOKENS_DIMENSION, True),
-        (ledger_id_for(workspace_id, turn_id, IMAGES_DIMENSION), IMAGES_DIMENSION, True),
+        (images, IMAGES_DIMENSION, True),
+        (images, IMAGES_DIMENSION, True),
         (ledger_id_for(workspace_id, turn_id, VIDEOS_DIMENSION), VIDEOS_DIMENSION, True),
     ]
     assert sum(charge[3] for charge in charges) == await _priced(workspace_id)

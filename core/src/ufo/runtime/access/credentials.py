@@ -383,12 +383,12 @@ class HostChoice:
     prompted with.
 
     The stored value is a **choice, never a hostname** — `credential_host` answers the matching
-    declared literal or nothing at all, so the host that reaches a proxy `ScopeRule` is always a
-    string this declaration wrote. That is what keeps a member-filled host as trustworthy as a
-    code-declared one: an exact `ScopeRule` bypasses the proxy's private-address check (that check
-    guards the open-internet path), and free text there would let a stored address or internal name
-    decide where the shared proxy dials. A closed set has nothing to validate, so there is no
-    pattern, no length cap, no case fold and no suffix bound to get wrong."""
+    declared literal or nothing at all, so the host a session policy binds the slot's secret on is
+    always a string this declaration wrote. That is what keeps a member-filled host as trustworthy
+    as a code-declared one: free text there would let a stored address or internal name decide
+    where the shared proxy dials and which host receives the secret. A closed set has nothing to
+    validate, so there is no pattern, no length cap, no case fold and no suffix bound to get
+    wrong."""
 
     slot: str
     description: str
@@ -417,8 +417,8 @@ async def credential_host(
     """The provider host an injecting slot's secret rides to for this workspace: a fixed declared
     host as-is, or — for a provider whose host varies per account — the one this workspace selected,
     falling back to the declared default while nothing is selected. None only for a stored value the
-    declaration does not offer, which opens no egress at all. The egress proxy resolves the host it
-    admits through here and the engine resolves the host it exports into the sandbox through here,
+    declaration does not offer, which opens no egress at all. The session policy resolves the host
+    it binds through here and the engine resolves the host it exports into the sandbox through here,
     from the same declaration: two roles, one answer, no registration between them."""
     match host:
         case str():

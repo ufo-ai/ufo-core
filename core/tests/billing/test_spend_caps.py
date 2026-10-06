@@ -9,7 +9,11 @@ from dbos import EnqueueOptions
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
-from ufo.runtime.billing.accounting import UNGATED_LEDGER, SpendEvaluator
+from ufo.runtime.billing.accounting import (
+    SANDBOX_TOKENS_DIMENSION,
+    UNGATED_LEDGER,
+    SpendEvaluator,
+)
 from ufo.runtime.ext.context import ExtensionContext
 from ufo.runtime.ext.manifest import JobSpec
 from ufo.runtime.jobs import (
@@ -389,12 +393,18 @@ async def test_sandbox_tokens_count_toward_a_cap(db: None) -> None:
                 updated_at=sa.func.now(),
             )
         )
-        await UNGATED_LEDGER.record_sandbox_tokens(
-            connection,
-            workspace_id,
-            turn_id,
-            "claude-opus-4-8",
-            Usage(input_tokens=1000, output_tokens=2000),
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                dimension=SANDBOX_TOKENS_DIMENSION,
+                amount=3000,
+                priced_micro_usd=55_000,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
         )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
         decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)

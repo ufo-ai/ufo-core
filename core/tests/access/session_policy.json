@@ -1,0 +1,64 @@
+{
+  "internet": true,
+  "hosts": [
+    {
+      "host": "api.acmekeys.com"
+    },
+    {
+      "host": "api.anthropic.com"
+    },
+    {
+      "host": "api.github.com"
+    },
+    {
+      "host": "api.openai.com"
+    },
+    {
+      "host": "files.example.test"
+    },
+    {
+      "host": "github.com"
+    }
+  ],
+  "bind": [
+    {
+      "host": "api.acmekeys.com",
+      "header": "x-api-key",
+      "secret": "acme_api_key",
+      "env": "ACME_KEY"
+    },
+    {
+      "host": "api.anthropic.com",
+      "header": "x-api-key",
+      "secret": "ufo/models",
+      "env": "ANTHROPIC_API_KEY"
+    },
+    {
+      "host": "api.github.com",
+      "header": "authorization",
+      "secret": "connection:3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11",
+      "env": "GH_TOKEN"
+    },
+    {
+      "host": "api.openai.com",
+      "header": "authorization",
+      "secret": "ufo/models",
+      "env": "OPENAI_API_KEY"
+    },
+    {
+      "host": "github.com",
+      "header": "authorization",
+      "secret": "connection:3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11",
+      "env": "GH_TOKEN"
+    }
+  ],
+  "routes": [
+    {
+      "host": "tools.ufo.internal",
+      "upstream": "https://serve.test/internal/egress/tool-bridge",
+      "headers": {
+        "x-ufo-run": "dWZvLXJ1bi8wYjZlMmY0YS0xYzNkLTRlNWYtOGE5Yi0wYzFkMmUzZjRhNWIvM2U5MTRjN2QtNGY2MC00MTgyLTlkMmUtM2Y0YTViNmM3ZDhlLy0.QGqETkfRalV23pJyn7mbIlUMwJHIKKHf9VwnAlTp6xo"
+      }
+    }
+  ]
+}
