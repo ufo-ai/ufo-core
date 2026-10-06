@@ -1384,6 +1384,53 @@ class ExtensionContext:
                 call_id,
             )
 
+    async def record_usage(
+        self,
+        service: str,
+        unit: str,
+        backend: str | None,
+        amount: int,
+        *,
+        token_id: UUID | None,
+        session_id: UUID | None,
+        labels: Mapping[str, str],
+        resource_id: str | None,
+        attempt: str,
+        occurred_at: datetime,
+        byok: bool,
+        price_micro_usd: int,
+        price_digest: str,
+        model: str = "",
+        usage: Usage | None = None,
+    ) -> bool:
+        """Book one record a service metered in the bound workspace's ledger, once per
+        `(service, resource_id or session_id, unit, attempt)`: True when this call wrote it, False
+        for a replay of the same record, `TurnUsageConflict` for a replay whose content differs.
+        `unit` is one `SERVICE_UNITS` names for the service; a `tokens` record carries `model` and
+        its six token classes in `usage`, summing to `amount`."""
+        if self.ledger is None:
+            raise RuntimeError("record_usage requires the deploy's ledger; none is wired")
+        async with workspace_tx() as connection:
+            return await self.ledger.record_service_usage(
+                connection,
+                self.workspace_id,
+                service=service,
+                dimension=unit,
+                backend=backend,
+                amount=amount,
+                token_id=token_id,
+                session_id=session_id,
+                labels=labels,
+                resource_id=resource_id,
+                attempt=attempt,
+                occurred_at=occurred_at,
+                byok=byok,
+                priced_micro_usd=price_micro_usd,
+                price_digest=price_digest,
+                model=model,
+                usage=usage,
+            )
+
     def image_preview_url(self, blob_key: str, size_bytes: int) -> str | None:
         """The signed link that renders one picture an extension's own row stores, or None when this
         deploy mints no artifact links or the key and size are not an eligible raster.

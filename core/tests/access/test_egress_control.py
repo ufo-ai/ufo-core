@@ -771,14 +771,19 @@ async def test_meter_writes_the_egress_probe_and_token_ledger_rows(db: None) -> 
         rows = (
             await connection.execute(
                 sa.select(
-                    tables.ledger.c.dimension, tables.ledger.c.turn_id, tables.ledger.c.amount
+                    tables.ledger.c.service,
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.turn_id,
+                    tables.ledger.c.amount,
                 ).where(tables.ledger.c.workspace_id == workspace_id)
             )
         ).all()
-    by_key = {(row.dimension, row.turn_id): int(row.amount) for row in rows}
-    assert by_key[("egress", turn_id)] == 2
-    assert by_key[("egress", None)] == 1
-    assert by_key[("sandbox_tokens", turn_id)] == 2 * (1000 + 2000 + 3000 + 4000)
+    by_key = {(row.service, row.dimension, row.turn_id): int(row.amount) for row in rows}
+    assert by_key == {
+        ("proxy", "requests", turn_id): 2,
+        ("proxy", "requests", None): 1,
+        ("models", "tokens", turn_id): 2 * (1000 + 2000 + 3000 + 4000),
+    }
     async with workspace_tx() as connection:
         charges = (
             await connection.execute(
@@ -794,11 +799,11 @@ async def test_meter_writes_the_egress_probe_and_token_ledger_rows(db: None) -> 
             await connection.execute(
                 sa.select(tables.ledger.c.priced_micro_usd).where(
                     tables.ledger.c.workspace_id == workspace_id,
-                    tables.ledger.c.dimension == "sandbox_tokens",
+                    tables.ledger.c.dimension == "tokens",
                 )
             )
         ).scalar_one()
-    assert [tuple(charge) for charge in charges] == [(turn_id, "sandbox_tokens", priced, True)]
+    assert [tuple(charge) for charge in charges] == [(turn_id, "tokens", priced, True)]
 
 
 async def test_meter_folds_unpriced_cache_write_30m_into_input(monkeypatch, db: None) -> None:

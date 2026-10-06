@@ -1,5 +1,6 @@
 """Token pricing, the ledger's writes, and the spend caps decided against the ledger."""
 
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -26,7 +27,7 @@ from ufo.runtime.billing.spend import (
 )
 from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.schema import tables
-from ufo.schema.records import TurnStatus, Usage, ledger_id_for
+from ufo.schema.records import TurnStatus, Usage, ledger_id_for, service_ledger_id_for
 
 TOKENS_DIMENSION = "tokens"
 EGRESS_DIMENSION = "egress"
@@ -36,6 +37,19 @@ IMAGES_DIMENSION = "images"
 VIDEOS_DIMENSION = "videos"
 REQUESTS_DIMENSION = "requests"
 GIB_DIMENSION = "gib"
+MODELS_SERVICE = "models"
+PROXY_SERVICE = "proxy"
+SERVICE_UNITS: Mapping[str, tuple[str, ...]] = {
+    MODELS_SERVICE: (TOKENS_DIMENSION, IMAGES_DIMENSION, VIDEOS_DIMENSION),
+    PROXY_SERVICE: (REQUESTS_DIMENSION, GIB_DIMENSION),
+}
+"""The units each service meters: the `(service, dimension)` pairs a service record may carry."""
+TURN_LABEL = "turn"
+VIA_LABEL = "via"
+PROXY_VIA = "proxy"
+LABELS_MAX_KEYS = 16
+LABEL_MAX_CHARS = 64
+LABEL_KEY = re.compile(r"[a-z0-9_.-]{1,64}")
 UNCACHED_PROMPT_WARN_TOKENS = 20_000
 """Where a turn that cached nothing stops being a small cold prompt and starts being a fault. Well
 past every supported provider's minimum cacheable prefix, the largest of which is 2,048."""
@@ -255,6 +269,7 @@ class Ledger:
                 id=ledger_id,
                 workspace_id=workspace_id,
                 turn_id=turn_id,
+                service=MODELS_SERVICE,
                 dimension=TOKENS_DIMENSION,
                 amount=total,
                 prompt_tokens=_prompt_tokens(usage),
@@ -350,6 +365,7 @@ class Ledger:
                 id=ledger_id,
                 workspace_id=workspace_id,
                 turn_id=None,
+                service=MODELS_SERVICE,
                 dimension=TOKENS_DIMENSION,
                 amount=total,
                 prompt_tokens=_prompt_tokens(usage),
@@ -381,22 +397,21 @@ class Ledger:
         usage: Usage,
         pricing: Pricing = CORE_PRICING,
     ) -> None:
-        """Meter a model call the sandbox made through the egress proxy as a `sandbox_tokens` ledger
-        row per turn, its tokens and priced cost accumulated atomically so several in-sandbox calls
-        on one turn never lose a burn. Disjoint from the host turn loop's `tokens` bill: that path
-        runs the model host-side and never touches the proxy, so the two sources never overlap and
-        metering here is additive, not a double-count. Priced through the deploy's merged `pricing`
-        (core plus every provider-contributed rate, `CORE_PRICING` when none) and stamped with its
-        digest — the same table and stamp the host turn's `tokens` bill uses, so a contributed slug
-        is billed at its real rate and sandbox rows reconcile with turn rows by digest. Keyed with
-        an empty attempt under a dimension distinct from `tokens`, so its id can never collide with
-        the host row `Ledger.record_turn_usage` writes for the same turn. The row carries the burn's
-        prompt split beside its total, exactly as the host row does, so `read_turn_cost` reads this
-        dimension's cache share off the same row its tokens and cost come from.
+        """Meter a model call the sandbox made through the egress proxy onto the turn's in-sandbox
+        row — `(models, tokens)` labelled `via: proxy` and the turn — its tokens and priced cost
+        accumulated atomically so several in-sandbox calls on one turn never lose a burn. Disjoint
+        from the host turn loop's row: that path runs the model host-side and never touches the
+        proxy, so the two sources never overlap and `read_turn_cost` adds them. Priced through the
+        deploy's merged `pricing` (core plus every provider-contributed rate, `CORE_PRICING` when
+        none) and stamped with its digest — the same table and stamp the host turn's bill uses, so a
+        contributed slug is billed at its real rate and the two rows reconcile by digest. Its id is
+        derived from the `sandbox_tokens` key and the `sandbox` attempt, so it can never collide
+        with the host row `Ledger.record_turn_usage` writes for the same turn. The row carries the
+        burn's prompt split beside its total, exactly as the host row does.
 
         The model host's key comes from the proxy's environment, so an in-sandbox call is always
-        served by the platform: its charge is `platform_paid` whatever key the workspace holds for
-        the host loop."""
+        served by the platform: the row is not `byok` and its charge is `platform_paid`, whatever
+        key the workspace holds for the host loop."""
         total = _total_tokens(usage)
         if total == 0:
             return
@@ -412,7 +427,9 @@ class Ledger:
                 id=ledger_id,
                 workspace_id=workspace_id,
                 turn_id=turn_id,
-                dimension=SANDBOX_TOKENS_DIMENSION,
+                service=MODELS_SERVICE,
+                dimension=TOKENS_DIMENSION,
+                labels={VIA_LABEL: PROXY_VIA, TURN_LABEL: str(turn_id)},
                 amount=total,
                 prompt_tokens=prompt,
                 input_tokens=usage.input_tokens,
@@ -421,6 +438,7 @@ class Ledger:
                 cache_write_5m_tokens=usage.cache_write_5m_tokens,
                 cache_write_30m_tokens=usage.cache_write_30m_tokens,
                 cache_write_1h_tokens=usage.cache_write_1h_tokens,
+                byok=False,
                 token_classes_complete=True,
                 priced_micro_usd=priced,
                 model=model,
@@ -450,7 +468,7 @@ class Ledger:
             )
         )
         await self._charged(
-            connection, ledger_id, workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION, priced, True
+            connection, ledger_id, workspace_id, turn_id, TOKENS_DIMENSION, priced, True
         )
 
     async def record_image_usage(
@@ -502,8 +520,6 @@ class Ledger:
         amount: int,
         micro_usd: int,
     ) -> None:
-        """`egress` is the one metered dimension that never charges: it counts requests and prices
-        at zero."""
         ledger_id = ledger_id_for(workspace_id, turn_id, dimension)
         insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
         await connection.execute(
@@ -512,6 +528,7 @@ class Ledger:
                 id=ledger_id,
                 workspace_id=workspace_id,
                 turn_id=turn_id,
+                service=MODELS_SERVICE,
                 dimension=dimension,
                 amount=amount,
                 priced_micro_usd=micro_usd,
@@ -531,6 +548,162 @@ class Ledger:
         await self._charged(
             connection, ledger_id, workspace_id, turn_id, dimension, micro_usd, True
         )
+
+    async def record_service_usage(
+        self,
+        connection: AsyncConnection,
+        workspace_id: UUID,
+        *,
+        service: str,
+        dimension: str,
+        backend: str | None,
+        amount: int,
+        token_id: UUID | None,
+        session_id: UUID | None,
+        labels: Mapping[str, str],
+        resource_id: str | None,
+        attempt: str,
+        occurred_at: datetime,
+        byok: bool,
+        priced_micro_usd: int,
+        price_digest: str,
+        model: str = "",
+        usage: Usage | None = None,
+    ) -> bool:
+        """Book one record a service metered, once: True when this call wrote it, False when the
+        same record was booked before. The row is keyed on the service, the resource it metered
+        (else its session), the unit and the service's attempt, so a replayed batch books and
+        charges nothing twice, and a replay whose content differs raises `TurnUsageConflict` rather
+        than move what was booked and charged.
+
+        The row is booked at `occurred_at`, which caps, windows and day buckets key on. A `turn`
+        label naming a turn of this workspace binds the row to that turn, so member and agent caps
+        and attribution count it; any other value, a turn of another workspace among them, binds
+        nothing and stays a label. A `tokens` record carries its six token classes."""
+        if not resource_id and session_id is None:
+            raise ValueError("A service record names a resource or a session.")
+        if amount <= 0:
+            raise ValueError("A service record's amount is positive.")
+        if priced_micro_usd < 0:
+            raise ValueError("A service record's price is not negative.")
+        if dimension not in SERVICE_UNITS.get(service, ()):
+            raise ValueError(f"The {service} service meters no {dimension}.")
+        if len(labels) > LABELS_MAX_KEYS:
+            raise ValueError(f"A service record carries at most {LABELS_MAX_KEYS} labels.")
+        if any(
+            LABEL_KEY.fullmatch(key) is None or len(value) > LABEL_MAX_CHARS
+            for key, value in labels.items()
+        ):
+            raise ValueError(
+                "A label key is lowercase letters, digits, dot, dash and underscore, and a label "
+                f"value is at most {LABEL_MAX_CHARS} characters."
+            )
+        if usage is not None and _total_tokens(usage) != amount:
+            raise ValueError("A service record's usage classes sum to its amount.")
+        if dimension == TOKENS_DIMENSION and usage is None:
+            raise ValueError("A tokens record carries its usage classes.")
+        ledger_id = service_ledger_id_for(
+            workspace_id, service, resource_id or str(session_id), dimension, attempt
+        )
+        turn_id = await self._named_turn(connection, workspace_id, labels)
+        classes = Usage() if usage is None else usage
+        insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+        written = (
+            await connection.execute(
+                insert(tables.ledger)
+                .values(
+                    id=ledger_id,
+                    workspace_id=workspace_id,
+                    turn_id=turn_id,
+                    service=service,
+                    dimension=dimension,
+                    backend=backend,
+                    token_id=token_id,
+                    session_id=session_id,
+                    labels=dict(labels),
+                    resource_id=resource_id,
+                    attempt=attempt,
+                    amount=amount,
+                    prompt_tokens=_prompt_tokens(classes),
+                    input_tokens=classes.input_tokens,
+                    output_tokens=classes.output_tokens,
+                    cache_read_tokens=classes.cache_read_tokens,
+                    cache_write_5m_tokens=classes.cache_write_5m_tokens,
+                    cache_write_30m_tokens=classes.cache_write_30m_tokens,
+                    cache_write_1h_tokens=classes.cache_write_1h_tokens,
+                    byok=byok,
+                    token_classes_complete=usage is not None,
+                    priced_micro_usd=priced_micro_usd,
+                    model=model,
+                    price_digest=price_digest,
+                    created_at=occurred_at,
+                    updated_at=sa.func.now(),
+                )
+                .on_conflict_do_nothing(index_elements=[tables.ledger.c.id])
+                .returning(tables.ledger.c.id)
+            )
+        ).scalar_one_or_none()
+        if written is None:
+            booked = (
+                (
+                    await connection.execute(
+                        sa.select(
+                            tables.ledger.c.workspace_id,
+                            tables.ledger.c.service,
+                            tables.ledger.c.dimension,
+                            tables.ledger.c.backend,
+                            tables.ledger.c.token_id,
+                            tables.ledger.c.session_id,
+                            tables.ledger.c.labels,
+                            tables.ledger.c.resource_id,
+                            tables.ledger.c.attempt,
+                            tables.ledger.c.amount,
+                            tables.ledger.c.byok,
+                            tables.ledger.c.priced_micro_usd,
+                            tables.ledger.c.model,
+                        ).where(tables.ledger.c.id == ledger_id)
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            replayed = {
+                "workspace_id": workspace_id,
+                "service": service,
+                "dimension": dimension,
+                "backend": backend,
+                "token_id": token_id,
+                "session_id": session_id,
+                "labels": dict(labels),
+                "resource_id": resource_id,
+                "attempt": attempt,
+                "amount": amount,
+                "byok": byok,
+                "priced_micro_usd": priced_micro_usd,
+                "model": model,
+            }
+            if dict(booked) != replayed:
+                raise TurnUsageConflict("one service record changed under its idempotency key")
+            return False
+        await self._charged(
+            connection, ledger_id, workspace_id, turn_id, dimension, priced_micro_usd, not byok
+        )
+        return True
+
+    async def _named_turn(
+        self, connection: AsyncConnection, workspace_id: UUID, labels: Mapping[str, str]
+    ) -> UUID | None:
+        try:
+            named = UUID(labels[TURN_LABEL])
+        except (KeyError, ValueError):
+            return None
+        return (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(
+                    tables.turn.c.id == named, tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one_or_none()
 
     async def _charged(
         self,
@@ -578,9 +751,9 @@ async def read_turn_cost(
     the true provider charge — and the cache share is the cached part of the whole prompt, computed
     from the split those same rows carry rather than from any in-memory account of the burn.
 
-    `dimension` names which of the turn's spends that is: ufo's own rounds bill `tokens` host-side,
-    while a loop that makes its model calls from inside the sandbox has them metered onto the same
-    turn by the egress proxy under `sandbox_tokens`."""
+    `dimension` names which of the turn's spends that is: `tokens` counts ufo's own rounds, billed
+    host-side, together with the model calls a loop makes from inside the sandbox, which the egress
+    proxy meters onto the same turn labelled `via: proxy`."""
     row = (
         await connection.execute(
             sa.select(
@@ -606,13 +779,13 @@ async def read_turn_cost(
 async def record_egress_request(
     connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, amount: int = 1
 ) -> None:
-    """Meter one sandbox egress request as an `egress` ledger row per turn, incremented atomically
-    so concurrent proxy writes never lose a count. A request COUNT priced at zero, never a dollar
-    charge, under a dimension distinct from `tokens`: it neither re-bills the model tokens
-    `Ledger.record_turn_usage` bills at terminal nor moves a spend cap. Keyed with an empty attempt
-    — the egress proxy has no run attempt, and a turn's egress count is per turn, not per run — so
-    the id can never collide with a token row (different dimension) and a parked-then-resumed turn
-    keeps accumulating into the one row."""
+    """Meter one sandbox egress request onto the turn's `(proxy, requests)` row, labelled with the
+    turn and incremented atomically so concurrent proxy writes never lose a count. A request COUNT
+    priced at zero, never a dollar charge: it neither re-bills the model tokens
+    `Ledger.record_turn_usage` bills at terminal nor moves a spend cap. Its id is derived from the
+    `egress` key with an empty attempt — the egress proxy has no run attempt, and a turn's egress
+    count is per turn, not per run — so it can never collide with a token row and a
+    parked-then-resumed turn keeps accumulating into the one row."""
     ledger_id = ledger_id_for(workspace_id, turn_id, EGRESS_DIMENSION)
     insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
     await connection.execute(
@@ -621,7 +794,9 @@ async def record_egress_request(
             id=ledger_id,
             workspace_id=workspace_id,
             turn_id=turn_id,
-            dimension=EGRESS_DIMENSION,
+            service=PROXY_SERVICE,
+            dimension=REQUESTS_DIMENSION,
+            labels={TURN_LABEL: str(turn_id)},
             amount=amount,
             priced_micro_usd=0,
             model="",
@@ -638,14 +813,13 @@ async def record_egress_request(
 async def record_probe_egress_request(
     connection: AsyncConnection, workspace_id: UUID, amount: int = 1
 ) -> None:
-    """Meter an off-turn probe's sandbox egress under the same `egress` dimension a turn's is: a
-    request COUNT priced at zero, on a row whose `turn_id` is NULL because a probe runs off every
-    turn. Reaching the network from a conversation's sandbox is one act with one meaning whether a
-    turn or a probe made it, so it is one dimension — the NULL FK is what separates them, and it
-    separates them the way a background job's model spend is separated from a turn's
-    (`Ledger.record_workspace_usage`): the row lands in the workspace total and every
-    workspace-scoped cap window, and drops out of per-member and per-agent attribution, which join
-    through `turn`.
+    """Meter an off-turn probe's sandbox egress as the same `(proxy, requests)` count a turn's is:
+    priced at zero, on a row whose `turn_id` is NULL because a probe runs off every turn. Reaching
+    the network from a conversation's sandbox is one act with one meaning whether a turn or a probe
+    made it, so it is one unit — the NULL FK is what separates them, and it separates them the way
+    a background job's model spend is separated from a turn's (`Ledger.record_workspace_usage`):
+    the row lands in the workspace total and every workspace-scoped cap window, and drops out of
+    per-member and per-agent attribution, which join through `turn`.
 
     The row carries a fresh id rather than a key derived from the probe, so each flushed batch bills
     once and nothing accumulates onto a key a later probe could reuse; the proxy sums a batch per
@@ -655,7 +829,8 @@ async def record_probe_egress_request(
             id=uuid4(),
             workspace_id=workspace_id,
             turn_id=None,
-            dimension=EGRESS_DIMENSION,
+            service=PROXY_SERVICE,
+            dimension=REQUESTS_DIMENSION,
             amount=amount,
             priced_micro_usd=0,
             model="",
@@ -695,14 +870,15 @@ async def mint_usage_exports(
     key_slot_for: Callable[[str], str | None],
 ) -> None:
     """Freeze the consumer's unshipped usage growth into `ledger_export` intent rows. This is the
-    export seam's settlement knowledge, kept beside the writers that define it: a `tokens` row
+    export seam's settlement knowledge, kept beside the writers that define it: a host `tokens` row
     normally lands once at terminal, but a cancelled workflow may write a partial cumulative
-    snapshot that recovery later advances, so any growth mints a further intent from the prior
-    high-water mark. A `sandbox_tokens`, `images` or `videos` row accumulates until its turn is
-    terminal, and `EXPORT_SETTLE_MARGIN_SECONDS` past `turn.updated_at` only bounds how often a late
-    egress-proxy write costs an extra top-up intent. No growth is lost to timing.
-    Egress rows (a zero-priced request count) never export. Usage settling before `floor` never
-    mints — the consumer's backfill bound. Idempotent: an intent's `(consumer, ledger_id,
+    snapshot that recovery later advances, and an in-sandbox `tokens` row grows while its turn
+    runs, so any growth mints a further intent from the prior high-water mark. An `images`,
+    `videos` or `sandbox_tokens` row accumulates until its turn is terminal, and
+    `EXPORT_SETTLE_MARGIN_SECONDS` past `turn.updated_at` only bounds how often a late write costs
+    an extra top-up intent. No growth is lost to timing.
+    Request counts (zero-priced) never export. Usage settling before `floor` never mints — the
+    consumer's backfill bound. Idempotent: an intent's `(consumer, ledger_id,
     from_amount)` key makes concurrent or replayed mints collapse onto one frozen row.
 
     Each intent copies the `byok` value the ledger writer froze when the provider attempt began.
@@ -1147,13 +1323,13 @@ class MemberSpendReport:
 
 TOKEN_DIMENSIONS = (TOKENS_DIMENSION, SANDBOX_TOKENS_DIMENSION)
 SERVICE_OF_DIMENSION: Mapping[str, str] = {
-    TOKENS_DIMENSION: "models",
-    SANDBOX_TOKENS_DIMENSION: "models",
-    IMAGES_DIMENSION: "models",
-    VIDEOS_DIMENSION: "models",
-    EGRESS_DIMENSION: "proxy",
-    REQUESTS_DIMENSION: "proxy",
-    GIB_DIMENSION: "proxy",
+    TOKENS_DIMENSION: MODELS_SERVICE,
+    SANDBOX_TOKENS_DIMENSION: MODELS_SERVICE,
+    IMAGES_DIMENSION: MODELS_SERVICE,
+    VIDEOS_DIMENSION: MODELS_SERVICE,
+    EGRESS_DIMENSION: PROXY_SERVICE,
+    REQUESTS_DIMENSION: PROXY_SERVICE,
+    GIB_DIMENSION: PROXY_SERVICE,
 }
 WORKSPACE_JOB_LABEL = "Workspace jobs"
 SELECTED_PERIOD = "selected"
@@ -1388,6 +1564,93 @@ def job_day_candidates() -> WorkspaceCandidates:
     with nothing to fold answers in an indexed range scan of its own rows instead, and the job
     fires once a day, because a day closes once a day."""
     return owner_candidates(lambda: sa.select(tables.workspace.c.id))
+
+
+LEDGER_SERVICE_BACKFILL_JOB = "ledger_service_backfill"
+LEDGER_SERVICE_BACKFILL_SCHEDULE = "0 * * * * *"
+LEDGER_SERVICE_BACKFILL_BATCH = 5000
+
+
+@dataclass(frozen=True)
+class ServiceBackfill:
+    """File a workspace's rows that carry no service under the service their dimension belongs to,
+    as `ledger_fill_service` files every insert: `tokens`, `images` and `videos` under `models`;
+    `sandbox_tokens` as `(models, tokens)`, platform-paid, labelled `via: proxy` and its turn;
+    `egress` as `(proxy, requests)` labelled with its turn.
+
+    A tick moves at most `LEDGER_SERVICE_BACKFILL_BATCH` rows, so no statement holds the row locks
+    of a busy workspace's whole ledger while its meter writers queue behind them."""
+
+    workspace_id: UUID
+
+    async def roll(self, connection: AsyncConnection, now: datetime) -> int:
+        ledger = tables.ledger
+        sandbox = ledger.c.dimension == SANDBOX_TOKENS_DIMENSION
+        egress = ledger.c.dimension == EGRESS_DIMENSION
+        batch = (
+            sa.select(ledger.c.id)
+            .where(ledger.c.workspace_id == self.workspace_id, ledger.c.service.is_(None))
+            .limit(LEDGER_SERVICE_BACKFILL_BATCH)
+        )
+        moved = await connection.execute(
+            sa.update(ledger)
+            .where(ledger.c.service.is_(None), ledger.c.id.in_(batch))
+            .values(
+                service=sa.case((egress, PROXY_SERVICE), else_=MODELS_SERVICE),
+                dimension=sa.case(
+                    (sandbox, TOKENS_DIMENSION),
+                    (egress, REQUESTS_DIMENSION),
+                    else_=ledger.c.dimension,
+                ),
+                byok=sa.case((sandbox, sa.false()), else_=ledger.c.byok),
+                labels=sa.case(
+                    (sandbox, self._turn_labels(connection, VIA_LABEL, PROXY_VIA)),
+                    (egress, self._turn_labels(connection)),
+                    else_=ledger.c.labels,
+                ),
+                updated_at=now,
+            )
+        )
+        return moved.rowcount
+
+    def _turn_labels(
+        self, connection: AsyncConnection, *pairs: str
+    ) -> sa.ColumnElement[Mapping[str, str]]:
+        turn = tables.ledger.c.turn_id
+        if connection.dialect.name == "postgresql":
+            return sa.func.jsonb_strip_nulls(
+                sa.func.jsonb_build_object(
+                    *(sa.literal(text) for text in (*pairs, TURN_LABEL)), turn
+                )
+            )
+        # SQLite keeps a UUID as 32 hex digits, dashed here as `str(UUID)` spells it; a merge patch
+        # onto `{}` drops the turn of a row on none, as `jsonb_strip_nulls` does.
+        dashed = (
+            sa.func.substr(turn, 1, 8, type_=sa.Text)
+            + "-"
+            + sa.func.substr(turn, 9, 4, type_=sa.Text)
+            + "-"
+            + sa.func.substr(turn, 13, 4, type_=sa.Text)
+            + "-"
+            + sa.func.substr(turn, 17, 4, type_=sa.Text)
+            + "-"
+            + sa.func.substr(turn, 21, 12, type_=sa.Text)
+        )
+        return sa.func.json_patch(
+            sa.func.json_object(), sa.func.json_object(*pairs, TURN_LABEL, dashed)
+        )
+
+
+def ledger_service_backfill_candidates() -> WorkspaceCandidates:
+    """Every workspace holding a row with no service, read through `ledger_unserviced`, which holds
+    only those rows: the read empties as the backfill moves them."""
+    return owner_candidates(
+        lambda: (
+            sa.select(tables.ledger.c.workspace_id)
+            .where(tables.ledger.c.service.is_(None))
+            .distinct()
+        )
+    )
 
 
 @dataclass(frozen=True)
