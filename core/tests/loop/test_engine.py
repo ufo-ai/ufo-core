@@ -162,6 +162,7 @@ from ufo.runtime.engine import (
     SANDBOX_PROVIDER_RETRY_LIMIT,
     SANDBOX_PROVIDER_RETRY_SECONDS,
     SCHEMA_HINT,
+    TERMINAL_LOST_RETRY_SECONDS,
     TOOL_IMAGE_EDGE_LIMIT,
     TOOL_RESULT_PREVIEW_CHARS,
     TRUNCATION_FEEDBACK,
@@ -4612,22 +4613,26 @@ class EveryEndModel:
         yield Usage(input_tokens=2, output_tokens=2)
 
 
-@pytest.mark.parametrize("at_bind", (False, True))
-async def test_a_lost_terminal_fails_the_turn_without_another_model_round(
-    db: None, tmp_path: Path, at_bind: bool
-) -> None:
-    @dataclass
-    class TerminalLossModel:
-        rounds: int = 0
+@dataclass
+class TerminalLossModel:
+    rounds: int = 0
 
-        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-            self.rounds += 1
-            if self.rounds > 1:
-                raise AssertionError("terminal loss reached another model round")
-            yield ToolCallStart(id="c1", name="terminal_tool")
-            yield ToolCallDelta(id="c1", partial_json="{}")
-            yield Usage(input_tokens=1, output_tokens=1)
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.rounds += 1
+        if self.rounds > 1:
+            raise AssertionError("terminal loss reached another model round")
+        yield ToolCallStart(id="c1", name="terminal_tool")
+        yield ToolCallDelta(id="c1", partial_json="{}")
+        yield Usage(input_tokens=1, output_tokens=1)
 
+
+def _terminal_loss_engine(
+    turn: Turn,
+    model: TerminalLossModel,
+    tmp_path: Path,
+    at_bind: bool,
+    member_id: UUID | None = None,
+) -> TurnEngine:
     async def lost(ctx: ToolContext, args: BaseModel) -> ToolResult:
         if not at_bind:
             raise TerminalAbsent("no terminal is connected to this conversation")
@@ -4636,10 +4641,8 @@ async def test_a_lost_terminal_fails_the_turn_without_another_model_round(
     async def absent(_member_id: UUID | None) -> Sandbox:
         raise TerminalAbsent("no terminal is connected to this conversation")
 
-    turn = await _seed_turn("queued", None)
-    model = TerminalLossModel()
-    engine = replace(
-        _engine(turn, model, tmp_path),
+    return replace(
+        _engine(turn, model, tmp_path, member_id=member_id),
         tools=ToolRegistry(
             (
                 ToolDef(
@@ -4652,6 +4655,23 @@ async def test_a_lost_terminal_fails_the_turn_without_another_model_round(
         ),
         sandbox_for=absent if at_bind else None,
     )
+
+
+@pytest.mark.parametrize("at_bind", (False, True))
+async def test_a_lost_terminal_fails_the_turn_without_another_model_round(
+    db: None, tmp_path: Path, at_bind: bool
+) -> None:
+    turn = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    async with workspace_tx() as connection:
+        member_id = (
+            await connection.execute(
+                sa.select(tables.member.c.id).where(
+                    tables.member.c.workspace_id == turn.workspace_id
+                )
+            )
+        ).scalar_one()
+    model = TerminalLossModel()
+    engine = _terminal_loss_engine(turn, model, tmp_path, at_bind, member_id)
 
     with pytest.raises(TerminalGone, match="no terminal is connected"):
         await engine.run()
@@ -4666,6 +4686,52 @@ async def test_a_lost_terminal_fails_the_turn_without_another_model_round(
     frame = TerminalFrame.model_validate(terminal)
     assert frame.status == "failed"
     assert frame.error_class == "TerminalGone"
+
+
+@pytest.mark.parametrize("at_bind", (False, True))
+async def test_a_lost_terminal_parks_a_turn_no_member_is_present_for_once(
+    db: None, tmp_path: Path, at_bind: bool
+) -> None:
+    turn = await _seed_turn("queued", None)
+    model = TerminalLossModel()
+    before = datetime.now(UTC)
+
+    with pytest.raises(TurnParked, match="terminal this conversation runs in disconnected"):
+        await _terminal_loss_engine(turn, model, tmp_path, at_bind).run()
+
+    assert model.rounds == 1
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.status,
+                    tables.turn.c.retry_at,
+                    tables.turn.c.external_retry_count,
+                    tables.turn.c.terminal,
+                ).where(tables.turn.c.id == turn.id)
+            )
+        ).one()
+    assert row.status == "parked"
+    assert row.terminal is None
+    assert row.external_retry_count == 1
+    assert row.retry_at is not None
+    assert row.retry_at.replace(tzinfo=UTC) >= before + timedelta(
+        seconds=TERMINAL_LOST_RETRY_SECONDS
+    )
+
+
+async def test_a_turn_that_already_parked_takes_the_lost_terminal(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn).values(external_retry_count=1).where(tables.turn.c.id == turn.id)
+        )
+    turn = turn.model_copy(update={"external_retry_count": 1})
+
+    with pytest.raises(TerminalGone, match="no terminal is connected"):
+        await _terminal_loss_engine(turn, TerminalLossModel(), tmp_path, at_bind=False).run()
+
+    assert await _turn_status(turn.id) == "failed"
 
 
 async def test_a_connected_terminals_operation_error_remains_recoverable(

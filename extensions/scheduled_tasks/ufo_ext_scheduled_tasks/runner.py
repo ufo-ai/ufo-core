@@ -8,7 +8,8 @@ version back into its conversation, and advances the row to its next cron occurr
 is accepted by the turn outbox. Every schedule is a cron schedule, so every accepted fire has a
 following one to advance to. A failed fire keeps its leased occurrence for retry. A tick with
 failures raises their names. An archived app is neither a fire nor a failure: it admits no turn, so
-its tasks keep the occurrence they hold and run again when it is restored.
+its tasks keep the occurrence they hold and run again when it is restored. A task whose last fire
+is parked advances without firing, so one stuck fire never becomes one per tick.
 
 The fire body is composed here. It is a scheduled turn — `as_scheduled=True` gives it the meaning
 core keys every scheduled behaviour on (its own turn, never folded) —
@@ -26,6 +27,7 @@ from ufo_ext_scheduled_tasks.schedules import ScheduledTask, ScheduleStore
 from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_KIND
 
 CLAIM_LEASE_SECONDS = 300
+PARKED_STATUS = "parked"
 REPORT_INSTRUCTION = (
     "A run that found nothing new posts nothing. Use share_file to broadcast a result worth "
     "sharing with the workspace. Otherwise follow the delivery register and use Markdown links "
@@ -96,6 +98,9 @@ class ScheduledTaskRunner:
         )
         if not await store.claim_holds(task):
             return None
+        if await self._last_fire_parked(task):
+            await store.reschedule(task, following_fire, None)
+            return None
         inbound, key = fire_body(task, runtime_instruction)
         turn_id: UUID | None = None
         try:
@@ -118,3 +123,11 @@ class ScheduledTaskRunner:
                 return None
             await store.reschedule(task, following_fire, tick_at, turn_id)
         return failure
+
+    async def _last_fire_parked(self, task: ScheduledTask) -> bool:
+        """A parked fire holds until it resumes or ends. Each occurrence it spans is skipped, not
+        admitted behind it: a fire that cannot run would otherwise stack one turn per tick."""
+        if task.last_turn_id is None:
+            return False
+        outcome = (await self.ctx.turn_outcomes((task.last_turn_id,))).get(task.last_turn_id)
+        return outcome is not None and outcome.status == PARKED_STATUS

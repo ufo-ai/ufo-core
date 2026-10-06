@@ -306,6 +306,11 @@ SANDBOX_PROVIDER_RETRY_NOTICE = (
 )
 SANDBOX_PROVIDER_RETRY_SECONDS = 60
 SANDBOX_PROVIDER_RETRY_LIMIT = 15
+TERMINAL_LOST_NOTICE = (
+    "The terminal this conversation runs in disconnected. This task will retry after {retry_at} "
+    "in a fresh sandbox without the terminal's files."
+)
+TERMINAL_LOST_RETRY_SECONDS = 60
 TRUNCATION_FEEDBACK = (
     "Your previous response exceeded the output budget and was cut off. Produce large content "
     "by writing files with sandbox code or by emitting it in small parts across calls; keep any "
@@ -895,6 +900,25 @@ def sandbox_provider_park(turn: Turn) -> TurnParked | None:
         SANDBOX_PROVIDER_RETRY_NOTICE.format(retry_at=retry_at.isoformat()),
         retry_at,
         retry_count,
+    )
+
+
+def terminal_lost(turn: Turn, error: TerminalAbsent) -> TurnParked | TerminalGone:
+    """What a terminal that disconnected mid-turn does to the turn. A member present at the
+    terminal is told it is gone. A turn no member is present for parks once: its resume opens
+    detached and falls back to the deploy's own sandbox. A turn that already parked, or a child
+    its parent awaits inline, takes the fault, so nothing parks again and again."""
+    if (
+        turn.speaker_member_id is not None
+        or turn.external_retry_count > 0
+        or (turn.spawned and turn.result_delivery != DELIVERY_PENDING)
+    ):
+        return TerminalGone(str(error))
+    retry_at = datetime.now(UTC) + timedelta(seconds=TERMINAL_LOST_RETRY_SECONDS)
+    return TurnParked(
+        TERMINAL_LOST_NOTICE.format(retry_at=retry_at.isoformat()),
+        retry_at,
+        turn.external_retry_count + 1,
     )
 
 
@@ -3418,16 +3442,17 @@ class TurnEngine:
             )
             raise
         except TerminalAbsent as error:
+            lost = terminal_lost(self.turn, error)
             _meter_dispatch(
                 self.tools,
                 item.call,
                 started,
                 "step_failed",
-                TerminalGone.__name__,
+                type(lost).__name__,
                 self.profile,
                 item.meter_dimensions(),
             )
-            raise TerminalGone(str(error)) from error
+            raise lost from error
         except Exception as error:
             return self._rejected(
                 item.call,
@@ -4024,7 +4049,7 @@ class TurnEngine:
         try:
             context = await self._authorize_context(context)
         except TerminalAbsent as error:
-            raise TerminalGone(str(error)) from error
+            raise terminal_lost(self.turn, error) from error
         except Exception as error:
             return _DispatchGate(
                 target,
@@ -4292,7 +4317,7 @@ class TurnEngine:
                 model_route_changes=() if result.is_error else result.model_route_changes,
             )
         except TerminalAbsent as error:
-            raise TerminalGone(str(error)) from error
+            raise terminal_lost(self.turn, error) from error
         except SandboxProviderUnavailable as error:
             parked = sandbox_provider_park(self.turn)
             if parked is None:

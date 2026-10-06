@@ -1509,6 +1509,7 @@ async def _open_sandbox(
                 **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cache_config, *cli_git_config(clis))),
                 **await _keyed_provider_env(credentials, slots, turn.workspace_id),
             },
+            detached=turn.speaker_member_id is None,
         )
 
 

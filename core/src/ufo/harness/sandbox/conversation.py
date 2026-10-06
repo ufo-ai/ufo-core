@@ -48,6 +48,7 @@ from ufo.harness.sandbox.session import (
 from ufo.harness.sandbox.terminal import (
     CLIENT_BACKEND,
     TerminalCarrier,
+    TerminalGone,
     Terminals,
     TerminalTransport,
 )
@@ -115,6 +116,7 @@ class ConversationSandbox:
         turn_id: UUID | None,
         run_token: str,
         env: Mapping[str, str],
+        detached: bool = False,
     ) -> SandboxSession:
         """The conversation's sandbox, created or resumed, with its handle persisted.
 
@@ -137,12 +139,35 @@ class ConversationSandbox:
         against the persisted id and returns the winner's sandbox, so both callers end on the one
         sandbox the row names and nothing is ever written into a sandbox no row references. The
         loser's extra sandbox is unreferenced and empty: docker arbitrates the name at the daemon so
-        none exists there, and an e2b one idles into a paused, unbilled husk."""
+        none exists there, and an e2b one idles into a paused, unbilled husk.
+
+        A `detached` open serves a turn no member is present for — a scheduled fire, a source
+        alert, a subagent. Nobody is there to reconnect a terminal, so one that is gone opens the
+        deploy's own sandbox for the conversation instead, without the member's local files. That
+        sandbox is never persisted: the row keeps its terminal binding, and the member's next turn
+        at that terminal runs there again."""
         stored, size = await self._binding(conversation_id)
         for _ in range(OPEN_CLAIM_ATTEMPTS):
-            backend, carrier, handle = await self._opened(
-                conversation_id, turn_id, stored, run_token, env, size
-            )
+            try:
+                backend, carrier, handle = await self._opened(
+                    conversation_id, turn_id, stored, run_token, env, size
+                )
+            except TerminalGone as gone:
+                if not detached:
+                    raise
+                warn(
+                    "sandbox.terminal_fallback",
+                    conversation_id=str(conversation_id),
+                    error=str(gone),
+                )
+                _, carrier, handle = await self._created(
+                    conversation_id, turn_id, None, run_token, env, size
+                )
+                return SandboxSession(
+                    carrier=carrier,
+                    handle=handle,
+                    system_skill_archive=self.system_skill_archive,
+                )
             persisted = f"{backend}{SANDBOX_HANDLE_SEP}{handle.container_id}"
             if persisted == stored:
                 return SandboxSession(
@@ -384,6 +409,17 @@ class ConversationSandbox:
                 )
             )
             return CLIENT_BACKEND, carrier, handle
+        return await self._created(conversation_id, turn_id, stored, run_token, env, size)
+
+    async def _created(
+        self,
+        conversation_id: UUID,
+        turn_id: UUID | None,
+        stored: str | None,
+        run_token: str,
+        env: Mapping[str, str],
+        size: str,
+    ) -> tuple[str, Carrier, SandboxHandle]:
         routed, backend, off_cluster = self._route(stored)
         if off_cluster:
             host_path = (self.workspace_root / str(conversation_id)).resolve()

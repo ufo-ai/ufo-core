@@ -1517,6 +1517,48 @@ async def test_a_bound_conversation_refuses_when_no_terminal_is_connected(
         assert await sandboxes.existing(conversation_id) is None
 
 
+@pytest.mark.parametrize("connected_at", (None, "/Users/member/other"))
+async def test_a_detached_open_falls_back_to_the_deploy_sandbox_without_rebinding(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, connected_at: str | None
+) -> None:
+    """A turn no member is present for runs on the deploy's carrier when the bound terminal is
+    gone or stands elsewhere, and the row keeps its terminal binding for the member's next turn."""
+    monkeypatch.setattr(terminal, "ARRIVAL_GRACE_SECONDS", 0.05)
+    workspace_id, conversation_id = await _conversation(handle="client:/Users/member/proj")
+    terminals = Terminals()
+    if connected_at is not None:
+        terminals.connect(conversation_id, connected_at, None)
+    sandboxes = _terminal_sandboxes(tmp_path, terminals)
+
+    with ws(workspace_id):
+        session = await sandboxes.open(conversation_id, None, "run-a", {}, detached=True)
+        await session.write_runtime_file("history.jsonl", b"{}\n")
+
+    assert isinstance(session.carrier, LocalCarrier)
+    assert session.handle.workspace_host_path == str(
+        (tmp_path / "workspaces" / str(conversation_id)).resolve()
+    )
+    assert await _stored_handle(conversation_id) == "client:/Users/member/proj"
+
+
+async def test_a_scheduled_turn_runs_without_its_terminal_and_a_member_turn_is_told(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(terminal, "ARRIVAL_GRACE_SECONDS", 0.05)
+    workspace_id, conversation_id = await _conversation(handle="client:/Users/member/proj")
+    sandboxes = _terminal_sandboxes(tmp_path, Terminals())
+    scheduled = _turn(workspace_id, conversation_id)
+    spoken = scheduled.model_copy(update={"speaker_member_id": uuid4()})
+
+    with ws(workspace_id):
+        session = await _open_sandbox(sandboxes, RUN_TOKENS, scheduled, {}, None, ())
+        with pytest.raises(TerminalGone):
+            await _open_sandbox(sandboxes, RUN_TOKENS, spoken, {}, None, ())
+
+    assert isinstance(session.carrier, LocalCarrier)
+    assert await _stored_handle(conversation_id) == "client:/Users/member/proj"
+
+
 async def test_a_deploy_conversation_keeps_its_carrier_beside_a_connected_terminal(
     db: None, tmp_path: Path
 ) -> None:

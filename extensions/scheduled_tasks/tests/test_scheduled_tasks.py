@@ -769,6 +769,66 @@ async def test_re_applying_a_manifest_keeps_the_recorded_run(db: None) -> None:
     }
 
 
+async def test_a_parked_fire_skips_each_occurrence_until_it_ends(db: None) -> None:
+    """A parked fire holds the task: each tick advances it without admitting a turn. Once that
+    fire ends, the task fires again."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    store = _store()
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
+
+    async def overdue() -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(schedule_table).values(
+                    next_run_at=datetime.now(UTC) - timedelta(minutes=1)
+                )
+            )
+
+    async def settle(turn_id: UUID, status: str) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(
+                    status=status,
+                    terminal=None if status == "parked" else {"status": status, "text": "ok"},
+                )
+                .where(tables.turn.c.id == turn_id)
+            )
+
+    with ws(workspace_id), agent(agent_id):
+        await store.create(
+            conversation_id,
+            "half-hourly",
+            "*/30 * * * *",
+            "check the repo",
+            "check the repo",
+            datetime.now(UTC) - timedelta(minutes=1),
+        )
+        await runner.run()
+        [parked] = await _turns(conversation_id)
+        await settle(parked["id"], "parked")
+        [fired] = await store.list()
+
+        await overdue()
+        await runner.run()
+        [skipped] = await store.list()
+        assert [turn["id"] for turn in await _turns(conversation_id)] == [parked["id"]]
+
+        await settle(parked["id"], "failed")
+        await overdue()
+        await runner.run()
+        turns = await _turns(conversation_id)
+
+    assert skipped.next_run_at > datetime.now(UTC)
+    assert skipped.last_run_at == fired.last_run_at
+    assert skipped.last_turn_id == parked["id"]
+    assert len(turns) == 2
+
+
 async def test_expired_task_is_cancelled_without_invoking(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     dbos = StubDbos()
