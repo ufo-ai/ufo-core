@@ -45,13 +45,7 @@ from ufo.runtime.access.credentials import (
     declared_slot_fingerprint,
     open_credential_request,
 )
-from ufo.runtime.access.egress_control import rule_json
-from ufo.runtime.access.egress_rules import (
-    InjectionRule,
-    MeterRule,
-    ScopeRule,
-    derive_credential_rules,
-)
+from ufo.runtime.access.egress_rules import Bind, derive_credential_binds
 from ufo.runtime.access.workspace_slots import SlotProvider, WorkspaceSlots
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.ext.manifest import (
@@ -302,43 +296,29 @@ def test_a_declaration_projects_the_slot_shape_a_manifest_carries() -> None:
     )
 
 
-async def test_a_filled_workspace_slot_derives_a_pinned_scope_and_its_injection(db: None) -> None:
-    """The rules a workspace's own declaration opens."""
+async def test_a_filled_workspace_slot_binds_beside_the_deploys_own(db: None) -> None:
     workspace_id = await _workspace()
     store = _store()
     with ws(workspace_id):
         await put_slot(_ext(), workspace_id, ACME)
-        assert await derive_credential_rules(_slots(DEPLOY_SLOT), workspace_id, store) == ()
+        assert await derive_credential_binds(_slots(DEPLOY_SLOT), workspace_id, store) == ()
 
         await store.put(workspace_id, ACME.slot, SECRET)
         await store.put(workspace_id, DEPLOY_SLOT.name, "pplx-real-secret")
-        rules = await derive_credential_rules(_slots(DEPLOY_SLOT), workspace_id, store)
+        binds = await derive_credential_binds(_slots(DEPLOY_SLOT), workspace_id, store)
 
-    assert rules == (
-        ScopeRule(allowed_hosts=frozenset({ACME_HOST}), pinned=True),
-        InjectionRule(
-            host=ACME_HOST,
-            header="X-Acme-Key",
-            sentinel="UFO_SENTINEL_WORKSPACE_ACME_API_KEY",
-            real=SECRET,
-        ),
-        MeterRule(host=ACME_HOST, dimension="requests"),
-        ScopeRule(allowed_hosts=frozenset({DEPLOY_HOST}), pinned=False),
-        InjectionRule(
+    assert binds == (
+        Bind(
             host=DEPLOY_HOST,
             header="authorization",
-            sentinel="SENTINEL_PPLX",
-            real="pplx-real-secret",
+            secret=DEPLOY_SLOT.name,
+            env="PPLX_API_KEY",
         ),
-        MeterRule(host=DEPLOY_HOST, dimension="requests"),
+        Bind(host=ACME_HOST, header="X-Acme-Key", secret=ACME.slot, env="ACME_API_KEY"),
     )
-    assert rule_json(rules[0]) == {"kind": "scope", "hosts": [ACME_HOST], "pinned": True}
-    assert rule_json(rules[3]) == {"kind": "scope", "hosts": [DEPLOY_HOST], "pinned": False}
 
 
-async def test_rule_derivation_reads_a_workspace_provider_once(db: None) -> None:
-    """A mutable provider's declaration and its workspace provenance are one read. An edit between
-    separate reads must not turn the new host into an unpinned exact scope."""
+async def test_bind_derivation_reads_a_workspace_provider_once(db: None) -> None:
     workspace_id = await _workspace()
     store = _store()
     reads = 0
@@ -363,10 +343,12 @@ async def test_rule_derivation_reads_a_workspace_provider_once(db: None) -> None
     )
     with ws(workspace_id):
         await store.put(workspace_id, ACME.slot, SECRET)
-        rules = await derive_credential_rules(slots, workspace_id, store)
+        binds = await derive_credential_binds(slots, workspace_id, store)
 
     assert reads == 1
-    assert rules[0] == ScopeRule(allowed_hosts=frozenset({ACME_HOST}), pinned=True)
+    assert binds == (
+        Bind(host=ACME_HOST, header="X-Acme-Key", secret=ACME.slot, env="ACME_API_KEY"),
+    )
 
 
 async def test_one_workspaces_declaration_never_reaches_another(db: None) -> None:
@@ -375,10 +357,10 @@ async def test_one_workspaces_declaration_never_reaches_another(db: None) -> Non
     with ws(first):
         await put_slot(_ext(), first, ACME)
         await store.put(first, ACME.slot, SECRET)
-        assert await derive_credential_rules(_slots(), first, store) != ()
+        assert await derive_credential_binds(_slots(), first, store) != ()
     with ws(second):
         assert await read_slots(_ext(), second) == ()
-        assert await derive_credential_rules(_slots(), second, store) == ()
+        assert await derive_credential_binds(_slots(), second, store) == ()
 
 
 async def test_a_new_deploy_declaration_cannot_claim_a_workspace_slot(db: None) -> None:

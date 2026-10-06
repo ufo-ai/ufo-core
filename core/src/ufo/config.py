@@ -256,20 +256,10 @@ class SandboxConfig(BaseModel):
     """`http://host:port` of a dev server holding the app pages from source. Set, the ingress relays
     a shipped app page there — its root at `/<slug>/`, every other path verbatim — in place of the
     published bundle: the local stack's edit loop. Unset, a shipped page is the bundle."""
-    cache_daemon: str | None = None
-    """`host:port` of the sandbox cache daemon co-located with the egress proxy. Set enables
-    the cache: the proxy relays the cache host to it and internet-holding sandboxes route git and
-    npm through it. Unset, no sandbox is rewritten and the cache host is not admitted."""
     preview_service: str | None = None
     """`host:port` of the preview service the proxy relays the preview host to. Set
     admits that host for every sandbox, whatever its internet policy. Unset, the host is not
     admitted, document reads are unavailable, and a share carries no rendered preview."""
-    residential_hosts: tuple[str, ...] = ()
-    """Hosts every sandbox reaches through the residential provider the proxy carries
-    (`UFO_EGRESS_RESIDENTIAL_PROXY`) instead of the cluster's own address, for an origin that
-    refuses a datacenter one. A host here opens no egress of its own — it is reached by the scope or
-    the internet rule that already admits it. Empty routes every host straight out; a host here on a
-    proxy with no provider configured is refused rather than dialed direct."""
 
     @model_validator(mode="after")
     def _ingress_base_is_addressable(self) -> "SandboxConfig":

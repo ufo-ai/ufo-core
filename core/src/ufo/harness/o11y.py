@@ -59,7 +59,6 @@ METRICS = (
     "turn_round_budget_exhausted_total",
     "turn_context_overflow_recovered_total",
     "turn_truncation_recovered_total",
-    "sandbox_egress_total",
     "sandbox_tool_output_dir_reclaimed_total",
     "tool_activity_failed_total",
     "member_authorization_failed_total",

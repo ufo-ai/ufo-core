@@ -1,40 +1,50 @@
-"""Composition-root helpers the shared services share: the model-provider egress base every
-sandbox routes model calls through, the RLS-bypassing owner DSN, and the env names both read.
+"""Composition-root helpers the shared services share: the model providers every sandbox session
+binds by name, the RLS-bypassing owner DSN, and the env names both read.
 
-`serve` builds the egress-control resolver on this base and `ingress` opens the owner DSN through
-the same resolution; the egress wire itself is the standalone Rust `ufo-egress` process."""
+`serve` compiles each session's policy on these model bindings and `ingress` opens the owner DSN
+through the same resolution."""
 
 import os
 
 from ufo.config import Config
 from ufo.runtime.access.credentials import deploy_env
-from ufo.runtime.access.egress_rules import Rule, ScopeRule, derive_model_rules
+from ufo.runtime.access.egress_rules import (
+    ANTHROPIC_HOST,
+    OPENAI_HOST,
+    OPENROUTER_HOST,
+    PROVIDER_AUTH,
+    UFO_MODELS_SECRET,
+    Bind,
+    HostEntry,
+    policy_hosts,
+)
 
-MODEL_PROBES = ("claude-opus-4-8", "gpt-5")
 OWNER_DSN_ENV = "UFO_OWNER_DSN"
 OTLP_ENDPOINT_ENV = "UFO_OTLP_ENDPOINT"
+OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
 
 
-def model_rule_base(config: Config) -> tuple[Rule, ...]:
-    """The model-provider egress base of every sandbox's rule set: each configured provider whose
-    key is set in env is reachable and its sentinel swaps to the real key on the wire; no key set
-    anywhere means the sandbox would have no egress route, so it fails loud. The one place a
-    deploy's model hosts become egress rules."""
-    key_envs = (config.models.anthropic_api_key_env, config.models.openai_api_key_env)
-    hosts: set[str] = set()
-    rules: list[Rule] = []
-    for env_name, probe in zip(key_envs, MODEL_PROBES, strict=True):
-        key = deploy_env(env_name)
-        if not key:
-            continue
-        for rule in derive_model_rules(probe, key):
-            if isinstance(rule, ScopeRule):
-                hosts |= rule.allowed_hosts
-            else:
-                rules.append(rule)
-    if not hosts:
-        raise RuntimeError("no model provider key set; the sandbox would have no egress route")
-    return (ScopeRule(allowed_hosts=frozenset(hosts)), *rules)
+def MODEL_KEY_ENVS(config: Config) -> dict[str, str]:
+    """The env each model provider's platform key is read from, by the host it is bound on."""
+    return {
+        ANTHROPIC_HOST: config.models.anthropic_api_key_env,
+        OPENAI_HOST: config.models.openai_api_key_env,
+        OPENROUTER_HOST: OPENROUTER_KEY_ENV,
+    }
+
+
+def model_bindings(config: Config) -> tuple[tuple[HostEntry, ...], tuple[Bind, ...]]:
+    """The model providers every sandbox session reaches: each of the Anthropic and OpenAI hosts
+    whose key is set in env is admitted and binds `ufo/models` under its key's env name. No key set
+    anywhere would leave the sandbox no model route, so it fails loud."""
+    envs = MODEL_KEY_ENVS(config)
+    keyed = tuple(host for host in (ANTHROPIC_HOST, OPENAI_HOST) if deploy_env(envs[host]))
+    if not keyed:
+        raise RuntimeError("no model provider key set; the sandbox would have no model route")
+    return policy_hosts(*keyed), tuple(
+        Bind(host=host, header=PROVIDER_AUTH[host], secret=UFO_MODELS_SECRET, env=envs[host])
+        for host in keyed
+    )
 
 
 def owner_dsn(config: Config) -> str:

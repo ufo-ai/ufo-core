@@ -50,8 +50,8 @@ class ProbeEnv:
 
     The deployment's own model key is the one thing an off-turn exec may not spend, and it is
     withheld where it actually lives: the platform sentinel rides each carrier's base environment,
-    so the proxy declines to resolve its injection rule (`_without_the_model_key`). A workspace's
-    BYOK model key needs nothing here either — those slots declare no injection target at all and
+    so a probe's session policy binds no `ufo/models` (`PolicyScope.running`). A workspace's BYOK
+    model key needs nothing here either — those slots declare no injection target at all and
     are read in-process by the model registry, never exported to a sandbox.
 
     The member the probe acts for selects connector CLI sentinels exactly as a turn's

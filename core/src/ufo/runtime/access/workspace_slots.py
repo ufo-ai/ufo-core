@@ -5,12 +5,12 @@ A keyed provider an extension knows about arrives as a `CredentialSlot` in a man
 variable, the host the secret rides to, the header it rides in — and that declaration is the same
 for every workspace on the deploy. An extension that holds rows of its own answers the same shape
 per workspace instead, through `Manifest.workspace_credentials`. This module is where the two meet,
-so the proxy's rule derivation and the sandbox's environment read one source and neither knows which
+so the session policy's binds and the sandbox's environment read one source and neither knows which
 half a slot came from.
 
-A per-workspace host is written inside the workspace, so its provenance stays attached while rules
-are derived: an exact scope is otherwise the one path around the proxy's private-address check, and
-a host nobody on this deploy wrote must not open the tunnel to its own network."""
+A per-workspace host is written inside the workspace, not by this deploy's code; the proxy service
+resolves every host a session names and refuses one that answers a private address, so such a host
+opens no tunnel to its own network."""
 
 from dataclasses import dataclass, field
 from uuid import UUID

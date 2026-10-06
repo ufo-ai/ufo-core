@@ -98,12 +98,12 @@ class InjectionTarget:
 class WorkspaceCredentials:
     """Credential slots an extension resolves per workspace, beside the ones its manifest declares
     for the whole deploy. `read` answers one workspace's slots from the extension's own rows, and
-    core hands them to exactly the code a manifest's slot already drives: the egress proxy's
-    injection, the sandbox's exported sentinel, the `credential` object kind, and the portal panel.
+    core hands them to exactly the code a manifest's slot already drives: the session policy's
+    binds, the sandbox's exported sentinel, the `credential` object kind, and the portal panel.
 
     The host such a slot names is written inside the workspace rather than by this deploy's own
-    code, so the scope core derives for it is pinned: the proxy resolves the name and refuses the
-    CONNECT when it answers a private address, which an exact scope otherwise skips."""
+    code; the proxy service resolves every host a session names and refuses one that answers a
+    private address."""
 
     read: Callable[[ExtensionContext, UUID], Awaitable[tuple["CredentialSlot", ...]]]
 

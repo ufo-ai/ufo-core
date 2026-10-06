@@ -31,7 +31,6 @@ from ufo.harness.o11y import (
     turn_profile,
     turn_span,
 )
-from ufo.harness.sandbox.cache import cache_git_config
 from ufo.harness.sandbox.conversation import ConversationSandbox
 from ufo.harness.sandbox.exec_env import (
     CONVERSATION_ID_ENV,
@@ -1066,10 +1065,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 clis,
                 runtime.credentials,
                 runtime.environment.slots(),
-                cache_rewrite=(
-                    runtime.config.sandbox.cache_daemon is not None
-                    and resolved.internet_access_allowed
-                ),
             ),
             existing=lambda: runtime.sandboxes.existing(
                 turn.sandbox_conversation_id or turn.conversation_id
@@ -1492,12 +1487,10 @@ async def _open_sandbox(
     clis: Mapping[str, CliCredential],
     credentials: CredentialStore | None,
     slots: WorkspaceSlots,
-    cache_rewrite: bool = False,
 ) -> SandboxSession:
     """git's default `http.proxyAuthMethod=anyauth` waits for a `407` the proxy never sends;
     `GIT_PROXY_AUTH_CONFIG` presents the token on the first CONNECT."""
     run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
-    cache_config = cache_git_config() if cache_rewrite else ()
     with span("sandbox.open"):
         return await sandboxes.open(
             turn.sandbox_conversation_id or turn.conversation_id,
@@ -1506,7 +1499,7 @@ async def _open_sandbox(
             {
                 CONVERSATION_ID_ENV: str(turn.conversation_id),
                 TOOL_BRIDGE_URL_ENV: TOOL_BRIDGE_URL,
-                **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cache_config, *cli_git_config(clis))),
+                **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cli_git_config(clis))),
                 **await _keyed_provider_env(credentials, slots, turn.workspace_id),
             },
         )
