@@ -4,8 +4,8 @@
 DBOS system database `FLEET_TEST_SYSTEM_URL` names, and prints its executor id, then the statuses
 its phase reads, one JSON object per line. `jobs` offers markers to both sides and must run only its
 own: the member-side markers are still ENQUEUED when it exits. `turns` claims the member queues and
-must run the markers the jobs process left. `api` claims no queue: it offers a marker to every
-application queue and must run none, yet the recurring tick it schedules rides DBOS's internal
+must run the markers the jobs and api processes left. `api` claims no queue: it offers a marker to
+every application queue and must run none, yet the recurring tick it schedules rides DBOS's internal
 queue, which every fleet drains, and succeeds on its own executor. Together the phases make the
 split a partition rather than a preference: no fleet reaches another's work, and nothing the
 division leaves behind is stranded.
@@ -133,21 +133,11 @@ async def _jobs_phase(
 async def _turns_phase(
     system_url: str, job_id: str, turn_id: str, unscoped_turn_id: str, unscoped_express_id: str
 ) -> int:
-    """Claim the member queues and finish the marker the jobs process could not reach."""
+    """Claim the member queues and finish the markers the jobs and api processes left."""
     client = replay_safe_client(system_url)
-    ran = all(
-        await asyncio.gather(
-            *(
-                _await_success(client, workflow_id)
-                for workflow_id in (turn_id, unscoped_turn_id, unscoped_express_id)
-            )
-        )
-    )
-    print(
-        json.dumps(
-            await _statuses(client, [job_id, turn_id, unscoped_turn_id, unscoped_express_id])
-        )
-    )
+    member_markers = (turn_id, unscoped_turn_id, unscoped_express_id, f"{turn_id}-express")
+    ran = all(await asyncio.gather(*(_await_success(client, marker) for marker in member_markers)))
+    print(json.dumps(await _statuses(client, [job_id, *member_markers])))
     return 0 if ran else TIMEOUT_EXIT_CODE
 
 
