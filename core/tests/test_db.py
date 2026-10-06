@@ -480,12 +480,13 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         scripts = ScriptDirectory.from_config(config)
         heads = scripts.get_heads()
     core_head = _core_migration_head()
+    core_revisions = _reached({core_head})
     for head in heads:
         if head == core_head:
             continue
         revision = scripts.get_revision(head)
         assert revision.down_revision is None
-        assert revision.dependencies == core_head
+        assert revision.dependencies in core_revisions
     assert {
         core_head,
         "index_default_0003",

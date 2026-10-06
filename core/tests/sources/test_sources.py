@@ -41,7 +41,7 @@ from ufo.runtime.access.grants import (
 )
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.background_tasks import BACKGROUND_TASKS_JOB, BackgroundTaskSweep
-from ufo.runtime.billing.accounting import JOB_DAY_ROLLUP_JOB
+from ufo.runtime.billing.accounting import JOB_DAY_ROLLUP_JOB, LEDGER_SERVICE_BACKFILL_JOB
 from ufo.runtime.billing.spend import GateDeploy, SpendGates
 from ufo.runtime.delivery import DeliverySweep
 from ufo.runtime.ext.context import (
@@ -5092,6 +5092,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         SETTLED_ACTIVITY_JOB,
         CHANGE_LOG_PRUNE_JOB,
         JOB_DAY_ROLLUP_JOB,
+        LEDGER_SERVICE_BACKFILL_JOB,
         PRODUCT_CENSUS_JOB,
         GRAVATAR_JOB,
         SIGNIN_PHOTO_JOB,
@@ -5107,6 +5108,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         f"{CORE_EXTENSION}:{SETTLED_ACTIVITY_JOB}",
         f"{CORE_EXTENSION}:{CHANGE_LOG_PRUNE_JOB}",
         f"{CORE_EXTENSION}:{JOB_DAY_ROLLUP_JOB}",
+        f"{CORE_EXTENSION}:{LEDGER_SERVICE_BACKFILL_JOB}",
         f"{CORE_EXTENSION}:{PRODUCT_CENSUS_JOB}",
         f"{CORE_EXTENSION}:{GRAVATAR_JOB}",
         f"{CORE_EXTENSION}:{SIGNIN_PHOTO_JOB}",

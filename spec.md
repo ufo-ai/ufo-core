@@ -1179,6 +1179,26 @@ evaluated at inbound and per-step; `reject` refuses new turns, `park` suspends. 
 table per model; usage a key that is not the deploy's paid for still meters (visibility without
 billing).
 
+Every ledger row names the service that metered it and the unit it counts (`dimension`):
+
+| Service | Units |
+|---|---|
+| `models` | `tokens` (with the six token classes), `images`, `videos` |
+| `proxy` | `requests`, `gib` (bytes) |
+
+An extension books what a service metered through `ExtensionContext.record_usage`: service, unit,
+backend, amount, token, session, labels, resource, attempt, `occurred_at`, `byok`, price and rate
+card digest, and for `tokens` the model and its six classes. One row is written and charged per
+`(service, resource or session, unit, attempt)`; a replay with other content raises
+`TurnUsageConflict`. The row is booked at `occurred_at`. Labels are at most 16 keys
+(`[a-z0-9_.-]`) with values of at most 64 characters; a `turn` label naming a turn of the workspace
+binds the row to that turn, so member and agent caps and attribution count it. Model calls the
+sandbox makes through the egress proxy are `(models, tokens)` rows labelled `via: proxy` on their
+turn, so the turn's cost counts them; its egress is a zero-priced `(proxy, requests)` count. A row
+inserted with no service takes the one its dimension belongs to (trigger `ledger_fill_service`,
+which files `sandbox_tokens` and `egress` as the rows above), and the per-minute
+`ledger_service_backfill` job files any row still without one, 5000 per workspace per tick.
+
 Background and off-turn model calls clear the workspace spend cap and the spend gates before
 reaching the provider. They carry no member or agent attribution, so narrower caps do not apply. An
 ambient classifier refused on its deploy model retries on the surface agent's model, allowing a

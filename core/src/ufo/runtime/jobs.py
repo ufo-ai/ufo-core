@@ -43,12 +43,16 @@ from ufo.runtime.background_tasks import BACKGROUND_TASKS_JOB, BACKGROUND_TASKS_
 from ufo.runtime.billing.accounting import (
     JOB_DAY_ROLLUP_JOB,
     JOB_DAY_ROLLUP_SCHEDULE,
+    LEDGER_SERVICE_BACKFILL_JOB,
+    LEDGER_SERVICE_BACKFILL_SCHEDULE,
     UNGATED_LEDGER,
     JobDayRollup,
     Ledger,
     OffTurnSpendRefused,
+    ServiceBackfill,
     SpendEvaluator,
     job_day_candidates,
+    ledger_service_backfill_candidates,
 )
 from ufo.runtime.billing.spend import (
     ALLOW,
@@ -961,6 +965,11 @@ async def prune_conversation_changes(context: ExtensionContext) -> None:
         )
 
 
+async def _backfill_ledger_service(context: ExtensionContext) -> None:
+    async with workspace_tx() as connection:
+        await ServiceBackfill(ws_current().workspace_id).roll(connection, datetime.now(UTC))
+
+
 def core_jobs(
     sync_driver: SyncDriver,
     turn_dispatcher: TurnDispatcher,
@@ -1099,6 +1108,12 @@ def core_jobs(
             schedule=JOB_DAY_ROLLUP_SCHEDULE,
             handler=_roll_job_days,
             candidates=job_day_candidates(),
+        ),
+        JobSpec(
+            name=LEDGER_SERVICE_BACKFILL_JOB,
+            schedule=LEDGER_SERVICE_BACKFILL_SCHEDULE,
+            handler=_backfill_ledger_service,
+            candidates=ledger_service_backfill_candidates(),
         ),
         JobSpec(
             name=PRODUCT_CENSUS_JOB,

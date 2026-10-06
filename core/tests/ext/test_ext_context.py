@@ -53,6 +53,8 @@ from ufo.harness.sandbox.terminal import TerminalGone
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.billing.accounting import (
+    PROXY_SERVICE,
+    REQUESTS_DIMENSION,
     UNGATED_LEDGER,
     Ledger,
     OffTurnSpendRefused,
@@ -1359,6 +1361,22 @@ async def test_a_context_wired_with_no_spend_refuses_to_read_or_meter_it(db: Non
             await context.meter_tokens(
                 uuid4(), "provider", Usage(input_tokens=10), ModelPrice(1, 0, 0, 0, 0), byok=False
             )
+        with pytest.raises(RuntimeError, match="record_usage requires the deploy's ledger"):
+            await context.record_usage(
+                PROXY_SERVICE,
+                REQUESTS_DIMENSION,
+                None,
+                1,
+                token_id=None,
+                session_id=uuid4(),
+                labels={},
+                resource_id=None,
+                attempt="flush-1",
+                occurred_at=datetime.now(UTC),
+                byok=False,
+                price_micro_usd=1,
+                price_digest="sha256:card",
+            )
     with pytest.raises(ValueError, match="spend gates and ledger"):
         context_for(
             "core",
@@ -1403,3 +1421,44 @@ async def test_spend_rollup_reads_the_bound_workspaces_totals_naming_no_member_o
         None, report.total_micro_usd, report.by_dimension, report.by_service, report.usage
     )
     assert totals.by_service == (ServiceTotal("models", 5_084), ServiceTotal("proxy", 0))
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_an_extension_records_a_service_row_once(db: None) -> None:
+    workspace_id, neighbor = await _workspace(), await _workspace()
+    context = context_for("core", frozenset(), ledger=UNGATED_LEDGER)
+    session_id = uuid4()
+    record = {
+        "token_id": None,
+        "session_id": session_id,
+        "labels": {"team": "platform"},
+        "resource_id": None,
+        "attempt": "flush-1",
+        "occurred_at": datetime.now(UTC),
+        "byok": False,
+        "price_micro_usd": 3,
+        "price_digest": "sha256:card",
+    }
+    with ws(workspace_id):
+        written = await context.record_usage(PROXY_SERVICE, REQUESTS_DIMENSION, None, 3, **record)
+        replayed = await context.record_usage(PROXY_SERVICE, REQUESTS_DIMENSION, None, 3, **record)
+    with ws(neighbor):
+        elsewhere = await context.record_usage(PROXY_SERVICE, REQUESTS_DIMENSION, None, 3, **record)
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.workspace_id,
+                    tables.ledger.c.service,
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.labels,
+                ).where(tables.ledger.c.session_id == session_id)
+            )
+        ).all()
+    assert (written, replayed, elsewhere) == (True, False, True)
+    assert {row.workspace_id: tuple(row)[1:] for row in rows} == {
+        workspace_id: ("proxy", "requests", 3, 3, {"team": "platform"}),
+        neighbor: ("proxy", "requests", 3, 3, {"team": "platform"}),
+    }
