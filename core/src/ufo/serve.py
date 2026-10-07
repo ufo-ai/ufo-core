@@ -1503,7 +1503,7 @@ def _proxy_endpoint(
 ) -> ProxyEndpoint:
     """A local `ufoctl serve` with no `ufo-egress` beside it mounts the control RPC under a
     throwaway CA, so an in-sandbox CONNECT to the unmanned proxy port is refused."""
-    if config.sandbox.proxy_public_url is not None:
+    if config.sandbox.proxy_url is not None:
         ca_cert = os.environ.get(EGRESS_CA_CERT_ENV)
         if not ca_cert:
             raise RuntimeError(
@@ -1550,7 +1550,7 @@ def _proxy_endpoint(
     return ProxyEndpoint(
         port=config.sandbox.proxy_port,
         ca_cert=ca_cert,
-        public_url=config.sandbox.proxy_public_url,
+        public_url=config.sandbox.proxy_url,
     )
 
 

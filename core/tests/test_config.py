@@ -282,6 +282,29 @@ def test_ingress_public_url_is_a_scheme_and_a_host_and_nothing_else(tmp_path: Pa
     assert load_config(path).sandbox.ingress_public_url == "https://sites.example.com:8443"
 
 
+def test_proxy_url_is_the_proxy_services_https_origin(tmp_path: Path) -> None:
+    path = tmp_path / "ufo.toml"
+    for rejected in (
+        "http://proxy.test",
+        "https://proxy.test/path",
+        "https://proxy.test/",
+        "https://proxy.test?x=1",
+        "https://proxy.test#f",
+        "https://user:pw@proxy.test",
+        "proxy.test",
+    ):
+        path.write_text(VALID + f'\n[sandbox]\nproxy_url = "{rejected}"\n')
+        with pytest.raises(
+            ValidationError,
+            match=r"sandbox\.proxy_url is the proxy service's https URL with no path",
+        ):
+            load_config(path)
+    path.write_text(VALID + '\n[sandbox]\nproxy_url = "https://proxy.test:8443"\n')
+    assert load_config(path).sandbox.proxy_url == "https://proxy.test:8443"
+    path.write_text(VALID)
+    assert load_config(path).sandbox.proxy_url is None
+
+
 def test_postgres_system_url_uses_sync_driver(tmp_path: Path) -> None:
     path = tmp_path / "ufo.toml"
     path.write_text(

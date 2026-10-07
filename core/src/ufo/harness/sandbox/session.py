@@ -342,12 +342,12 @@ def egress_proxy_env(proxy: "ProxyEndpoint", run_token: str) -> dict[str, str]:
     if proxy.public_url is None:
         raise RuntimeError(
             "an off-cluster carrier runs outside the pod and needs a reachable egress proxy; "
-            "set [sandbox] proxy_public_url to the externally-reachable proxy URL"
+            "set [sandbox] proxy_url to the proxy service's https URL"
         )
     parsed = urlsplit(proxy.public_url)
     if parsed.scheme != "https" or parsed.hostname is None:
         raise RuntimeError(
-            "an off-cluster carrier requires an HTTPS [sandbox] proxy_public_url so its run "
+            "an off-cluster carrier requires an HTTPS [sandbox] proxy_url so its run "
             "token is encrypted in transit"
         )
     host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname

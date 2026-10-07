@@ -1,0 +1,75 @@
+{
+  "create_request": {
+    "ttl_s": 3600,
+    "labels": {
+      "turn": "3e914c7d-4f60-4182-9d2e-3f4a5b6c7d8e",
+      "conversation": "4fa25d8e-5071-4293-8e3f-4a5b6c7d8e9f",
+      "agent": "2d803b6c-3e5f-4071-8c1d-2e3f4a5b6c7d",
+      "member": "1c7f3a5b-2d4e-4f60-9b0c-1d2e3f4a5b6c"
+    },
+    "policy": {
+      "internet": true,
+      "hosts": [
+        {
+          "host": "api.acmekeys.com"
+        },
+        {
+          "host": "api.anthropic.com"
+        },
+        {
+          "host": "api.github.com"
+        },
+        {
+          "host": "api.openai.com"
+        },
+        {
+          "host": "files.example.test"
+        },
+        {
+          "host": "github.com"
+        }
+      ],
+      "bind": [
+        {
+          "host": "api.acmekeys.com",
+          "header": "x-api-key",
+          "secret": "acme_api_key",
+          "env": "ACME_KEY"
+        },
+        {
+          "host": "api.anthropic.com",
+          "header": "x-api-key",
+          "secret": "ufo/models",
+          "env": "ANTHROPIC_API_KEY"
+        },
+        {
+          "host": "api.github.com",
+          "header": "authorization",
+          "secret": "connection:3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11",
+          "env": "GH_TOKEN"
+        },
+        {
+          "host": "api.openai.com",
+          "header": "authorization",
+          "secret": "ufo/models",
+          "env": "OPENAI_API_KEY"
+        },
+        {
+          "host": "github.com",
+          "header": "authorization",
+          "secret": "connection:3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11",
+          "env": "GH_TOKEN"
+        }
+      ],
+      "routes": [
+        {
+          "host": "tools.ufo.internal",
+          "upstream": "https://serve.test/internal/egress/tool-bridge",
+          "headers": {
+            "x-ufo-run": "dWZvLXJ1bi8wYjZlMmY0YS0xYzNkLTRlNWYtOGE5Yi0wYzFkMmUzZjRhNWIvM2U5MTRjN2QtNGY2MC00MTgyLTlkMmUtM2Y0YTViNmM3ZDhlLy0.QGqETkfRalV23pJyn7mbIlUMwJHIKKHf9VwnAlTp6xo"
+          }
+        }
+      ]
+    }
+  }
+}

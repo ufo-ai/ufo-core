@@ -227,10 +227,11 @@ class SandboxConfig(BaseModel):
     reference lets an eval or deploy bind the runtime tools it validated instead of resolving a
     mutable local tag after validation.
 
-    `proxy_port` is the stable port the egress proxy binds. `proxy_public_url` is the externally
-    reachable base a remote sandbox carrier such as E2B dials; local carriers leave it unset and
-    reach the process-local proxy directly. `serve` fails loud when a remote carrier has no public
-    proxy URL — open, unmetered egress is never a silent default.
+    `proxy_port` is the stable port the egress proxy binds. `proxy_url` names the proxy service,
+    `https` and a host with nothing after it: a carrier whose sandbox runs off the cluster, such as
+    E2B, egresses only through it, and `serve` fails loud when one is selected without it — open,
+    unmetered egress is never a silent default. The in-cluster carriers reach the process-local
+    proxy directly.
 
     `ingress_port` is the stable port the sandbox ingress binds. `ingress_public_url` is the
     wildcard base every served sandbox port is a subdomain of (`https://example.com`, backed
@@ -249,7 +250,7 @@ class SandboxConfig(BaseModel):
     loud."""
     workspace_root: Path = Path("./workspaces")
     proxy_port: int = DEFAULT_PROXY_PORT
-    proxy_public_url: str | None = None
+    proxy_url: str | None = None
     ingress_port: int = DEFAULT_INGRESS_PORT
     ingress_public_url: str | None = None
     apps_dev_server: str | None = None
@@ -283,6 +284,23 @@ class SandboxConfig(BaseModel):
                 "fragment, or credentials (e.g. https://example.com) — every site's address "
                 "is a label put in front of that host"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _proxy_url_is_an_origin(self) -> "SandboxConfig":
+        if self.proxy_url is None:
+            return self
+        base = urlsplit(self.proxy_url)
+        if (
+            base.scheme != "https"
+            or not base.hostname
+            or base.path
+            or base.query
+            or base.fragment
+            or base.username
+            or base.password
+        ):
+            raise ValueError("sandbox.proxy_url is the proxy service's https URL with no path")
         return self
 
     @model_validator(mode="after")
