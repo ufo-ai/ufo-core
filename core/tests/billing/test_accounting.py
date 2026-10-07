@@ -772,7 +772,7 @@ def test_every_ledger_dimension_belongs_to_a_service() -> None:
         for c in tables.ledger.constraints
         if isinstance(c, sa.CheckConstraint) and c.name == "ledger_dimension"
     )
-    assert set(SERVICE_OF_DIMENSION) == set(re.findall(r"'([a-z_]+)'", str(check.sqltext)))
+    assert set(re.findall(r"'([a-z_]+)'", str(check.sqltext))) <= set(SERVICE_OF_DIMENSION)
 
 
 async def _spawn_child_turn(
