@@ -1,6 +1,6 @@
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -370,6 +370,139 @@ async def test_a_slot_whose_host_choice_is_unoffered_binds_nothing(
     assert offered.bind == (
         Bind(host="eu.acmekeys.com", header="x-api-key", secret=keyed.name, env="ACME_KEY"),
     )
+
+
+def _withheld(caplog: pytest.LogCaptureFixture) -> list[tuple[object, ...]]:
+    return [
+        (record.ufo["host"], record.ufo["header"], record.ufo["withheld"], record.ufo["kept"])
+        for record in caplog.records
+        if record.getMessage() == "egress.bind_withheld"
+    ]
+
+
+async def test_the_model_key_holds_its_host_and_header_against_a_slot_while_the_turn_runs(
+    db: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    own = CredentialSlot(
+        name="own_openai_key",
+        description="The workspace's own OpenAI key.",
+        injection=InjectionTarget(
+            host="api.openai.com", header="Authorization", sentinel="S_OWN", env="OWN_OPENAI_KEY"
+        ),
+    )
+    store = _store()
+    await _seed()
+    with ws(WORKSPACE_ID):
+        await store.put(WORKSPACE_ID, own.name, "sk-own-openai")
+    rules = replace(
+        await _deploy_rules(monkeypatch, store, _Tokens()), slots=WorkspaceSlots(deploy=(own,))
+    )
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        running = await _compile(rules, _scope(run_token=_run_token()))
+    detached = await _compile(rules, _scope(running=False))
+
+    assert [bind for bind in running.bind if bind.host == "api.openai.com"] == [
+        Bind(
+            host="api.openai.com",
+            header="authorization",
+            secret=UFO_MODELS_SECRET,
+            env="OPENAI_API_KEY",
+        )
+    ]
+    assert _withheld(caplog) == [("api.openai.com", "authorization", own.name, UFO_MODELS_SECRET)]
+    assert detached.bind == (
+        Bind(host="api.openai.com", header="authorization", secret=own.name, env="OWN_OPENAI_KEY"),
+    )
+
+
+async def test_two_slots_on_one_host_and_header_bind_the_one_listed_first(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    staging = CredentialSlot(
+        name="acme_staging_key",
+        description="Acme staging key.",
+        injection=InjectionTarget(
+            host=ACME_HOST, header="X-Acme-Key", sentinel="S_STAGING", env="ACME_STAGING_KEY"
+        ),
+    )
+    prod = CredentialSlot(
+        name="acme_prod_key",
+        description="Acme production key.",
+        injection=InjectionTarget(
+            host=ACME_HOST, header="x-acme-key", sentinel="S_PROD", env="ACME_PROD_KEY"
+        ),
+    )
+    await _seed()
+    store = _store()
+    with ws(WORKSPACE_ID):
+        await store.put(WORKSPACE_ID, staging.name, "staging-secret")
+        await store.put(WORKSPACE_ID, prod.name, "prod-secret")
+    rules = PerAgentRules(credentials=store, slots=WorkspaceSlots(deploy=(staging, prod)))
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        policy = await _compile(rules, _scope())
+
+    assert policy.bind == (
+        Bind(host=ACME_HOST, header="x-acme-key", secret=staging.name, env="ACME_STAGING_KEY"),
+    )
+    assert _withheld(caplog) == [(ACME_HOST, "x-acme-key", prod.name, staging.name)]
+
+
+async def test_a_slot_holds_a_cli_accounts_api_host_and_its_git_host_stays_bound(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    bot = CredentialSlot(
+        name="github_bot_token",
+        description="A GitHub bot token.",
+        injection=InjectionTarget(
+            host=GITHUB_HOST, header="Authorization", sentinel="S_BOT", env="GITHUB_BOT_TOKEN"
+        ),
+    )
+    await _seed()
+    await _seed_github_connection()
+    store = _store()
+    with ws(WORKSPACE_ID):
+        await store.put(WORKSPACE_ID, bot.name, "ghp-bot")
+    rules = PerAgentRules(
+        grants=GrantStore(),
+        credentials=store,
+        slots=WorkspaceSlots(deploy=(bot,)),
+        clis={GITHUB: _cli(_Tokens())},
+    )
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        policy = await _compile(rules, _scope(member_id=MEMBER_ID))
+
+    connection = f"{CONNECTION_SECRET_PREFIX}{CONNECTION_ID}"
+    assert policy.bind == (
+        Bind(host=GITHUB_HOST, header="authorization", secret=bot.name, env="GITHUB_BOT_TOKEN"),
+        Bind(host=GIT.host, header="authorization", secret=connection, env="GH_TOKEN"),
+    )
+    assert _withheld(caplog) == [(GITHUB_HOST, "authorization", connection, bot.name)]
+
+
+async def test_a_cli_whose_git_host_is_its_api_host_binds_it_once(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _seed()
+    connection_id = await _record("acct-forge", MEMBER_ID, shared=True, host="forge.test")
+    forge = GitWire(host="forge.test", basic_user="oauth2", helper="!forge auth git-credential")
+    cli = CliCredential(env="FORGE_TOKEN", header="authorization", secret=_Tokens(), git=forge)
+    rules = PerAgentRules(grants=GrantStore(), clis={GITHUB: cli})
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        policy = await _compile(rules, _scope(member_id=MEMBER_ID))
+
+    assert policy.bind == (
+        Bind(
+            host="forge.test",
+            header="authorization",
+            secret=f"{CONNECTION_SECRET_PREFIX}{connection_id}",
+            env="FORGE_TOKEN",
+        ),
+    )
+    assert _withheld(caplog) == []
 
 
 async def test_internet_needs_the_deploy_and_the_agent() -> None:

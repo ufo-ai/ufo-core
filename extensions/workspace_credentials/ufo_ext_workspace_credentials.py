@@ -15,9 +15,8 @@ in core's sealed `credential` row under the same slot name, and arrives through 
 `request_credentials` handoff, so it never enters the transcript.
 
 The host is a declaration's one dangerous field, because an exactly scoped host is the proxy's
-allowlist and an admin writes it. `_validate` refuses what is not a public DNS name, and core pins
-the scope it derives for a per-workspace slot: the proxy resolves a pinned host and refuses the
-CONNECT when the name answers a private address, which an exact scope otherwise skips."""
+allowlist and an admin writes it. `validate` refuses what is not a public DNS name, and the proxy
+service resolves every host a session names and refuses one that answers a private address."""
 
 import re
 from dataclasses import dataclass

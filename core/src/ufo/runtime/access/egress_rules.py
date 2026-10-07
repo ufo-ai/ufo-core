@@ -12,9 +12,10 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.harness.o11y import warn
@@ -46,11 +47,12 @@ class HostEntry(BaseModel):
 
 class Bind(BaseModel):
     """On the wire to `host`, the proxy service puts the value named `secret` into `header` where
-    the sandbox sent the sentinel it was handed as `env`."""
+    the sandbox sent the sentinel it was handed as `env`. A header name is case-insensitive, so
+    `header` is held lowercased, the form the proxy service keys a bind by."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     host: str
-    header: str
+    header: Annotated[str, StringConstraints(to_lower=True)]
     secret: str
     env: str
 
