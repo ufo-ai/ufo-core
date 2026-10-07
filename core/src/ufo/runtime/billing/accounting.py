@@ -50,6 +50,7 @@ PROXY_VIA = "proxy"
 LABELS_MAX_KEYS = 16
 LABEL_MAX_CHARS = 64
 LABEL_KEY = re.compile(r"[a-z0-9_.-]{1,64}")
+SERVICE_CLOCK_SKEW_SECONDS = 60
 UNCACHED_PROMPT_WARN_TOKENS = 20_000
 """Where a turn that cached nothing stops being a small cold prompt and starts being a fault. Well
 past every supported provider's minimum cacheable prefix, the largest of which is 2,048."""
@@ -576,10 +577,12 @@ class Ledger:
         charges nothing twice, and a replay whose content differs raises `TurnUsageConflict` rather
         than move what was booked and charged.
 
-        The row is booked at `occurred_at`, which caps, windows and day buckets key on. A `turn`
-        label naming a turn of this workspace binds the row to that turn, so member and agent caps
-        and attribution count it; any other value, a turn of another workspace among them, binds
-        nothing and stays a label. A `tokens` record carries its six token classes."""
+        The row is booked at `occurred_at`, which caps, windows and day buckets key on, so it falls
+        at most `JOB_DAY_SETTLE_SECONDS` before now, on a day the fold has not closed, and at most
+        `SERVICE_CLOCK_SKEW_SECONDS` after. A `turn` label naming a turn of this workspace binds the
+        row to that turn, so member and agent caps and attribution count it; any other value, a
+        turn of another workspace among them, binds nothing and stays a label. A `tokens` record
+        carries its six token classes."""
         if not resource_id and session_id is None:
             raise ValueError("A service record names a resource or a session.")
         if amount <= 0:
@@ -602,6 +605,16 @@ class Ledger:
             raise ValueError("A service record's usage classes sum to its amount.")
         if dimension == TOKENS_DIMENSION and usage is None:
             raise ValueError("A tokens record carries its usage classes.")
+        now = datetime.now(UTC)
+        if not (
+            now - timedelta(seconds=JOB_DAY_SETTLE_SECONDS)
+            <= occurred_at
+            <= now + timedelta(seconds=SERVICE_CLOCK_SKEW_SECONDS)
+        ):
+            raise ValueError(
+                f"A service record occurred at most {JOB_DAY_SETTLE_SECONDS} seconds ago and at "
+                f"most {SERVICE_CLOCK_SKEW_SECONDS} seconds ahead."
+            )
         ledger_id = service_ledger_id_for(
             workspace_id, service, resource_id or str(session_id), dimension, attempt
         )
