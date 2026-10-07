@@ -50,4 +50,5 @@ from ufo.harness.sandbox.session import sandbox_runtime_root as sandbox_runtime_
 from ufo.harness.sandbox.session import shell_path as shell_path
 from ufo.harness.sandbox.session import ufo_fs_file_op as ufo_fs_file_op
 from ufo.harness.sandbox.session import workspace_path as workspace_path
+from ufo.runtime.access.proxy_sessions import CLOUD_BEARER_SLOT as CLOUD_BEARER_SLOT
 from ufo.runtime.ext.manifest import CarrierSpec as CarrierSpec

@@ -93,7 +93,7 @@ def _check_egress_proxy_env_embeds_run_token_and_sentinels() -> None:
 
 
 def _check_egress_proxy_env_refuses_missing_or_http_url() -> None:
-    with pytest.raises(RuntimeError, match="proxy_public_url"):
+    with pytest.raises(RuntimeError, match=r"\[sandbox\] proxy_url"):
         egress_proxy_env(ProxyEndpoint(port=9, ca_cert="PEM"), "tok")
     with pytest.raises(RuntimeError, match="HTTPS"):
         egress_proxy_env(

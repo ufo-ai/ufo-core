@@ -115,9 +115,7 @@ def _hosted_config() -> Config:
     return Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db"),
         blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
-        sandbox=SandboxConfig(
-            backend="local", proxy_port=9443, proxy_public_url="https://proxy.test"
-        ),
+        sandbox=SandboxConfig(backend="local", proxy_port=9443, proxy_url="https://proxy.test"),
     )
 
 
@@ -719,7 +717,7 @@ def test_preview_settings_pair_the_service_with_its_real_token(
 def test_proxy_endpoint_boots_a_local_serve_without_a_shared_ca(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A local boot (no `proxy_public_url`) runs no `ufo-egress` unless the dev rig starts one,
+    """A local boot (no `proxy_url`) runs no `ufo-egress` unless the dev rig starts one,
     so `ufoctl serve` alone must come up — the documented zero-services default — not fail loud."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

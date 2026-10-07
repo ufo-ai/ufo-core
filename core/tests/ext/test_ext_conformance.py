@@ -844,7 +844,7 @@ def test_a_resume_backend_duplicating_the_default_fails_loud() -> None:
         select_carriers(config, ())
 
 
-def test_an_off_cluster_resume_backend_requires_the_public_proxy_url() -> None:
+def test_an_off_cluster_resume_backend_requires_the_proxy_url() -> None:
     remote = Manifest(
         name="remote",
         version="0",
@@ -855,8 +855,17 @@ def test_an_off_cluster_resume_backend_requires_the_public_proxy_url() -> None:
         blob=BlobConfig(backend="filesystem", root=Path("blobs")),
         sandbox=SandboxConfig(backend="local", resume_backends=("remote",)),
     )
-    with pytest.raises(RuntimeError, match="proxy_public_url"):
+    with pytest.raises(RuntimeError, match=r"\[sandbox\] proxy_url"):
         select_carriers(config, (remote,))
+    proxied = config.model_copy(
+        update={
+            "sandbox": SandboxConfig(
+                backend="local", resume_backends=("remote",), proxy_url="https://proxy.test"
+            )
+        }
+    )
+    resumed, _spec = select_carriers(proxied, (remote,)).resume["remote"]
+    assert isinstance(resumed, SampleCarrier)
 
 
 def test_a_carrier_colliding_with_a_built_in_fails_loud() -> None:

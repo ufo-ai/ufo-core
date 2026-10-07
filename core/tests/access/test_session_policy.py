@@ -42,7 +42,7 @@ from ufo.runtime.tools.bridge import TOOL_BRIDGE_HOST
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 
-SESSION_POLICY_JSON = Path(__file__).parent / "session_policy.json"
+PROXY_SESSION_CONTRACT = Path(__file__).parent / "proxy_session_contract.json"
 RUN_TOKENS = RunTokenCodec(b"session-policy-golden-secret")
 WORKSPACE_ID = UUID("0b6e2f4a-1c3d-4e5f-8a9b-0c1d2e3f4a5b")
 MEMBER_ID = UUID("1c7f3a5b-2d4e-4f60-9b0c-1d2e3f4a5b6c")
@@ -259,7 +259,8 @@ async def test_a_running_turn_compiles_hosts_binds_and_routes_by_name(
             ),
         ),
     )
-    assert json.loads(SESSION_POLICY_JSON.read_text()) == policy.model_dump(mode="json")
+    contract = json.loads(PROXY_SESSION_CONTRACT.read_text())
+    assert contract["create_request"]["policy"] == policy.model_dump(mode="json")
     wire = policy.model_dump_json()
     assert "real" not in wire
     assert not any(

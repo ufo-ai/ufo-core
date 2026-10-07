@@ -259,8 +259,7 @@ class CarrierSpec:
     boot. The selected carrier is held for the process's life as `Runtime.carrier`. `off_cluster`
     marks a backend whose sandbox runs outside the serve pod's network (e2b) and so cannot reach
     the in-pod egress proxy over a host-local address: selecting one with no `[sandbox]
-    proxy_public_url` fails loud at boot, since its sandbox would otherwise egress open and
-    unmetered."""
+    proxy_url` fails loud at boot, since its sandbox would otherwise egress open and unmetered."""
 
     name: str
     factory: Callable[[], Carrier]
