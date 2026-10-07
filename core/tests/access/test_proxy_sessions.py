@@ -23,6 +23,7 @@ from ufo.runtime.access.proxy_sessions import (
     CONVERSATION_LABEL,
     IDEMPOTENCY_HEADER,
     MEMBER_LABEL,
+    PROXY_CALL_TIMEOUT_SECONDS,
     PROXY_SESSION_TTL_SECONDS,
     ProxyRefused,
     ProxySessions,
@@ -43,6 +44,7 @@ NARROWED = SessionPolicy(
 BEARER = "ufo_proxy-sessions-system-token"
 PROXY_URL = "https://proxy.test"
 KEY = "turn:3e914c7d-4f60-4182-9d2e-3f4a5b6c7d8e:-:0123456789abcdef"
+SHORT_TTL_S = 75
 
 
 @pytest.fixture
@@ -77,6 +79,13 @@ def _sent(fake: Starlette) -> list[tuple[str, str, object]]:
     return [
         (method, target, json.loads(body) if body else None)
         for method, target, _, body in fake.state.calls
+    ]
+
+
+def _keyed(fake: Starlette) -> list[tuple[str, str, str | None]]:
+    return [
+        (method, target, headers.get(IDEMPOTENCY_HEADER.lower()))
+        for method, target, headers, _ in fake.state.calls
     ]
 
 
@@ -126,6 +135,84 @@ async def test_a_replay_after_a_patch_sends_its_policy_again(
     assert (again.id, again.token, again.ca_pem) == (first.id, first.token, first.ca_pem)
     assert again.version == narrowed.version + 1
     assert set(again.env) == set(first.env) != set(narrowed.env)
+
+
+async def test_a_fresh_open_under_a_short_ttl_sends_one_post(
+    fake: Starlette, sessions: ProxySessions, workspace_id: UUID
+) -> None:
+    created = await sessions.open(
+        workspace_id, key=KEY, labels=LABELS, policy=POLICY, ttl_s=SHORT_TTL_S
+    )
+
+    assert [(method, target) for method, target, _ in _sent(fake)] == [("POST", "/v1/sessions")]
+    assert created.expires_at - created.created_at == timedelta(seconds=SHORT_TTL_S)
+
+
+async def test_a_replay_of_an_ended_session_opens_its_successor(
+    fake: Starlette, sessions: ProxySessions, workspace_id: UUID
+) -> None:
+    first = await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+    await sessions.update(workspace_id, first.id, NARROWED)
+    fake.state.sessions[first.id]["expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
+    successor = await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+    replayed = await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+    await sessions.revoke(workspace_id, successor.id)
+    following = await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+
+    assert _keyed(fake) == [
+        ("POST", "/v1/sessions", KEY),
+        ("PATCH", f"/v1/sessions/{first.id}", None),
+        ("POST", "/v1/sessions", KEY),
+        ("POST", "/v1/sessions", f"{KEY}:1"),
+        ("POST", "/v1/sessions", KEY),
+        ("POST", "/v1/sessions", f"{KEY}:1"),
+        ("POST", f"/v1/sessions/{successor.id}/revoke", None),
+        ("POST", "/v1/sessions", KEY),
+        ("POST", "/v1/sessions", f"{KEY}:1"),
+        ("POST", "/v1/sessions", f"{KEY}:2"),
+    ]
+    assert len({first.id, successor.id, following.id}) == 3
+    assert (replayed.id, replayed.token, replayed.env) == (
+        successor.id,
+        successor.token,
+        successor.env,
+    )
+    assert successor.version == following.version == 1
+
+
+async def test_a_replay_within_one_call_of_its_deadline_opens_its_successor(
+    fake: Starlette, sessions: ProxySessions, workspace_id: UUID
+) -> None:
+    first = await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+    ending = datetime.now(UTC) + timedelta(seconds=PROXY_CALL_TIMEOUT_SECONDS)
+    fake.state.sessions[first.id]["expires_at"] = ending
+
+    successor = await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+
+    assert _keyed(fake)[1:] == [
+        ("POST", "/v1/sessions", KEY),
+        ("POST", "/v1/sessions", f"{KEY}:1"),
+    ]
+    assert successor.id != first.id
+
+
+async def test_a_near_deadline_is_renewed_before_the_policy_is_sent_again(
+    fake: Starlette, sessions: ProxySessions, workspace_id: UUID
+) -> None:
+    first = await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+    narrowed = await sessions.update(workspace_id, first.id, NARROWED)
+    near = datetime.now(UTC) + timedelta(minutes=10)
+    fake.state.sessions[first.id]["expires_at"] = near
+
+    reopened = await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+
+    assert _sent(fake)[2:] == [
+        ("POST", "/v1/sessions", CREATE_REQUEST),
+        ("POST", f"/v1/sessions/{first.id}/renew", {"ttl_s": PROXY_SESSION_TTL_SECONDS}),
+        ("PATCH", f"/v1/sessions/{first.id}", {"policy": CREATE_REQUEST["policy"]}),
+    ]
+    assert (reopened.id, reopened.version) == (first.id, narrowed.version + 1)
+    assert reopened.expires_at > near + timedelta(minutes=30)
 
 
 async def test_open_renews_a_session_whose_deadline_is_near(

@@ -147,21 +147,30 @@ class ProxySessions:
         policy: SessionPolicy,
         ttl_s: int = PROXY_SESSION_TTL_SECONDS,
     ) -> SessionCreated:
-        """Create the session `key` names, or answer the one an earlier create under `key` made.
-        That one holds `policy` only while no patch has moved its version, so a patched one is
-        sent `policy` again; one whose deadline is near is renewed for `ttl_s`."""
+        """Create the session `key` names, or answer the live one an earlier create under `key`
+        made. A replayed session that is revoked, or whose deadline is within one call's timeout,
+        gives way to the one a successor key `<key>:1`, `<key>:2`, … names, the first that is live
+        or new. A replayed session whose deadline is near is renewed for `ttl_s`, and one a patch
+        has moved since its create is sent `policy` again."""
         bearer = await self._bearer(workspace_id)
         body = CreateSession(ttl_s=ttl_s, labels=dict(labels), policy=policy)
-        created = SessionCreated.model_validate_json(
-            (await self._send(bearer, "POST", SESSIONS_PATH, body, key=key)).content
-        )
+        attempt, successor = key, 0
+        while True:
+            response = await self._send(bearer, "POST", SESSIONS_PATH, body, key=attempt)
+            created = SessionCreated.model_validate_json(response.content)
+            if response.status_code == httpx.codes.CREATED:
+                return created
+            remaining = (created.expires_at - datetime.now(UTC)).total_seconds()
+            if created.revoked_at is None and remaining > PROXY_CALL_TIMEOUT_SECONDS:
+                break
+            successor += 1
+            attempt = f"{key}:{successor}"
+        if remaining < PROXY_SESSION_RENEW_BELOW_SECONDS:
+            renewed = await self._renew(bearer, created.id, ttl_s)
+            created = created.model_copy(update={"expires_at": renewed.expires_at})
         if created.version != PROXY_SESSION_CREATED_VERSION:
             patched = await self._update(bearer, created.id, policy)
             created = created.model_copy(update=dict(patched))
-        remaining = created.expires_at - datetime.now(UTC)
-        if remaining.total_seconds() < PROXY_SESSION_RENEW_BELOW_SECONDS:
-            renewed = await self._renew(bearer, created.id, ttl_s)
-            created = created.model_copy(update={"expires_at": renewed.expires_at})
         return created
 
     async def update(
