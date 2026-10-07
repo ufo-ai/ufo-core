@@ -34,6 +34,8 @@ SANDBOX_TOKENS_DIMENSION = "sandbox_tokens"
 SANDBOX_TOKENS_ATTEMPT = "sandbox"
 IMAGES_DIMENSION = "images"
 VIDEOS_DIMENSION = "videos"
+REQUESTS_DIMENSION = "requests"
+GIB_DIMENSION = "gib"
 UNCACHED_PROMPT_WARN_TOKENS = 20_000
 """Where a turn that cached nothing stops being a small cold prompt and starts being a fault. Well
 past every supported provider's minimum cacheable prefix, the largest of which is 2,048."""
@@ -1150,6 +1152,8 @@ SERVICE_OF_DIMENSION: Mapping[str, str] = {
     IMAGES_DIMENSION: "models",
     VIDEOS_DIMENSION: "models",
     EGRESS_DIMENSION: "proxy",
+    REQUESTS_DIMENSION: "proxy",
+    GIB_DIMENSION: "proxy",
 }
 WORKSPACE_JOB_LABEL = "Workspace jobs"
 SELECTED_PERIOD = "selected"
