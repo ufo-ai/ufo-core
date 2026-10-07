@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+import ufo_ext_sample.manifest as sample
 from cryptography.fernet import Fernet
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
@@ -16,6 +17,7 @@ from opentelemetry.sdk.metrics.export import (
     NumberDataPoint,
 )
 from ufo_ext_sample.spend import CHARGE_TABLE, SampleGate, allow
+from ufo_ext_sample.tools import TOOL_NAME
 
 from ufo.db import workspace_tx
 from ufo.harness import o11y
@@ -50,6 +52,7 @@ from ufo.harness.sandbox.session import (
     SandboxSpec,
 )
 from ufo.harness.sandbox.terminal import TerminalGone
+from ufo.host.ext.loader import turn_hooks, turn_tools
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.billing.accounting import (
@@ -609,6 +612,25 @@ async def test_credential_access_gates_a_slot_the_extension_resolves_per_workspa
                 await verb("undeclared_slot")
         await access.clear("acme_api_key")
         assert await store.stored_slots(workspace_id) == frozenset()
+
+
+async def test_the_sample_manifests_contexts_carry_the_slots_it_mints(db: None) -> None:
+    manifest = sample.manifest()
+    store = _store()
+    init_workspace_credentials(store)
+    _tools, ext_by_tool, _verbs = turn_tools((manifest,), store, audience=SHARED_AUDIENCE)
+    chain = turn_hooks((manifest,), store, audience=SHARED_AUDIENCE)
+    contexts = [
+        ext_by_tool[TOOL_NAME],
+        *(hook.ext for hooks in chain.hooks.values() for hook in hooks),
+    ]
+    assert {context.credentials.minted for context in contexts} == {frozenset({sample.MINTED_SLOT})}
+    credentials = ext_by_tool[TOOL_NAME].credentials
+    with ws(await _workspace()):
+        await credentials.put(sample.MINTED_SLOT, "minted-by-the-sample")
+        assert await credentials.get(sample.MINTED_SLOT) == "minted-by-the-sample"
+        with pytest.raises(UndeclaredCredentialSlot, match=sample.API_SLOT):
+            await credentials.put(sample.API_SLOT, "handed-over")
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

@@ -145,6 +145,7 @@ from ufo.runtime.ext.manifest import (
     SearchProviderSpec,
     conversation_slot_declarations,
     declared_slots,
+    minted_slots,
     open_connector_namespace,
 )
 from ufo.runtime.ext.operator import OperatorSetup, install_operator, select_operator_rule
@@ -1110,6 +1111,7 @@ def _mount_ext_routes(
             embed,
             public_base_url=public_base_url,
             home_surface=home_surface(manifests),
+            minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
         )
@@ -1121,6 +1123,8 @@ def _mount_ext_routes(
                 identify=spec.identify,
                 extension_context=context,
             ) -> Response:
+                if identify is None:
+                    return await handler(extension_context, request)
                 identified = identify(request)
                 if identified is None:
                     return JSONResponse(
@@ -1328,6 +1332,7 @@ def _mount_shared_surfaces(
             ext=extension_context_for(
                 manifest.name,
                 frozenset(slot.name for slot in manifest.credentials),
+                minted=minted_slots(manifest),
                 spend=spend,
                 ledger=ledger,
             ),

@@ -8,7 +8,7 @@ import ufo.host.ext.loader as loader
 from ufo.host.ext.loader import FIRST_PARTY_ENV, discovered, first_party_distributions
 from ufo.product import CensusSpec
 from ufo.runtime.billing.spend import SpendGateSpec
-from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 
 
 def test_the_runtime_distribution_is_always_first_party(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -32,8 +32,15 @@ def test_the_runtime_distribution_is_always_first_party(monkeypatch: pytest.Monk
             version="0",
             spend_gates=(SpendGateSpec(name="acme_gate", build=SampleGate),),
         ),
+        Manifest(
+            name="acme",
+            version="0",
+            credentials=(
+                CredentialSlot(name="acme_token", description="A token acme mints.", minted=True),
+            ),
+        ),
     ],
-    ids=["member_context_read", "census", "spend_gates"],
+    ids=["member_context_read", "census", "spend_gates", "minted_credential"],
 )
 def test_a_privileged_manifest_is_refused_unless_its_distribution_is_named(
     monkeypatch: pytest.MonkeyPatch, privileged: Manifest
@@ -49,3 +56,15 @@ def test_a_privileged_manifest_is_refused_unless_its_distribution_is_named(
         discovered()
     monkeypatch.setenv(FIRST_PARTY_ENV, "acme")
     assert set(discovered()) == {"acme"}
+
+
+def test_a_minted_slot_carries_no_injection_target() -> None:
+    with pytest.raises(ValueError, match="acme_token"):
+        CredentialSlot(
+            name="acme_token",
+            description="A token acme mints.",
+            minted=True,
+            injection=InjectionTarget(
+                host="api.acme.test", header="authorization", sentinel="Bearer sentinel-acme"
+            ),
+        )

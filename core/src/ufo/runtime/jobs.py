@@ -83,6 +83,7 @@ from ufo.runtime.ext.manifest import (
     JobSpec,
     Manifest,
     PageChangeBatch,
+    minted_slots,
 )
 from ufo.runtime.gravatar import (
     GRAVATAR_JOB,
@@ -418,9 +419,9 @@ def _page_beyond_cursor(revision: int, page_id: UUID, cursor: object) -> bool:
 @dataclass(frozen=True)
 class PageChangeConsumer:
     """One registered `page_change` hook and where its cursor and context are scoped: the declaring
-    extension's name, the credential slots it declared, the hook spec, and the discriminator that
-    keeps two hooks in one extension independent — the handler's own `__name__`, since page_change
-    handlers are plain module-level functions. `core_jobs` names one JobSpec
+    extension's name, the credential slots it declared and those it mints, the hook spec, and the
+    discriminator that keeps two hooks in one extension independent — the handler's own `__name__`,
+    since page_change handlers are plain module-level functions. `core_jobs` names one JobSpec
     `page_change:{extension}:{discriminator}` per consumer and `drive` rides a
     `{PAGE_CHANGE_CURSOR_KEY}:{discriminator}` cursor, so each drives as its own DBOS workflow off
     its own cursor — a backlogged or wedged consumer delays only itself, and an extension that
@@ -429,6 +430,7 @@ class PageChangeConsumer:
 
     extension: str
     declared: frozenset[str]
+    minted: frozenset[str]
     spec: HookSpec
     discriminator: str
 
@@ -536,6 +538,7 @@ class PageChangeRunner:
                     PageChangeConsumer(
                         extension=manifest.name,
                         declared=declared,
+                        minted=minted_slots(manifest),
                         spec=spec,
                         discriminator=discriminator,
                     )
@@ -727,6 +730,7 @@ class PageChangeRunner:
             _background_registry(self.registry, self.background_model),
             consumer.job,
             probes=self.probes,
+            minted=consumer.minted,
             spend=self.spend,
             ledger=self.ledger,
         )
@@ -1153,6 +1157,7 @@ class _Binding:
     key: str
     extension: str
     declared: frozenset[str]
+    minted: frozenset[str]
     spec: JobSpec
     member_context_read: bool = False
     surfaces: frozenset[str] = frozenset()
@@ -1171,6 +1176,7 @@ def bindings_from(
             key=f"{CORE_EXTENSION}:{spec.name}",
             extension=CORE_EXTENSION,
             declared=frozenset(),
+            minted=frozenset(),
             spec=spec,
         )
         for spec in core_jobs
@@ -1184,6 +1190,7 @@ def bindings_from(
                 key=f"{manifest.name}:{spec.name}",
                 extension=manifest.name,
                 declared=declared,
+                minted=minted_slots(manifest),
                 spec=spec,
                 member_context_read=manifest.member_context_read,
                 surfaces=surfaces,
@@ -1324,6 +1331,7 @@ class JobRunner:
                 member_context_blob=self.blob,
                 public_base_url=self.public_base_url,
                 home_surface=self.home_surface,
+                minted=binding.minted,
                 spend=self.spend,
                 ledger=self.ledger,
             )

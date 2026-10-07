@@ -45,10 +45,13 @@ from ufo.runtime.access.egress_rules import (
     derive_credential_rules,
 )
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
+from ufo.runtime.ext.context import CredentialAccess, UndeclaredCredentialSlot
 from ufo.runtime.ext.manifest import (
     CredentialSlot,
     InjectionTarget,
     Manifest,
+    declared_slots,
+    minted_slots,
 )
 from ufo.runtime.seats import create_member
 from ufo.runtime.workspace import (
@@ -222,6 +225,40 @@ async def test_a_stored_slot_is_told_apart_from_the_platform_default(
         await store.put(workspace_id, "sample_api", "workspace-owned")
         assert await ws_current().credential("sample_api") == "workspace-owned"
         assert await ws_current().credential_is_stored("sample_api")
+
+
+async def test_an_extension_puts_only_the_slots_it_mints(db: None) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    access = CredentialAccess(
+        declared=frozenset({"sample_minted", "sample_api"}), minted=frozenset({"sample_minted"})
+    )
+    with ws(workspace_id):
+        await access.put("sample_minted", "first-mint")
+        assert await access.get("sample_minted") == "first-mint"
+        await access.put("sample_minted", "reissued")
+        assert await access.get("sample_minted") == "reissued"
+        with pytest.raises(UndeclaredCredentialSlot, match="sample_api"):
+            await access.put("sample_api", "handed-over")
+        with pytest.raises(ValueError, match="empty"):
+            await access.put("sample_minted", "")
+    assert await store.get(workspace_id, "sample_minted") == "reissued"
+    with pytest.raises(CredentialSlotUnset):
+        await store.get(workspace_id, "sample_api")
+
+
+def test_a_slot_its_extension_mints_is_no_members_to_fill() -> None:
+    manifest = Manifest(
+        name="minter",
+        version="1",
+        credentials=(
+            CredentialSlot(name="minter_api_key", description="The member's API key."),
+            CredentialSlot(name="minter_token", description="A token minter mints.", minted=True),
+        ),
+    )
+    assert [slot.name for slot in declared_slots((manifest,))] == ["minter_api_key"]
+    assert minted_slots(manifest) == frozenset({"minter_token"})
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
