@@ -92,6 +92,7 @@ from ufo.runtime.ext.manifest import (
     MemorySearchProviderSpec,
     NotRegisteredError,
     Pack,
+    ProxyCredentials,
     SubagentProfile,
     declared_slots,
 )
@@ -194,7 +195,8 @@ def write_lockfile(path: Path, lockfile: Lockfile) -> None:
 def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
     """Every extension installed in this environment, keyed by manifest name, with the entry point
     its digest is computed from. Duplicate manifest names are rejected here so no reader downstream
-    has to."""
+    has to, and so is a second extension declaring `proxy_credentials`: a deploy presents one
+    bearer to the proxy service."""
     found: dict[str, tuple[Manifest, EntryPoint]] = {}
     first_party = first_party_distributions()
     for entry in entry_points(group=EXTENSION_ENTRY_POINT_GROUP):
@@ -202,6 +204,7 @@ def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
         if (
             manifest.member_context_read
             or manifest.vault_read
+            or manifest.proxy_credentials is not None
             or manifest.workspace_founded
             or manifest.deploy_routes
             or manifest.commands
@@ -216,6 +219,15 @@ def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
         if manifest.name in found:
             raise ValueError(f"duplicate extension name: {manifest.name}")
         found[manifest.name] = (manifest, entry)
+    bearers = sorted(
+        repr(name)
+        for name, (manifest, _) in found.items()
+        if manifest.proxy_credentials is not None
+    )
+    if len(bearers) > 1:
+        raise ValueError(
+            f"Only one extension may declare proxy_credentials; {', '.join(bearers)} do."
+        )
     return found
 
 
@@ -500,6 +512,17 @@ def workspace_slot_source(manifests: tuple[Manifest, ...]) -> WorkspaceSlots:
         claimed_slots=claims.slots,
         claimed_env=claims.env,
     )
+
+
+def proxy_credentials(manifests: tuple[Manifest, ...]) -> ProxyCredentials | None:
+    """The source of the bearer the runtime presents to the proxy service: the one active
+    extension declaring `proxy_credentials`, built over its plain workspace-scoped context, so it
+    reads its own storage under whichever workspace the session client binds. None when no
+    extension declares it, and every session call then finds the proxy service unavailable."""
+    for manifest in manifests:
+        if manifest.proxy_credentials is not None:
+            return manifest.proxy_credentials.build(_extension_context(manifest))
+    return None
 
 
 def _resolved_slot_names(manifest: Manifest) -> Callable[[], Awaitable[frozenset[str]]] | None:

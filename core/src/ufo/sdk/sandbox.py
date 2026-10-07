@@ -1,5 +1,7 @@
 """Public re-export: an extension registers a `CarrierSpec` and implements the `Carrier` protocol
-over the sandbox value objects the session passes it — the seam a deploy swaps backends at.
+over the sandbox value objects the session passes it — the seam a deploy swaps backends at. The one
+extension holding the deploy's bearer to the proxy service declares a `ProxyCredentialSpec` that
+builds its `ProxyCredentials`.
 
 `ufo.sdk` is a package of thin re-export modules with an empty `__init__.py` (the gate bans
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
@@ -50,5 +52,6 @@ from ufo.harness.sandbox.session import sandbox_runtime_root as sandbox_runtime_
 from ufo.harness.sandbox.session import shell_path as shell_path
 from ufo.harness.sandbox.session import ufo_fs_file_op as ufo_fs_file_op
 from ufo.harness.sandbox.session import workspace_path as workspace_path
-from ufo.runtime.access.proxy_sessions import CLOUD_BEARER_SLOT as CLOUD_BEARER_SLOT
 from ufo.runtime.ext.manifest import CarrierSpec as CarrierSpec
+from ufo.runtime.ext.manifest import ProxyCredentials as ProxyCredentials
+from ufo.runtime.ext.manifest import ProxyCredentialSpec as ProxyCredentialSpec

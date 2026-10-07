@@ -2,10 +2,10 @@
 
 A session is the authority one sandbox, terminal, or probe egresses under: the policy core compiled
 by name, the token the proxy service signed for it, and the env a client exports in place of every
-secret. Core calls as the workspace, presenting the system token its credential slot
-`CLOUD_BEARER_SLOT` holds. A slot holding nothing, an unreachable service, and a 5xx raise
-`SandboxProviderUnavailable`, which parks a turn; a 4xx and a replay of a revoked session raise
-`ProxyRefused`."""
+secret. Core calls as the workspace, presenting the bearer the extension declaring
+`proxy_credentials` answers for it. A deploy with no such extension, an unreachable service, and a
+5xx raise `SandboxProviderUnavailable`, which parks a turn; a 4xx and a replay of a revoked session
+raise `ProxyRefused`."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -16,11 +16,10 @@ import httpx
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from ufo.harness.sandbox.session import SandboxProviderUnavailable
-from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore
 from ufo.runtime.access.egress_rules import SessionPolicy
+from ufo.runtime.ext.manifest import ProxyCredentials
 from ufo.runtime.workspace import ws
 
-CLOUD_BEARER_SLOT = "cloud_system_token"
 PROXY_CALL_TIMEOUT_SECONDS = 10.0
 PROXY_SESSION_TTL_SECONDS = 3600
 PROXY_SESSION_MAX_TTL_SECONDS = 86400
@@ -135,10 +134,11 @@ class ProxyRefused(RuntimeError):
 
 @dataclass(frozen=True)
 class ProxySessions:
-    """The session API at `base_url`, called as one workspace at a time."""
+    """The session API at `base_url`, called as one workspace at a time with the bearer
+    `credentials` answers for it."""
 
     base_url: str
-    credentials: CredentialStore
+    credentials: ProxyCredentials | None
     http: httpx.AsyncClient
 
     async def open(
@@ -218,11 +218,12 @@ class ProxySessions:
         return len(live)
 
     async def _bearer(self, workspace_id: UUID) -> str:
-        try:
-            with ws(workspace_id):
-                return await self.credentials.get(workspace_id, CLOUD_BEARER_SLOT)
-        except CredentialSlotUnset as unset:
-            raise SandboxProviderUnavailable("the workspace has no proxy bearer yet") from unset
+        if self.credentials is None:
+            raise SandboxProviderUnavailable(
+                "No extension declares proxy_credentials, so there is no proxy bearer."
+            )
+        with ws(workspace_id):
+            return await self.credentials.bearer()
 
     async def _update(self, bearer: str, session_id: UUID, policy: SessionPolicy) -> SessionWithEnv:
         path = f"{SESSIONS_PATH}/{session_id}"

@@ -1,7 +1,7 @@
 import json
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -15,11 +15,11 @@ from starlette.applications import Starlette
 from core.tests.access.proxy_fake import FAKE_CA_PEM, SENTINEL_PREFIX, proxy_app
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import SandboxProviderUnavailable
+from ufo.host.ext.loader import proxy_credentials
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.egress_rules import Bind, HostEntry, SessionPolicy
 from ufo.runtime.access.proxy_sessions import (
     AGENT_LABEL,
-    CLOUD_BEARER_SLOT,
     CONVERSATION_LABEL,
     IDEMPOTENCY_HEADER,
     MEMBER_LABEL,
@@ -28,7 +28,9 @@ from ufo.runtime.access.proxy_sessions import (
     ProxyRefused,
     ProxySessions,
 )
-from ufo.runtime.workspace import ws
+from ufo.runtime.ext.context import ExtensionContext
+from ufo.runtime.ext.manifest import CredentialSlot, Manifest, ProxyCredentialSpec
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 
 PROXY_SESSION_CONTRACT = Path(__file__).parent / "proxy_session_contract.json"
@@ -42,9 +44,28 @@ NARROWED = SessionPolicy(
     ),
 )
 BEARER = "ufo_proxy-sessions-system-token"
+BEARER_SLOT = "acme_proxy_bearer"
 PROXY_URL = "https://proxy.test"
 KEY = "turn:3e914c7d-4f60-4182-9d2e-3f4a5b6c7d8e:-:0123456789abcdef"
 SHORT_TTL_S = 75
+
+
+@dataclass(frozen=True)
+class _SlotBearer:
+    ctx: ExtensionContext
+
+    async def bearer(self) -> str:
+        return await self.ctx.credentials.get(BEARER_SLOT)
+
+
+DECLARING = Manifest(
+    name="acme",
+    version="0",
+    credentials=(
+        CredentialSlot(name=BEARER_SLOT, description="The bearer acme presents for a workspace."),
+    ),
+    proxy_credentials=ProxyCredentialSpec(build=_SlotBearer),
+)
 
 
 @pytest.fixture
@@ -52,8 +73,7 @@ def fake() -> Starlette:
     return proxy_app(BEARER)
 
 
-@pytest.fixture
-async def workspace_id(db: None) -> UUID:
+async def _workspace() -> UUID:
     workspace_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -65,14 +85,27 @@ async def workspace_id(db: None) -> UUID:
 
 
 @pytest.fixture
-async def sessions(fake: Starlette, workspace_id: UUID) -> AsyncIterator[ProxySessions]:
+def store() -> CredentialStore:
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    return store
+
+
+@pytest.fixture
+async def workspace_id(db: None) -> UUID:
+    return await _workspace()
+
+
+@pytest.fixture
+async def sessions(
+    fake: Starlette, store: CredentialStore, workspace_id: UUID
+) -> AsyncIterator[ProxySessions]:
     with ws(workspace_id):
-        await store.put(workspace_id, CLOUD_BEARER_SLOT, BEARER)
+        await store.put(workspace_id, BEARER_SLOT, BEARER)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=fake), base_url=PROXY_URL
     ) as http:
-        yield ProxySessions(PROXY_URL, store, http)
+        yield ProxySessions(PROXY_URL, proxy_credentials((DECLARING,)), http)
 
 
 def _sent(fake: Starlette) -> list[tuple[str, str, object]]:
@@ -309,14 +342,33 @@ async def test_revoke_labelled_follows_every_page(
     )
 
 
-async def test_an_empty_bearer_slot_is_a_provider_outage(
+async def test_each_call_presents_the_bearer_the_declaring_extension_reads_for_its_workspace(
+    fake: Starlette, sessions: ProxySessions, store: CredentialStore, workspace_id: UUID
+) -> None:
+    other = await _workspace()
+    with ws(other):
+        await store.put(other, BEARER_SLOT, "other-workspace-bearer")
+
+    await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+    with pytest.raises(ProxyRefused) as refused:
+        await sessions.open(other, key=KEY, labels=LABELS, policy=POLICY)
+
+    assert [headers["authorization"] for _, _, headers, _ in fake.state.calls] == [
+        f"Bearer {BEARER}",
+        "Bearer other-workspace-bearer",
+    ]
+    assert (refused.value.status, refused.value.error.code) == (401, "unauthorized")
+
+
+async def test_a_deploy_declaring_no_proxy_credentials_is_a_provider_outage(
     fake: Starlette, workspace_id: UUID
 ) -> None:
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=fake)) as http:
-        unfilled = ProxySessions(PROXY_URL, store, http)
-        with pytest.raises(SandboxProviderUnavailable, match="no proxy bearer"):
-            await unfilled.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+        undeclared = ProxySessions(
+            PROXY_URL, proxy_credentials((Manifest(name="beta", version="0"),)), http
+        )
+        with pytest.raises(SandboxProviderUnavailable, match="proxy_credentials"):
+            await undeclared.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
     assert fake.state.calls == []
 
 
