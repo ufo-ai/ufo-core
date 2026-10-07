@@ -4,7 +4,8 @@ A session is the authority one sandbox, terminal, or probe egresses under: the p
 by name, the token the proxy service signed for it, and the env a client exports in place of every
 secret. Core calls as the workspace, presenting the system token its credential slot
 `CLOUD_BEARER_SLOT` holds. A slot holding nothing, an unreachable service, and a 5xx raise
-`SandboxProviderUnavailable`, which parks a turn; a 4xx raises `ProxyRefused`."""
+`SandboxProviderUnavailable`, which parks a turn; a 4xx and a replay of a revoked session raise
+`ProxyRefused`."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ PROXY_SESSION_PAGE_LIMIT = 200
 PROXY_SESSION_CREATED_VERSION = 1
 IDEMPOTENCY_HEADER = "Idempotency-Key"
 SESSIONS_PATH = "/v1/sessions"
+SESSION_REVOKED_CODE = "session_revoked"
 CONVERSATION_LABEL = "conversation"
 AGENT_LABEL = "agent"
 MEMBER_LABEL = "member"
@@ -122,7 +124,8 @@ class ProxyError(BaseModel):
 
 
 class ProxyRefused(RuntimeError):
-    """A 4xx from the proxy service: `status` and the envelope's `error`."""
+    """A 4xx from the proxy service: `status` and the envelope's `error`. A replay of a revoked
+    session raises the `409 session_revoked` that every write to it answers."""
 
     def __init__(self, status: int, error: ProxyError) -> None:
         super().__init__(f"the proxy service answered {status} {error.code}: {error.message}")
@@ -148,10 +151,12 @@ class ProxySessions:
         ttl_s: int = PROXY_SESSION_TTL_SECONDS,
     ) -> SessionCreated:
         """Create the session `key` names, or answer the live one an earlier create under `key`
-        made. A replayed session that is revoked, or whose deadline is within one call's timeout,
-        gives way to the one a successor key `<key>:1`, `<key>:2`, … names, the first that is live
-        or new. A replayed session whose deadline is near is renewed for `ttl_s`, and one a patch
-        has moved since its create is sent `policy` again."""
+        made. A replayed session whose deadline is within one call's timeout gives way to the one a
+        successor key `<key>:1`, `<key>:2`, … names, the first that is live or new. A replayed
+        session that was revoked, under `key` or a successor, raises `ProxyRefused` with
+        `session_revoked`, so no reopen undoes a revoke. A replayed session whose deadline is near
+        is renewed for `ttl_s`, and one a patch has moved since its create is sent `policy`
+        again."""
         bearer = await self._bearer(workspace_id)
         body = CreateSession(ttl_s=ttl_s, labels=dict(labels), policy=policy)
         attempt, successor = key, 0
@@ -160,8 +165,11 @@ class ProxySessions:
             created = SessionCreated.model_validate_json(response.content)
             if response.status_code == httpx.codes.CREATED:
                 return created
+            if created.revoked_at is not None:
+                revoked = ProxyError(code=SESSION_REVOKED_CODE, message="The session was revoked.")
+                raise ProxyRefused(httpx.codes.CONFLICT, revoked)
             remaining = (created.expires_at - datetime.now(UTC)).total_seconds()
-            if created.revoked_at is None and remaining > PROXY_CALL_TIMEOUT_SECONDS:
+            if remaining > PROXY_CALL_TIMEOUT_SECONDS:
                 break
             successor += 1
             attempt = f"{key}:{successor}"

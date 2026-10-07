@@ -148,7 +148,7 @@ async def test_a_fresh_open_under_a_short_ttl_sends_one_post(
     assert created.expires_at - created.created_at == timedelta(seconds=SHORT_TTL_S)
 
 
-async def test_a_replay_of_an_ended_session_opens_its_successor(
+async def test_an_expired_replay_walks_to_its_successor_and_stops_at_a_revoked_one(
     fake: Starlette, sessions: ProxySessions, workspace_id: UUID
 ) -> None:
     first = await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
@@ -157,7 +157,8 @@ async def test_a_replay_of_an_ended_session_opens_its_successor(
     successor = await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
     replayed = await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
     await sessions.revoke(workspace_id, successor.id)
-    following = await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+    with pytest.raises(ProxyRefused) as refused:
+        await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
 
     assert _keyed(fake) == [
         ("POST", "/v1/sessions", KEY),
@@ -169,15 +170,37 @@ async def test_a_replay_of_an_ended_session_opens_its_successor(
         ("POST", f"/v1/sessions/{successor.id}/revoke", None),
         ("POST", "/v1/sessions", KEY),
         ("POST", "/v1/sessions", f"{KEY}:1"),
-        ("POST", "/v1/sessions", f"{KEY}:2"),
     ]
-    assert len({first.id, successor.id, following.id}) == 3
+    assert successor.id != first.id
     assert (replayed.id, replayed.token, replayed.env) == (
         successor.id,
         successor.token,
         successor.env,
     )
-    assert successor.version == following.version == 1
+    assert successor.version == 1
+    assert (refused.value.status, refused.value.error.code) == (409, "session_revoked")
+
+
+async def test_a_replay_of_a_revoked_session_is_refused(
+    fake: Starlette, sessions: ProxySessions, workspace_id: UUID
+) -> None:
+    first = await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+    await sessions.revoke(workspace_id, first.id)
+    with pytest.raises(ProxyRefused) as live:
+        await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+    fake.state.sessions[first.id]["expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
+    with pytest.raises(ProxyRefused) as expired:
+        await sessions.open(workspace_id, key=KEY, labels=LABELS, policy=POLICY)
+
+    assert _keyed(fake) == [
+        ("POST", "/v1/sessions", KEY),
+        ("POST", f"/v1/sessions/{first.id}/revoke", None),
+        ("POST", "/v1/sessions", KEY),
+        ("POST", "/v1/sessions", KEY),
+    ]
+    assert {(refused.value.status, refused.value.error.code) for refused in (live, expired)} == {
+        (409, "session_revoked")
+    }
 
 
 async def test_a_replay_within_one_call_of_its_deadline_opens_its_successor(
