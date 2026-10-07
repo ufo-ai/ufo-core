@@ -9,8 +9,14 @@ A row inserted with no service is filled by `ledger_fill_service`: `tokens`, `im
 go under `models`; `sandbox_tokens` becomes `(models, tokens)`, platform-paid, labelled `via: proxy`
 and its turn; `egress` becomes `(proxy, requests)` labelled with its turn. Postgres assigns the row
 before insert from one `plpgsql` function; SQLite cannot assign to `new`, so its trigger updates the
-row after insert. The rows the ledger already holds are filled by the `ledger_service_backfill` job,
-batch by batch, rather than by one statement here that would lock them all until this commits.
+row after insert. The rows the ledger already holds are filled by the `ledger_service_backfill` job.
+
+The ledger is written on every model call and egress request, so nothing here scans it under a lock
+those writes wait on: the transaction changes only its catalog (nullable columns, a constant
+default, CHECKs added `NOT VALID`, the trigger), and the CHECKs are validated and the indexes built
+`CONCURRENTLY` after it commits. `ledger_job_day` is altered and rewritten first because spend
+reads and the fold lock it before `ledger`. A failure after that commit leaves the revision
+unstamped with its columns in place, for a hand to finish.
 """
 
 import sqlalchemy as sa
@@ -30,6 +36,16 @@ LEDGER_SERVICE_DIMENSION = (
     "'images', 'videos')) or (service = 'proxy' and dimension in ('egress', 'requests', 'gib'))"
 )
 LEDGER_BYOK_DIMENSION = "not byok or dimension in ('tokens', 'requests', 'gib')"
+LEDGER_CHECKS = (
+    ("ledger_dimension", LEDGER_DIMENSION),
+    ("ledger_service_dimension", LEDGER_SERVICE_DIMENSION),
+    ("ledger_byok_dimension", LEDGER_BYOK_DIMENSION),
+)
+LEDGER_INDEXES = (
+    ("ledger_workspace_token", ["workspace_id", "token_id", "created_at"], "token_id is not null"),
+    ("ledger_workspace_session", ["workspace_id", "session_id"], "session_id is not null"),
+    ("ledger_unserviced", ["workspace_id"], "service is null"),
+)
 DOWNGRADE_LEDGER_DIMENSION = (
     "dimension in ('tokens', 'egress', 'sandbox_tokens', 'images', 'videos')"
 )
@@ -95,6 +111,13 @@ end
 
 
 def upgrade() -> None:
+    with op.batch_alter_table("ledger_job_day") as batch:
+        batch.add_column(sa.Column("service", sa.Text(), nullable=True))
+        batch.add_column(sa.Column("backend", sa.Text(), nullable=True))
+        batch.add_column(sa.Column("token_id", sa.Uuid(), nullable=True))
+        batch.add_column(sa.Column("byok", sa.Boolean(), nullable=True))
+    for statement in JOB_DAY_SERVICES:
+        op.execute(statement)
     with op.batch_alter_table("ledger") as batch:
         batch.add_column(sa.Column("service", sa.Text(), nullable=True))
         batch.add_column(sa.Column("backend", sa.Text(), nullable=True))
@@ -112,76 +135,41 @@ def upgrade() -> None:
         batch.add_column(sa.Column("attempt", sa.Text(), nullable=True))
         batch.drop_constraint("ledger_dimension", type_="check")
         batch.drop_constraint("ledger_byok_dimension", type_="check")
-        batch.create_check_constraint("ledger_dimension", LEDGER_DIMENSION)
-        batch.create_check_constraint("ledger_service_dimension", LEDGER_SERVICE_DIMENSION)
-        batch.create_check_constraint("ledger_byok_dimension", LEDGER_BYOK_DIMENSION)
-    op.create_index(
-        "ledger_workspace_token",
-        "ledger",
-        ["workspace_id", "token_id", "created_at"],
-        unique=False,
-        postgresql_where=sa.text("token_id is not null"),
-        sqlite_where=sa.text("token_id is not null"),
-    )
-    op.create_index(
-        "ledger_workspace_session",
-        "ledger",
-        ["workspace_id", "session_id"],
-        unique=False,
-        postgresql_where=sa.text("session_id is not null"),
-        sqlite_where=sa.text("session_id is not null"),
-    )
-    op.create_index(
-        "ledger_unserviced",
-        "ledger",
-        ["workspace_id"],
-        unique=False,
-        postgresql_where=sa.text("service is null"),
-        sqlite_where=sa.text("service is null"),
-    )
-    with op.batch_alter_table("ledger_job_day") as batch:
-        batch.add_column(sa.Column("service", sa.Text(), nullable=True))
-        batch.add_column(sa.Column("backend", sa.Text(), nullable=True))
-        batch.add_column(sa.Column("token_id", sa.Uuid(), nullable=True))
-        batch.add_column(sa.Column("byok", sa.Boolean(), nullable=True))
-    for statement in JOB_DAY_SERVICES:
-        op.execute(statement)
+        for name, condition in LEDGER_CHECKS:
+            batch.create_check_constraint(name, condition, postgresql_not_valid=True)
     if op.get_bind().dialect.name == "postgresql":
         op.execute(FILL_LEDGER_SERVICE)
         op.execute(POSTGRES_LEDGER_FILL_SERVICE)
+        with op.get_context().autocommit_block():
+            for name, _condition in LEDGER_CHECKS:
+                op.execute(f"alter table ledger validate constraint {name}")
+            for name, columns, where in LEDGER_INDEXES:
+                op.create_index(
+                    name,
+                    "ledger",
+                    columns,
+                    postgresql_where=sa.text(where),
+                    postgresql_concurrently=True,
+                )
         return
     op.execute(SQLITE_LEDGER_FILL_SERVICE.format(turn=SQLITE_TURN_TEXT))
+    for name, columns, where in LEDGER_INDEXES:
+        op.create_index(name, "ledger", columns, sqlite_where=sa.text(where))
 
 
 def downgrade() -> None:
-    if op.get_bind().dialect.name == "postgresql":
-        op.execute("drop trigger ledger_fill_service on ledger")
-        op.execute("drop function fill_ledger_service()")
-    else:
-        op.execute("drop trigger ledger_fill_service")
     with op.batch_alter_table("ledger_job_day") as batch:
         batch.drop_column("byok")
         batch.drop_column("token_id")
         batch.drop_column("backend")
         batch.drop_column("service")
-    op.drop_index(
-        "ledger_unserviced",
-        table_name="ledger",
-        postgresql_where=sa.text("service is null"),
-        sqlite_where=sa.text("service is null"),
-    )
-    op.drop_index(
-        "ledger_workspace_session",
-        table_name="ledger",
-        postgresql_where=sa.text("session_id is not null"),
-        sqlite_where=sa.text("session_id is not null"),
-    )
-    op.drop_index(
-        "ledger_workspace_token",
-        table_name="ledger",
-        postgresql_where=sa.text("token_id is not null"),
-        sqlite_where=sa.text("token_id is not null"),
-    )
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("drop trigger ledger_fill_service on ledger")
+        op.execute("drop function fill_ledger_service()")
+    else:
+        op.execute("drop trigger ledger_fill_service")
+    for name, _columns, _where in LEDGER_INDEXES:
+        op.drop_index(name, table_name="ledger")
     with op.batch_alter_table("ledger") as batch:
         batch.drop_constraint("ledger_byok_dimension", type_="check")
         batch.drop_constraint("ledger_service_dimension", type_="check")
