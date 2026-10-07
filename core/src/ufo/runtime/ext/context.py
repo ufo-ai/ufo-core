@@ -16,7 +16,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, 
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -126,6 +126,9 @@ from ufo.schema.records import (
     TurnStatus,
     Usage,
 )
+
+if TYPE_CHECKING:
+    from ufo.runtime.access.vault import SecretValue, VaultReads
 
 CORE_EXTENSION = "core"
 SPEND_REFUSAL_NOTICE_KEY = "spend_refusal_notice"
@@ -1351,6 +1354,8 @@ class ExtensionContext:
     artifact_token_secret: str = ""
     spend: SpendGates | None = None
     ledger: Ledger | None = None
+    vault_read_allowed: bool = False
+    vault: "VaultReads | None" = None
 
     @property
     def workspace_id(self) -> UUID:
@@ -1414,6 +1419,17 @@ class ExtensionContext:
         return shared_artifact_preview_link(
             self.artifact_token_secret, self.public_base_url, self.workspace_id, artifact
         )
+
+    async def resolve_secret(self, name: str, host: str) -> "SecretValue":
+        """The value the secret `name` takes on the wire to `host` for the bound workspace: a
+        credential slot, `connection:<id>`, or `ufo/models`, each released only on a host its
+        declaration admits and otherwise `SecretUnbound`. Only a manifest declaring `vault_read`
+        asks, and the deploy's vault answers."""
+        if not self.vault_read_allowed:
+            raise PermissionError("This extension cannot resolve secrets.")
+        if self.vault is None:
+            raise RuntimeError("resolve_secret requires the deploy's vault; none is wired.")
+        return await self.vault.resolve(self.workspace_id, name, host)
 
     async def scheduled_runs(
         self,
@@ -2769,6 +2785,8 @@ def context_for(
     workspace_credentials: Callable[[], Awaitable[frozenset[str]]] | None = None,
     spend: SpendGates | None = None,
     ledger: Ledger | None = None,
+    vault_read: bool = False,
+    vault: "VaultReads | None" = None,
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
@@ -2787,7 +2805,9 @@ def context_for(
     `search` is the deploy's selected web-search backend: the seam a handler grounding a turn
     before the model runs reads, built once at boot and reaching its key host-side. `spend` and
     `ledger` are the deploy's gates and ledger, which the metered model seam and a handler's own
-    metering and spend reads go through; a context wired with neither refuses both reads."""
+    metering and spend reads go through; a context wired with neither refuses both reads.
+    `vault_read` is the manifest's privileged capability to resolve a bound secret through the
+    deploy's `vault`, which a context without it never carries."""
     if model_resolver is not None and model_job is None:
         raise ValueError("a wired model_resolver needs the model_job its spend is attributed to")
     if model_resolver is not None and (spend is None or ledger is None):
@@ -2823,4 +2843,6 @@ def context_for(
         deploy_credentials=deploy_credentials,
         spend=spend,
         ledger=ledger,
+        vault_read_allowed=vault_read,
+        vault=vault if vault_read else None,
     )

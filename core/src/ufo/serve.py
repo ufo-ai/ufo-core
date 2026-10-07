@@ -94,7 +94,7 @@ from ufo.host.ext.loader import (
     workspace_slot_source,
 )
 from ufo.product import ProductCensus
-from ufo.proxy_serve import OWNER_DSN_ENV, model_bindings
+from ufo.proxy_serve import MODEL_KEY_ENVS, OWNER_DSN_ENV, model_bindings
 from ufo.runtime.access.connectors import (
     AuthProxy,
     ConnectorEntry,
@@ -113,6 +113,7 @@ from ufo.runtime.access.egress_rules import (
     derive_manifest_internet,
 )
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
+from ufo.runtime.access.vault import VaultReads
 from ufo.runtime.background_tasks import BackgroundTaskSweep
 from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger
 from ufo.runtime.billing.spend import NO_SPEND_GATES, GateDeploy, SpendGates, built_gates
@@ -575,7 +576,20 @@ def run(fleet: Fleet) -> None:
     page_feed = CorePageFeed(blob=blob)
     _launch_jobs(runtime, invoker_for, sync_driver, page_feed, probes)
     _mount_ext_routes(
-        app, manifests, credentials, index, embed, config.connect.public_base_url, spend, ledger
+        app,
+        manifests,
+        credentials,
+        index,
+        embed,
+        config.connect.public_base_url,
+        spend,
+        ledger,
+        vault=VaultReads(
+            credentials,
+            workspace_slot_source(manifests),
+            connector_clis(manifests),
+            MODEL_KEY_ENVS(config),
+        ),
     )
     _mount_shared_surfaces(
         app,
@@ -1078,6 +1092,8 @@ def _mount_ext_routes(
     public_base_url: str | None,
     spend: SpendGates,
     ledger: Ledger,
+    *,
+    vault: VaultReads | None = None,
 ) -> None:
     for manifest in manifests:
         if not manifest.routes:
@@ -1096,6 +1112,8 @@ def _mount_ext_routes(
             home_surface=home_surface(manifests),
             spend=spend,
             ledger=ledger,
+            vault_read=manifest.vault_read,
+            vault=vault,
         )
         for spec in manifest.routes:
 

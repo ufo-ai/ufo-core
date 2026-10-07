@@ -201,6 +201,7 @@ def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
         manifest = entry.load()()
         if (
             manifest.member_context_read
+            or manifest.vault_read
             or manifest.workspace_founded
             or manifest.deploy_routes
             or manifest.commands

@@ -648,6 +648,7 @@ Manifest registers (each optional):
 | `operator_rules` | Who operates the deploy's operator surfaces (first-party only): an `OperatorRuleSpec` names a rule and builds it over core's lookup (seated admin, a workspace's first-member domain, the oldest workspace a domain addresses). `[operator] rule` selects exactly one at boot — the built-in `seated_admin` unless named — and an unknown or twice-registered name fails boot. The rule admits a bearer to a grant of reach `own` or `fleet`, resolves `?ws=` under fleet reach, says which workspace is the operator's own (`is_operator_workspace`), and names the sign-in page a credential-less page GET is sent to and an operator API's 401 carries (`sign_in`, null without one). |
 | `member_added` | First-party only, and one per deploy: two fail boot. A handler `add_member` runs on its own transaction's connection, under the workspace lock, right after the member row is written, with a frozen `MemberAdded` (workspace, member, email, who added them, `notify`) and no `ExtensionContext`; a raise aborts the add. Its `notify_description`, `description`, and `notice(notify)` are the verb's only words about telling the member: with no listener `add_member` takes no `notify` and replies `<email> is <role>.` |
 | `spend_gates` | First-party only. A named `SpendGate` built once at boot from the deploy's public base and browser home: `admit`, `sustain`, `charged` run on the caller's connection with a frozen payload and a raise aborts that write; `admits_sql` filters the owner-scope candidate reads; `absent` is the per-round no-database fast path. See **Spend gates**. |
+| `vault_read` | First-party only. `ExtensionContext.resolve_secret(name, host)` answers the value of a secret a session binds by name — a workspace credential slot, `connection:<id>` (the connector broker's token for that connection's own account), or `ufo/models` (the deploy's key for a model provider's host) — only on a host its declaration admits: the slot's injection host, the connection's host or its CLI's git host, the provider's API host. Any other host, an unfilled slot, or another workspace's connection raises `SecretUnbound`. |
 
 A source parent catalog with no pages is readable only after its row has completed a sync. Before
 that, an incremental child waits and a snapshot child fails without sweeping.
@@ -658,8 +659,8 @@ first-party manifest that declares `member_context_read`; that context spans the
 conversations and artifacts across agents, and the pages disclosed to that member or to the
 workspace,
 `credentials.get(slot)` / `credentials.resolve(slot)` /
-`credentials.rotate(slot, expected, value)`, the selected `index`/`embed`
-backends,
+`credentials.rotate(slot, expected, value)`, `resolve_secret(name, host)` under `vault_read`, the
+selected `index`/`embed` backends,
 `pages` (the `PageFeed` replaying
 source-page changes under a resumable cursor), `transaction()` over the extension's own tables,
 `invoke(agent, input, conversation=...)`, metered `model.complete(...)`/`model.turn(...)`,

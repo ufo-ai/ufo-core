@@ -51,6 +51,7 @@ from ufo.harness.sandbox.session import (
 )
 from ufo.harness.sandbox.terminal import TerminalGone
 from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.vault import SecretValue, VaultReads
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.billing.accounting import (
     EGRESS_DIMENSION,
@@ -1367,6 +1368,41 @@ async def test_a_context_wired_with_no_spend_refuses_to_read_or_meter_it(db: Non
             model_job=JOB,
             ledger=UNGATED_LEDGER,
         )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_only_a_vault_read_context_wired_with_the_vault_resolves_a_secret(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    slot = CredentialSlot(
+        name="acme_api_key",
+        description="Acme's API key.",
+        injection=InjectionTarget(
+            host="api.acmekeys.com",
+            header="x-api-key",
+            sentinel="UFO_SENTINEL_ACME_API_KEY",
+            env="ACME_KEY",
+        ),
+    )
+    await store.put(workspace_id, slot.name, "sk-acme")
+    vault = VaultReads(store, WorkspaceSlots(deploy=(slot,)), {}, {})
+
+    with ws(workspace_id):
+        resolved = await context_for(
+            "core", frozenset(), vault_read=True, vault=vault
+        ).resolve_secret(slot.name, "api.acmekeys.com")
+        with pytest.raises(PermissionError, match="cannot resolve secrets"):
+            await context_for("core", frozenset(), vault=vault).resolve_secret(
+                slot.name, "api.acmekeys.com"
+            )
+        with pytest.raises(RuntimeError, match="vault; none is wired"):
+            await context_for("core", frozenset(), vault_read=True).resolve_secret(
+                slot.name, "api.acmekeys.com"
+            )
+
+    assert resolved == SecretValue(value="sk-acme", expires_at=None)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

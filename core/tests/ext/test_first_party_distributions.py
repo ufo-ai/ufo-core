@@ -22,6 +22,7 @@ def test_the_runtime_distribution_is_always_first_party(monkeypatch: pytest.Monk
     "privileged",
     [
         Manifest(name="acme", version="0", member_context_read=True),
+        Manifest(name="acme", version="0", vault_read=True),
         Manifest(
             name="acme",
             version="0",
@@ -33,7 +34,7 @@ def test_the_runtime_distribution_is_always_first_party(monkeypatch: pytest.Monk
             spend_gates=(SpendGateSpec(name="acme_gate", build=SampleGate),),
         ),
     ],
-    ids=["member_context_read", "census", "spend_gates"],
+    ids=["member_context_read", "vault_read", "census", "spend_gates"],
 )
 def test_a_privileged_manifest_is_refused_unless_its_distribution_is_named(
     monkeypatch: pytest.MonkeyPatch, privileged: Manifest
