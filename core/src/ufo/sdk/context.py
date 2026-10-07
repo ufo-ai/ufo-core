@@ -20,6 +20,12 @@ from ufo.harness.context import (
 from ufo.runtime.access.credentials import (
     CredentialSlotUnset as CredentialSlotUnset,
 )
+from ufo.runtime.access.vault import (
+    SecretUnbound as SecretUnbound,
+)
+from ufo.runtime.access.vault import (
+    SecretValue as SecretValue,
+)
 from ufo.runtime.agent_scope import (
     agent_current as agent_current,
 )

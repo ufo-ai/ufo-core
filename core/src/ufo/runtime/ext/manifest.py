@@ -888,7 +888,9 @@ class Manifest:
     when the first job that needs one raises. `deploy_bearer_env` names the deploy key whose
     value gates this extension's `deploy_routes`, so it is also one of `deploy_keys`.
     `operator_rules` registers who may operate the deploy's operator surfaces; boot builds only the
-    rule `[operator] rule` names, and only a first-party distribution may register one."""
+    rule `[operator] rule` names, and only a first-party distribution may register one.
+    `vault_read` lets the extension resolve a bound secret's value on the host its declaration
+    admits (`ExtensionContext.resolve_secret`); only a first-party distribution declares it."""
 
     name: str
     version: str
@@ -927,6 +929,7 @@ class Manifest:
     conversation_slots: tuple[ConversationSlotProvider, ...] = ()
     workspace_credentials: WorkspaceCredentials | None = None
     member_context_read: bool = False
+    vault_read: bool = False
     sandbox_internet: bool = False
     requires: tuple[str, ...] = field(default_factory=tuple)
     deploy_keys: tuple[str, ...] = field(default_factory=tuple)
