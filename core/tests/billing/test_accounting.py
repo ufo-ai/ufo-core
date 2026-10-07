@@ -27,11 +27,13 @@ from ufo.runtime.billing.accounting import (
     EGRESS_DIMENSION,
     GIB_DIMENSION,
     IMAGES_DIMENSION,
+    JOB_DAY_SETTLE_SECONDS,
     MEMBER_SCOPE,
     MODELS_SERVICE,
     PROXY_SERVICE,
     SANDBOX_TOKENS_ATTEMPT,
     SANDBOX_TOKENS_DIMENSION,
+    SERVICE_CLOCK_SKEW_SECONDS,
     SERVICE_OF_DIMENSION,
     SERVICE_UNITS,
     TOKENS_DIMENSION,
@@ -1044,6 +1046,35 @@ async def test_record_service_usage_refuses_a_malformed_record(
         workspace_id, _turn_id = await _seed_turn(connection)
         with pytest.raises(ValueError, match=refusal):
             await _record(UNGATED_LEDGER, connection, workspace_id, **changes)
+        written = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.ledger)
+                .where(tables.ledger.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert written == 0
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+@pytest.mark.parametrize(
+    "offset",
+    [
+        timedelta(seconds=-JOB_DAY_SETTLE_SECONDS - 60),
+        timedelta(seconds=SERVICE_CLOCK_SKEW_SECONDS + 60),
+        timedelta(days=-2),
+        timedelta(days=30),
+    ],
+)
+async def test_record_service_usage_refuses_a_stale_or_future_dated_record(
+    db: None, offset: timedelta
+) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, _turn_id = await _seed_turn(connection)
+        with pytest.raises(ValueError, match="occurred at most 900 seconds ago"):
+            await _record(
+                UNGATED_LEDGER, connection, workspace_id, occurred_at=datetime.now(UTC) + offset
+            )
         written = (
             await connection.execute(
                 sa.select(sa.func.count())

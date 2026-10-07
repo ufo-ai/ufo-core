@@ -1190,7 +1190,8 @@ An extension books what a service metered through `ExtensionContext.record_usage
 backend, amount, token, session, labels, resource, attempt, `occurred_at`, `byok`, price and rate
 card digest, and for `tokens` the model and its six classes. One row is written and charged per
 `(service, resource or session, unit, attempt)`; a replay with other content raises
-`TurnUsageConflict`. The row is booked at `occurred_at`. Labels are at most 16 keys
+`TurnUsageConflict`. The row is booked at `occurred_at`, which falls at most 900 seconds past, on a
+day the fold has not closed, and at most 60 seconds ahead. Labels are at most 16 keys
 (`[a-z0-9_.-]`) with values of at most 64 characters; a `turn` label naming a turn of the workspace
 binds the row to that turn, so member and agent caps and attribution count it. Model calls the
 sandbox makes through the egress proxy are `(models, tokens)` rows labelled `via: proxy` on their
