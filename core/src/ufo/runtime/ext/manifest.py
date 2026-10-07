@@ -273,6 +273,23 @@ class CarrierSpec:
     provider's published template references."""
 
 
+class ProxyCredentials(Protocol):
+    """The source of the bearer the runtime presents to the proxy service's session API, answered
+    for the bound workspace."""
+
+    async def bearer(self) -> str: ...
+
+
+@dataclass(frozen=True)
+class ProxyCredentialSpec:
+    """Where the runtime's proxy bearer comes from. `build` makes the source once at boot from the
+    declaring extension's workspace-scoped context, and the session client asks it for the bound
+    workspace's bearer on every call and keeps nothing, so the extension decides where the bearer
+    lives and when it is minted."""
+
+    build: Callable[[ExtensionContext], ProxyCredentials]
+
+
 @dataclass(frozen=True)
 class SourceProvider:
     """One content-source backend an extension registers: the `backend` name that keys its `source`
@@ -890,7 +907,9 @@ class Manifest:
     `operator_rules` registers who may operate the deploy's operator surfaces; boot builds only the
     rule `[operator] rule` names, and only a first-party distribution may register one.
     `vault_read` lets the extension resolve a bound secret's value on the host its declaration
-    admits (`ExtensionContext.resolve_secret`); only a first-party distribution declares it."""
+    admits (`ExtensionContext.resolve_secret`), and `proxy_credentials` answers the bearer the
+    runtime presents to the proxy service; only a first-party distribution declares either, and
+    one extension at most declares `proxy_credentials`."""
 
     name: str
     version: str
@@ -928,6 +947,7 @@ class Manifest:
     memory_search: tuple[MemorySearchProviderSpec, ...] = ()
     conversation_slots: tuple[ConversationSlotProvider, ...] = ()
     workspace_credentials: WorkspaceCredentials | None = None
+    proxy_credentials: ProxyCredentialSpec | None = None
     member_context_read: bool = False
     vault_read: bool = False
     sandbox_internet: bool = False
