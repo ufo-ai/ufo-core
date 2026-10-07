@@ -82,7 +82,13 @@ class PerAgentRules:
         """The policy a session acting in `scope` runs under, naming every secret and carrying no
         value. Runs under the caller's `ws()` and `agent()`. Only a running scope binds the deploy's
         model key and the routes core serves; a public host beyond the named ones needs both the
-        deploy and the agent to allow the internet."""
+        deploy and the agent to allow the internet.
+
+        One `(host, header)` carries one secret: the proxy service refuses a whole policy that binds
+        two on one pair, so one clash would refuse every session the workspace opens. The deploy's
+        model key claims its pair first, then the credential slots in the order `WorkspaceSlots.all`
+        lists them, then the acting member's CLI accounts; a later bind on a claimed pair is
+        withheld and logged."""
         credential_binds = (
             await derive_credential_binds(self.slots, scope.workspace_id, self.credentials)
             if self.credentials is not None and self.slots
@@ -91,16 +97,31 @@ class PerAgentRules:
         granted = await self.grants.active_grants() if self.grants is not None else ()
         cli_binds = derive_cli_binds(granted, self.clis, scope.member_id)
         grant_hosts = derive_grant_hosts(granted, self.transfer_hosts, scope.member_id)
-        binds = (*(self.binds if scope.running else ()), *credential_binds, *cli_binds)
         return SessionPolicy(
             internet=scope.internet_access_allowed and self.internet,
             hosts=policy_hosts(
                 *(entry.host for entry in (*self.hosts, *grant_hosts)),
                 *(bind.host for bind in (*credential_binds, *cli_binds)),
             ),
-            bind=tuple(sorted(binds, key=lambda bind: (bind.host, bind.header, bind.env))),
+            bind=self._claimed(
+                (*(self.binds if scope.running else ()), *credential_binds, *cli_binds)
+            ),
             routes=self._routes(scope),
         )
+
+    def _claimed(self, binds: tuple[Bind, ...]) -> tuple[Bind, ...]:
+        claimed: dict[tuple[str, str], Bind] = {}
+        for bind in binds:
+            holder = claimed.setdefault((bind.host, bind.header), bind)
+            if holder != bind:
+                warn(
+                    "egress.bind_withheld",
+                    host=bind.host,
+                    header=bind.header,
+                    withheld=bind.secret,
+                    kept=holder.secret,
+                )
+        return tuple(sorted(claimed.values(), key=lambda bind: (bind.host, bind.header)))
 
     def _routes(self, scope: PolicyScope) -> tuple[Route, ...]:
         if scope.run_token is None or not scope.running or self.bridge_upstream is None:
