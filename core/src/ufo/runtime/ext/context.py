@@ -15,7 +15,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -52,9 +52,13 @@ from ufo.runtime.billing.accounting import (
     SpendRollup,
     SpendTotals,
     UsageExport,
+    UsageLine,
     ack_usage_exports,
     mint_usage_exports,
     read_pending_usage_exports,
+    session_spend,
+    token_spend,
+    usage_lines,
 )
 from ufo.runtime.billing.spend import (
     ALLOW,
@@ -1356,16 +1360,26 @@ class ExtensionContext:
     def workspace_id(self) -> UUID:
         return self.store.workspace_id
 
-    async def spend_admitted(self, model: str | None = None) -> SpendDecision:
+    async def spend_admitted(
+        self, model: str | None = None, *, platform_paid: bool = False
+    ) -> SpendDecision:
         """What the spend gates would decide for the bound workspace now, read at the `status`
         moment — whether the workspace may spend, as a handler reporting it states. Caps are not
         asked: what lifts a gate does not lift a cap, and a cap holds the work it bounds at
         admission and at each round. `model` names the model the work would run on; with none, the
-        workspace's own key for any model of the deploy counts as paying its way."""
+        workspace's own key for any model of the deploy counts as paying its way. `platform_paid`
+        names work the platform pays for whatever key the workspace stores, which no own key
+        exempts."""
         if self.spend is None:
             raise RuntimeError("spend_admitted requires the deploy's spend gates; none are wired")
         async with workspace_tx() as connection:
-            return await self.spend.admit(connection, STATUS_MOMENT, self.workspace_id, model=model)
+            return await self.spend.admit(
+                connection,
+                STATUS_MOMENT,
+                self.workspace_id,
+                model=model,
+                self_funded=False if platform_paid else None,
+            )
 
     async def meter_tokens(
         self, call_id: UUID, model: str, usage: Usage, price: ModelPrice, *, byok: bool
@@ -1840,6 +1854,46 @@ class ExtensionContext:
         service. It names no member or agent, so it is not gated on `member_context_read`."""
         async with workspace_tx() as connection:
             return await SpendRollup(self.workspace_id).read_totals(connection, window_seconds)
+
+    async def usage_lines(
+        self,
+        since: datetime,
+        until: datetime,
+        *,
+        keys: frozenset[str],
+        label_keys: frozenset[str] = frozenset(),
+        backend: str | None = None,
+        byok: bool | None = None,
+        labels: Mapping[str, str] = {},
+    ) -> tuple[UsageLine, ...]:
+        """The bound workspace's usage in `[since, until)` per UTC day, grouped by `keys`
+        (`USAGE_KEYS`) and by the labels `label_keys` names, filtered to `backend`, `byok` and the
+        label values `labels` names. A read grouped or filtered by a label covers turn rows and the
+        days the nightly fold has not closed."""
+        async with workspace_tx() as connection:
+            return await usage_lines(
+                connection,
+                self.workspace_id,
+                since,
+                until,
+                keys=keys,
+                label_keys=label_keys,
+                backend=backend,
+                byok=byok,
+                labels=labels,
+            )
+
+    async def token_spend(self, token_id: UUID, window_seconds: int) -> int:
+        """What the platform paid for a token's records in the bound workspace over the last
+        `window_seconds`, in micro-USD; a day the nightly fold closed counts whole."""
+        since = datetime.now(UTC) - timedelta(seconds=window_seconds)
+        async with workspace_tx() as connection:
+            return await token_spend(connection, self.workspace_id, token_id, since)
+
+    async def session_spend(self, session_id: UUID) -> int:
+        """What the platform paid for a session's records in the bound workspace, in micro-USD."""
+        async with workspace_tx() as connection:
+            return await session_spend(connection, self.workspace_id, session_id)
 
     async def pending_usage_exports(self, floor: datetime, limit: int) -> tuple[UsageExport, ...]:
         """This extension's settled, unacknowledged usage deltas, at most `limit`, minting new

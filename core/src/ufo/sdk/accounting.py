@@ -2,7 +2,8 @@
 an extension handler reads its totals, naming no member or agent (`ExtensionContext.spend_rollup`),
 from these accounting value objects — the same sums `ufoctl spend` prints. An extension books a
 service record (`ExtensionContext.record_usage`) under the services, units and label bounds named
-here; a replay whose content changed raises `TurnUsageConflict`.
+here; a replay whose content changed raises `TurnUsageConflict`. It reads usage back as
+`UsageLine`s grouped by `USAGE_KEYS` and labels (`ExtensionContext.usage_lines`).
 
 `ufo.sdk` is a package of thin re-export modules with an empty `__init__.py`, so the public
 surface lives in named modules like this one."""
@@ -35,6 +36,9 @@ from ufo.runtime.billing.accounting import (
     TURN_LABEL as TURN_LABEL,
 )
 from ufo.runtime.billing.accounting import (
+    USAGE_KEYS as USAGE_KEYS,
+)
+from ufo.runtime.billing.accounting import (
     DimensionTotal as DimensionTotal,
 )
 from ufo.runtime.billing.accounting import (
@@ -54,6 +58,9 @@ from ufo.runtime.billing.accounting import (
 )
 from ufo.runtime.billing.accounting import (
     UsageExport as UsageExport,
+)
+from ufo.runtime.billing.accounting import (
+    UsageLine as UsageLine,
 )
 from ufo.runtime.billing.accounting import (
     metered_workspaces as metered_workspaces,
