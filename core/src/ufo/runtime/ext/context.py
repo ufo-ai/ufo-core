@@ -352,10 +352,15 @@ class CredentialAccess:
     slot authored that declaration itself, so gating its own row behind a manifest name it cannot
     write would leave the value reachable by the proxy and the sandbox and by nothing in-process.
     That gap is what forces one fixed slot to hold a map of many secrets, and a map cannot carry a
-    row's owner."""
+    row's owner.
+
+    `minted` names the declared slots the extension mints, the only ones `put` writes: a value the
+    extension creates for itself needs no member to hand it over, and code never overwrites a slot
+    a member fills."""
 
     declared: frozenset[str]
     resolved: Callable[[], Awaitable[frozenset[str]]] | None = None
+    minted: frozenset[str] = frozenset()
 
     @property
     def workspace_id(self) -> UUID:
@@ -391,6 +396,13 @@ class CredentialAccess:
         than asking about one slot it already has in hand. Slots this extension neither declares nor
         resolves never appear, so this discloses no more than `stored` would."""
         return await ws_current().stored_credential_slots() & await self._gated()
+
+    async def put(self, slot: str, plaintext: str) -> None:
+        """Write the bound workspace's value for a slot this extension mints, whether or not one is
+        stored. Any other slot raises, and so does an empty value."""
+        if slot not in self.minted:
+            raise UndeclaredCredentialSlot(slot)
+        await ws_current().put_credential(slot, plaintext)
 
     async def rotate(self, slot: str, expected: str, plaintext: str) -> bool:
         """Compare-and-swap an existing declared slot after an external provider rotates it. This
@@ -2868,16 +2880,17 @@ def context_for(
     home_surface: str | None = None,
     deploy_credentials: DeployCredentials = NO_DEPLOY_CREDENTIALS,
     workspace_credentials: Callable[[], Awaitable[frozenset[str]]] | None = None,
+    minted: frozenset[str] = frozenset(),
     spend: SpendGates | None = None,
     ledger: Ledger | None = None,
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
-    workspace is bound when a handler runs. `declared` gates credential slots and `surfaces` gates
-    installation registration; a `model_resolver` wires the metered model seam, keyed and billed
-    to that same workspace, and `model_job` is the job key that seam's spend and latency are
-    attributed to — required wherever a resolver is wired, so a metered call can never reach the
-    `ufo.model_*` series unattributed.
+    workspace is bound when a handler runs. `declared` gates credential slots, `minted` names the
+    declared ones the handler writes itself, and `surfaces` gates installation registration; a
+    `model_resolver` wires the metered model seam, keyed and billed to that same workspace, and
+    `model_job` is the job key that seam's spend and latency are attributed to — required wherever
+    a resolver is wired, so a metered call can never reach the `ufo.model_*` series unattributed.
     `public_base_url` is the deploy's externally reachable base, which a
     kind listing rows a member opens needs and cannot reach any other way, and
     `artifact_token_secret` is what a link into the artifact namespace is signed with — a kind whose
@@ -2895,7 +2908,9 @@ def context_for(
         raise ValueError("a wired model_resolver needs the deploy's spend gates and ledger")
     return ExtensionContext(
         store=ScopedStore(extension=extension),
-        credentials=CredentialAccess(declared=declared, resolved=workspace_credentials),
+        credentials=CredentialAccess(
+            declared=declared, resolved=workspace_credentials, minted=minted
+        ),
         audience=audience,
         installations=SurfaceInstallationAccess(declared=surfaces, addressed=addressed_surfaces),
         index=index,
