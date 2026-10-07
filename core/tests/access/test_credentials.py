@@ -70,6 +70,7 @@ from ufo.schema import tables
 DATADOG_HOST = "api.datadoghq.com"
 US5_HOST = "api.us5.datadoghq.com"
 PERPLEXITY_HOST = "api.perplexity.ai"
+LOCK_OBSERVE_TIMEOUT_SECONDS = 5
 
 
 DATADOG_SITES = HostChoice(
@@ -164,7 +165,6 @@ async def test_rotate_updates_only_the_expected_existing_value(db: None) -> None
         await store.rotate(workspace_id, "oauth", "new", "")
 
 
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_writes_bump_the_egress_rules_generation(db: None) -> None:
     """The proxy's rule cache pins this counter, so a filled, rotated, or cleared key re-derives
     its injection rules at the next CONNECT instead of waiting out the cache TTL."""
@@ -184,7 +184,9 @@ async def test_credential_writes_bump_the_egress_rules_generation(db: None) -> N
     start = await generation()
     await store.put(workspace_id, "sample_api", "one")
     filled = await generation()
-    assert await store.rotate(workspace_id, "sample_api", "one", "two")
+    await store.put(workspace_id, "sample_api", "two")
+    refilled = await generation()
+    assert await store.rotate(workspace_id, "sample_api", "two", "three")
     rotated = await generation()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -195,7 +197,7 @@ async def test_credential_writes_bump_the_egress_rules_generation(db: None) -> N
         )
     cleared = await generation()
     assert start == 0
-    assert start < filled < rotated < cleared
+    assert start < filled < refilled < rotated < cleared
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -246,6 +248,47 @@ async def test_an_extension_puts_only_the_slots_it_mints(db: None) -> None:
     assert await store.get(workspace_id, "sample_minted") == "reissued"
     with pytest.raises(CredentialSlotUnset):
         await store.get(workspace_id, "sample_api")
+
+
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
+async def test_a_mint_meeting_another_first_mint_in_flight_replaces_it(db: None) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    access = CredentialAccess(
+        declared=frozenset({"sample_minted"}), minted=frozenset({"sample_minted"})
+    )
+    with ws(workspace_id):
+        async with workspace_tx() as other_pod:
+            holder = (await other_pod.execute(sa.text("select pg_backend_pid()"))).scalar_one()
+            await other_pod.execute(
+                sa.insert(tables.credential).values(
+                    workspace_id=workspace_id,
+                    slot="sample_minted",
+                    ciphertext=store.fernet.encrypt(b"first-mint"),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            mint = asyncio.create_task(access.put("sample_minted", "second-mint"))
+            async with asyncio.timeout(LOCK_OBSERVE_TIMEOUT_SECONDS):
+                while True:
+                    async with workspace_tx() as observer:
+                        blocked = (
+                            await observer.execute(
+                                sa.text(
+                                    "select exists ("
+                                    "select 1 from pg_stat_activity "
+                                    "where cast(:holder as integer) = any(pg_blocking_pids(pid))"
+                                    ")"
+                                ),
+                                {"holder": holder},
+                            )
+                        ).scalar_one()
+                    if blocked:
+                        break
+        await mint
+    assert await store.get(workspace_id, "sample_minted") == "second-mint"
 
 
 def test_a_slot_its_extension_mints_is_no_members_to_fill() -> None:
