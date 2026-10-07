@@ -861,7 +861,8 @@ class UsageExport:
     """One unshipped usage delta for an external billing consumer: the ledger row's growth between
     `from_amount` and the amount at mint, frozen so a re-send after an unacknowledged delivery is
     byte-identical under the same `(ledger_id, from_amount)` dedup key — the consumer's
-    at-least-once retry can therefore never double- or under-bill."""
+    at-least-once retry can therefore never double- or under-bill. A service row also names its
+    backend, token, session and labels."""
 
     ledger_id: UUID
     from_amount: int
@@ -873,6 +874,11 @@ class UsageExport:
     turn_id: UUID | None
     byok: bool
     occurred_at: datetime
+    service: str
+    backend: str | None
+    token_id: UUID | None
+    session_id: UUID | None
+    labels: Mapping[str, str]
 
 
 async def mint_usage_exports(
@@ -889,10 +895,11 @@ async def mint_usage_exports(
     runs, so any growth mints a further intent from the prior high-water mark. An `images`,
     `videos` or `sandbox_tokens` row accumulates until its turn is terminal, and
     `EXPORT_SETTLE_MARGIN_SECONDS` past `turn.updated_at` only bounds how often a late write costs
-    an extra top-up intent. No growth is lost to timing.
-    Request counts (zero-priced) never export. Usage settling before `floor` never mints — the
-    consumer's backfill bound. Idempotent: an intent's `(consumer, ledger_id,
-    from_amount)` key makes concurrent or replayed mints collapse onto one frozen row.
+    an extra top-up intent. No growth is lost to timing. A priced `proxy` row is written once and
+    never grows, so it mints at once. Request counts (zero-priced) never export. Usage settling
+    before `floor` never mints — the consumer's backfill bound. Idempotent: an intent's
+    `(consumer, ledger_id, from_amount)` key makes concurrent or replayed mints collapse onto one
+    frozen row.
 
     Each intent copies the `byok` value the ledger writer froze when the provider attempt began.
     Credential changes after that attempt cannot change who paid for it."""
@@ -917,6 +924,7 @@ async def mint_usage_exports(
                 tables.ledger.c.workspace_id,
                 tables.ledger.c.amount,
                 tables.ledger.c.priced_micro_usd,
+                tables.ledger.c.service,
                 tables.ledger.c.dimension,
                 tables.ledger.c.model,
                 tables.ledger.c.byok,
@@ -946,6 +954,9 @@ async def mint_usage_exports(
                     & tables.turn.c.terminal.isnot(None)
                     & (tables.turn.c.updated_at <= settle_cutoff)
                     & (tables.turn.c.updated_at >= floor),
+                    (tables.ledger.c.service == PROXY_SERVICE)
+                    & (tables.ledger.c.priced_micro_usd > 0)
+                    & (tables.ledger.c.created_at >= floor),
                 ),
             )
             .group_by(
@@ -953,6 +964,7 @@ async def mint_usage_exports(
                 tables.ledger.c.workspace_id,
                 tables.ledger.c.amount,
                 tables.ledger.c.priced_micro_usd,
+                tables.ledger.c.service,
                 tables.ledger.c.dimension,
                 tables.ledger.c.model,
                 tables.ledger.c.byok,
@@ -965,6 +977,16 @@ async def mint_usage_exports(
     ).all()
     insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
     for row in growth:
+        if row.service == PROXY_SERVICE:
+            byok = bool(row.byok)
+        elif row.dimension != TOKENS_DIMENSION:
+            byok = False
+        elif row.token_classes_complete and row.byok is not None:
+            byok = row.byok
+        elif row.turn_byok is not None:
+            byok = row.turn_byok
+        else:
+            byok = key_slot_for(row.model) in stored_slots
         await connection.execute(
             insert(tables.ledger_export)
             .values(
@@ -975,19 +997,7 @@ async def mint_usage_exports(
                 to_amount=row.amount,
                 from_micro_usd=row.from_micro_usd,
                 to_micro_usd=row.priced_micro_usd,
-                byok=(
-                    False
-                    if row.dimension != TOKENS_DIMENSION
-                    else (
-                        row.byok
-                        if row.token_classes_complete and row.byok is not None
-                        else (
-                            row.turn_byok
-                            if row.turn_byok is not None
-                            else (key_slot_for(row.model) in stored_slots)
-                        )
-                    )
-                ),
+                byok=byok,
                 occurred_at=row.updated_at,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -1007,7 +1017,8 @@ async def read_pending_usage_exports(
 ) -> tuple[UsageExport, ...]:
     """The consumer's minted, unacknowledged deltas in mint order, each joined to its ledger row's
     immutable descriptive fields. A delivery the consumer never saw acknowledged stays pending and
-    re-reads identically — the frozen intent, never a recomputation."""
+    re-reads identically — the frozen intent, never a recomputation. A row the service backfill
+    has not reached yet reads the service its dimension belongs to."""
     export = tables.ledger_export
     rows = (
         await connection.execute(
@@ -1016,10 +1027,15 @@ async def read_pending_usage_exports(
                 export.c.from_amount,
                 (export.c.to_amount - export.c.from_amount).label("amount"),
                 (export.c.to_micro_usd - export.c.from_micro_usd).label("priced_micro_usd"),
+                tables.ledger.c.service,
                 tables.ledger.c.dimension,
                 tables.ledger.c.model,
                 tables.ledger.c.price_digest,
                 tables.ledger.c.turn_id,
+                tables.ledger.c.backend,
+                tables.ledger.c.token_id,
+                tables.ledger.c.session_id,
+                tables.ledger.c.labels,
                 export.c.byok,
                 export.c.occurred_at,
             )
@@ -1045,6 +1061,11 @@ async def read_pending_usage_exports(
             turn_id=row.turn_id,
             byok=row.byok,
             occurred_at=row.occurred_at,
+            service=row.service or SERVICE_OF_DIMENSION[row.dimension],
+            backend=row.backend,
+            token_id=row.token_id,
+            session_id=row.session_id,
+            labels=row.labels,
         )
         for row in rows
     )
@@ -1271,21 +1292,9 @@ class UsageDetails:
 class _LedgerRollup:
     total_micro_usd: int
     by_dimension: tuple[DimensionTotal, ...]
+    by_service: tuple[ServiceTotal, ...]
     by_price_digest: tuple[PriceDigestTotal, ...]
     usage: UsageDetails
-
-    @property
-    def by_service(self) -> tuple[ServiceTotal, ...]:
-        totals: dict[str, int] = {}
-        for line in self.by_dimension:
-            service = SERVICE_OF_DIMENSION[line.dimension]
-            totals[service] = totals.get(service, 0) + line.priced_micro_usd
-        return tuple(
-            sorted(
-                (ServiceTotal(service, priced) for service, priced in totals.items()),
-                key=lambda total: (-total.priced_micro_usd, total.service),
-            )
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1420,7 +1429,7 @@ class RolledDays:
     and a day in neither vanishes."""
 
     skip: sa.ColumnElement[bool]
-    rows: sa.Select[tuple[str, bool, object, str, str, str, str, int, int, datetime]]
+    rows: sa.Select[tuple[str, bool, object, str, str, str, str, str, int, int, datetime]]
     totals: sa.Select[tuple[int, int, int, datetime]]
 
 
@@ -1465,6 +1474,7 @@ def rolled_days(
         ).label("period"),
         token.label("token"),
         sa.case((selected, folded.c.day)).label("day"),
+        sa.case((selected, folded.c.service)).label("service"),
         sa.case((selected, folded.c.dimension)).label("dimension"),
         sa.case((selected & token, folded.c.model)).label("model"),
         sa.case((selected, folded.c.price_digest)).label("price_digest"),
@@ -1488,17 +1498,19 @@ def rolled_days(
 
 @dataclass(frozen=True)
 class JobDayRollup:
-    """Fold a workspace's turn-less ledger rows — a background job's model spend, which reaches no
-    member, agent or conversation — into one row per closed day, dimension, model and price digest.
+    """Fold a workspace's turn-less ledger rows — a background job's model spend and a service's
+    records, which reach no member, agent or conversation — into one row per closed day and key:
+    service, dimension, backend, token, `byok`, model and price digest, so a usage read by any of
+    them answers a folded day. Labels and sessions stay on the ledger rows alone.
 
     Those rows are 90% of a busy workspace's ledger — 637,767 of the 730,257 in a 30-day window on
     2026-09-15 — and every usage read scanned all of them to reach totals no reader needs per
     call.
 
-    A closed day is rewritten whole rather than merged into. `Ledger.record_workspace_usage` inserts
-    a turn-less row and never updates it, so recomputing a day always yields the same sums and the
-    delete-then-insert is idempotent under replay. Today stays in the ledger, because it is still
-    being written."""
+    A closed day is rewritten whole rather than merged into. `Ledger.record_workspace_usage` and
+    `Ledger.record_service_usage` insert a turn-less row and never update it, so recomputing a day
+    always yields the same sums and the delete-then-insert is idempotent under replay. Today stays
+    in the ledger, because it is still being written."""
 
     workspace_id: UUID
 
@@ -1531,11 +1543,18 @@ class JobDayRollup:
             )
         )
         start = _day_start(day)
+        key = (
+            tables.ledger.c.service,
+            tables.ledger.c.dimension,
+            tables.ledger.c.backend,
+            tables.ledger.c.token_id,
+            tables.ledger.c.byok,
+            tables.ledger.c.model,
+            tables.ledger.c.price_digest,
+        )
         totals = await connection.execute(
             sa.select(
-                tables.ledger.c.dimension,
-                tables.ledger.c.model,
-                tables.ledger.c.price_digest,
+                *key,
                 sa.func.sum(tables.ledger.c.amount).label("amount"),
                 sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
                 sa.func.min(tables.ledger.c.created_at).label("first_used_at"),
@@ -1546,9 +1565,7 @@ class JobDayRollup:
                 tables.ledger.c.created_at >= start,
                 tables.ledger.c.created_at < start + timedelta(days=1),
             )
-            .group_by(
-                tables.ledger.c.dimension, tables.ledger.c.model, tables.ledger.c.price_digest
-            )
+            .group_by(*key)
         )
         for row in totals:
             await connection.execute(
@@ -1556,7 +1573,11 @@ class JobDayRollup:
                     id=uuid4(),
                     workspace_id=self.workspace_id,
                     day=day,
+                    service=row.service,
                     dimension=row.dimension,
+                    backend=row.backend,
+                    token_id=row.token_id,
+                    byok=row.byok,
                     model=row.model,
                     price_digest=row.price_digest,
                     amount=int(row.amount),
@@ -1730,6 +1751,7 @@ async def _ledger_rollup(
     ).label("period")
     token = tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS).label("token")
     day = sa.case((selected, sa.func.date(created_at))).label("day")
+    service = sa.case((selected, tables.ledger.c.service)).label("service")
     dimension = sa.case((selected, tables.ledger.c.dimension)).label("dimension")
     model = sa.case((selected & token, tables.ledger.c.model)).label("model")
     price_digest = sa.case((selected, tables.ledger.c.price_digest)).label("price_digest")
@@ -1753,6 +1775,7 @@ async def _ledger_rollup(
             period,
             token,
             day,
+            service,
             dimension,
             model,
             price_digest,
@@ -1763,7 +1786,7 @@ async def _ledger_rollup(
         )
         .select_from(source)
         .where(detail_scope)
-        .group_by(period, token, day, dimension, model, price_digest, execution)
+        .group_by(period, token, day, service, dimension, model, price_digest, execution)
     )
     rows = await connection.execute(detail if rolled is None else detail.union_all(rolled.rows))
     all_time_tokens = all_time.tokens
@@ -1775,6 +1798,7 @@ async def _ledger_rollup(
     selected_cost = 0
     previous_tokens = 0
     dimensions: dict[str, tuple[int, int]] = {}
+    services: dict[str, int] = {}
     digests: dict[str, int] = {}
     daily_totals: dict[date, tuple[int, int, int]] = {}
     executions: dict[str, tuple[int, int]] = {}
@@ -1803,6 +1827,8 @@ async def _ledger_rollup(
         if row.dimension is not None:
             prior_amount, prior_priced = dimensions.get(row.dimension, (0, 0))
             dimensions[row.dimension] = prior_amount + amount, prior_priced + priced
+            serviced = row.service or SERVICE_OF_DIMENSION[row.dimension]
+            services[serviced] = services.get(serviced, 0) + priced
         if row.price_digest is not None:
             digests[row.price_digest] = digests.get(row.price_digest, 0) + priced
         current_day = date.fromisoformat(str(row.day))
@@ -1833,6 +1859,12 @@ async def _ledger_rollup(
         by_dimension=tuple(
             DimensionTotal(name, amount, priced)
             for name, (amount, priced) in sorted(dimensions.items())
+        ),
+        by_service=tuple(
+            sorted(
+                (ServiceTotal(name, priced) for name, priced in services.items()),
+                key=lambda total: (-total.priced_micro_usd, total.service),
+            )
         ),
         by_price_digest=tuple(
             PriceDigestTotal(digest, priced) for digest, priced in sorted(digests.items())
@@ -2104,3 +2136,201 @@ class SpendRollup:
             caps,
             ledger.usage,
         )
+
+
+USAGE_KEYS = ("service", "dimension", "backend", "byok", "token")
+"""The keys a usage read groups by; label keys group it further."""
+
+
+@dataclass(frozen=True, slots=True)
+class UsageLine:
+    """What a workspace booked on one UTC day under one value of each key its read groups by. A key
+    the read does not group by reads empty: `""`, None, False or `{}`."""
+
+    day: date
+    service: str
+    dimension: str
+    backend: str | None
+    byok: bool
+    token_id: UUID | None
+    labels: Mapping[str, str]
+    amount: int
+    priced_micro_usd: int
+
+
+def _usage_select(
+    table: sa.Table,
+    day: sa.ColumnElement[object],
+    keys: frozenset[str],
+    backend: str | None,
+    byok: bool | None,
+) -> sa.Select[tuple[object, ...]]:
+    paid_by_key = sa.func.coalesce(table.c.byok, sa.false())
+    columns: Mapping[str, sa.ColumnElement[object]] = {
+        "service": sa.func.coalesce(
+            table.c.service, sa.case(SERVICE_OF_DIMENSION, value=table.c.dimension)
+        ),
+        "dimension": table.c.dimension,
+        "backend": table.c.backend,
+        "byok": paid_by_key,
+        "token": table.c.token_id,
+    }
+    grouped = (day.label("day"), *(columns[key].label(key) for key in USAGE_KEYS if key in keys))
+    query = sa.select(
+        *grouped,
+        sa.func.sum(table.c.amount).label("amount"),
+        sa.func.sum(table.c.priced_micro_usd).label("priced"),
+    ).group_by(*grouped)
+    if backend is not None:
+        query = query.where(table.c.backend == backend)
+    if byok is not None:
+        query = query.where(paid_by_key == byok)
+    return query
+
+
+async def usage_lines(
+    connection: AsyncConnection,
+    workspace_id: UUID,
+    since: datetime,
+    until: datetime,
+    *,
+    keys: frozenset[str],
+    label_keys: frozenset[str] = frozenset(),
+    backend: str | None = None,
+    byok: bool | None = None,
+    labels: Mapping[str, str] = {},
+) -> tuple[UsageLine, ...]:
+    """The workspace's usage booked in `[since, until)`, per UTC day and per value of each of `keys`
+    (`USAGE_KEYS`) and of each label in `label_keys`, filtered to `backend`, `byok` and the label
+    values `labels` names. A null `byok` reads False, and a row the service backfill has not reached
+    yet reads the service its dimension belongs to.
+
+    Turn-less rows on a day the fold closed are read from the fold, which keeps every key and no
+    label, so a read grouped or filtered by a label covers turn rows and the days the fold has not
+    closed. The days `since` and `until` fall in are read from the ledger, because a folded day
+    cannot say which side of a boundary its spend fell on."""
+    if not keys <= frozenset(USAGE_KEYS):
+        raise ValueError(f"A usage read groups by {', '.join(USAGE_KEYS)}.")
+    if since >= until:
+        raise ValueError("A usage read's window starts before it ends.")
+    if any(LABEL_KEY.fullmatch(key) is None for key in (*label_keys, *labels)):
+        raise ValueError(
+            f"A label key is at most {LABEL_MAX_CHARS} characters of lowercase letters, digits, "
+            "dot, dash and underscore."
+        )
+    rolled_through = await _rolled_through(connection, workspace_id)
+    ledger, folded = tables.ledger, tables.ledger_job_day
+    scope = (
+        (ledger.c.workspace_id == workspace_id)
+        & (ledger.c.created_at >= since)
+        & (ledger.c.created_at < until)
+    )
+    if rolled_through is not None:
+        scope &= rolled_days(workspace_id, rolled_through, since, None).skip | (
+            ledger.c.created_at >= _day_start(until.date())
+        )
+    ordered = sorted(label_keys)
+    labelled = [
+        ledger.c.labels[key].as_string().label(f"label_{index}")
+        for index, key in enumerate(ordered)
+    ]
+    query = (
+        _usage_select(ledger, sa.func.date(ledger.c.created_at), keys, backend, byok)
+        .add_columns(*labelled)
+        .where(scope, *(ledger.c.labels[key].as_string() == value for key, value in labels.items()))
+        .group_by(*labelled)
+    )
+    if rolled_through is None or label_keys or labels:
+        result = await connection.execute(query)
+    else:
+        result = await connection.execute(
+            query.union_all(
+                _usage_select(folded, folded.c.day, keys, backend, byok).where(
+                    folded.c.workspace_id == workspace_id,
+                    folded.c.day > since.date(),
+                    folded.c.day < until.date(),
+                    folded.c.day <= rolled_through,
+                )
+            )
+        )
+    merged: dict[tuple[object, ...], UsageLine] = {}
+    for row in result.mappings():
+        line = UsageLine(
+            day=date.fromisoformat(str(row["day"])),
+            service=row.get("service", ""),
+            dimension=row.get("dimension", ""),
+            backend=row.get("backend"),
+            byok=bool(row.get("byok", False)),
+            token_id=row.get("token"),
+            labels={
+                key: row[f"label_{index}"]
+                for index, key in enumerate(ordered)
+                if row[f"label_{index}"] is not None
+            },
+            amount=int(row["amount"]),
+            priced_micro_usd=int(row["priced"]),
+        )
+        order = (
+            line.day,
+            line.service,
+            line.dimension,
+            line.backend or "",
+            line.byok,
+            str(line.token_id or ""),
+            tuple(sorted(line.labels.items())),
+        )
+        held = merged.get(order)
+        merged[order] = (
+            line
+            if held is None
+            else replace(
+                held,
+                amount=held.amount + line.amount,
+                priced_micro_usd=held.priced_micro_usd + line.priced_micro_usd,
+            )
+        )
+    return tuple(line for _order, line in sorted(merged.items()))
+
+
+async def token_spend(
+    connection: AsyncConnection, workspace_id: UUID, token_id: UUID, since: datetime
+) -> int:
+    """What the platform paid for a token's records since `since`, in micro-USD: rows its own key
+    paid (`byok`) are left out. A day the fold closed counts whole, even the part before `since`,
+    which errs toward the ceiling a spend window enforces."""
+    ledger, folded = tables.ledger, tables.ledger_job_day
+    rolled_through = await _rolled_through(connection, workspace_id)
+    raw = sa.select(sa.func.coalesce(sa.func.sum(ledger.c.priced_micro_usd), 0)).where(
+        ledger.c.workspace_id == workspace_id,
+        ledger.c.token_id == token_id,
+        ledger.c.created_at >= since,
+        ledger.c.byok.is_not(True),
+    )
+    if rolled_through is None:
+        return int((await connection.execute(raw)).scalar_one())
+    whole = sa.select(sa.func.coalesce(sa.func.sum(folded.c.priced_micro_usd), 0)).where(
+        folded.c.workspace_id == workspace_id,
+        folded.c.token_id == token_id,
+        folded.c.day >= since.date(),
+        folded.c.day <= rolled_through,
+        folded.c.byok.is_not(True),
+    )
+    skip = rolled_days(workspace_id, rolled_through, None, None).skip
+    spent = sa.select(raw.where(skip).scalar_subquery() + whole.scalar_subquery())
+    return int((await connection.execute(spent)).scalar_one())
+
+
+async def session_spend(connection: AsyncConnection, workspace_id: UUID, session_id: UUID) -> int:
+    """What the platform paid for a session's records, in micro-USD, rows its own key paid left
+    out. The fold keeps no session, so this reads the ledger rows, which the fold never removes."""
+    return int(
+        (
+            await connection.execute(
+                sa.select(sa.func.coalesce(sa.func.sum(tables.ledger.c.priced_micro_usd), 0)).where(
+                    tables.ledger.c.workspace_id == workspace_id,
+                    tables.ledger.c.session_id == session_id,
+                    tables.ledger.c.byok.is_not(True),
+                )
+            )
+        ).scalar_one()
+    )

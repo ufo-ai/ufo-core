@@ -1174,7 +1174,7 @@ calls, the turn. Repeated writes for one call are deduplicated.
 Realtime visibility: live per-turn cost on the stream, workspace/member/agent rollups in
 `ufoctl spend`, the surface reads (`spend_rollup`, `member_spend`), and an extension handler's
 `ctx.spend_rollup`, the workspace totals naming no member or agent; the workspace rollup also groups
-spend by the service each dimension belongs to (`by_service`). Caps
+spend by the service each row names (`by_service`). Caps
 evaluated at inbound and per-step; `reject` refuses new turns, `park` suspends. Prices are a pinned
 table per model; usage a key that is not the deploy's paid for still meters (visibility without
 billing).
@@ -1199,6 +1199,17 @@ turn, so the turn's cost counts them; its egress is a zero-priced `(proxy, reque
 inserted with no service takes the one its dimension belongs to (trigger `ledger_fill_service`,
 which files `sandbox_tokens` and `egress` as the rows above), and the per-minute
 `ledger_service_backfill` job files any row still without one, 5000 per workspace per tick.
+
+An extension reads usage back through `ctx.usage_lines`: a window `[since, until)` per UTC day,
+grouped by any of `service`, `dimension`, `backend`, `byok` and `token` and by label keys, and
+filtered by backend, `byok` and label values. The nightly fold of turn-less rows into
+`ledger_job_day` keeps service, dimension, backend, token, `byok`, model and price digest, so a read
+by key covers every day; labels and sessions stay on ledger rows, so a read grouped or filtered by a
+label covers turn rows and the days the fold has not closed. Two spend windows serve a caller that
+bounds a token or a session: `ctx.token_spend` sums what the platform paid for a token's records
+over a window, counting a folded day whole, and `ctx.session_spend` sums a session's. Neither
+counts a row the workspace's own key paid. `ctx.spend_admitted(platform_paid=True)` asks the gates
+about work no key of the workspace pays for, so a stored model key exempts nothing.
 
 Background and off-turn model calls clear the workspace spend cap and the spend gates before
 reaching the provider. They carry no member or agent attribution, so narrower caps do not apply. An
@@ -1285,7 +1296,9 @@ intents from settled ledger rows — settlement and dedup keys are writer knowle
 extension is a pure delivery adapter to the vendor's ingest API. Each
 intent freezes a `byok` label at mint: host `tokens` whose model's serving provider key slot
 (`ModelRegistry.key_slot_for` — the same resolution `client_for` applies, any provider) is stored
-by the workspace, so the rate card bills only pass-through usage.
+by the workspace, so the rate card bills only pass-through usage. An intent also names its row's
+service, backend, token, session and labels. A priced `proxy` row is written once, so it mints at
+once with its own `byok`; a zero-priced count never mints.
 
 Paying for spend is a chat act like every other member action: a speaking admin asks, and an
 extension tool returns a short-lived provider link — its customer id lives in the extension's own

@@ -53,6 +53,7 @@ from ufo.harness.sandbox.terminal import TerminalGone
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.billing.accounting import (
+    GIB_DIMENSION,
     PROXY_SERVICE,
     REQUESTS_DIMENSION,
     UNGATED_LEDGER,
@@ -61,6 +62,7 @@ from ufo.runtime.billing.accounting import (
     ServiceTotal,
     SpendRollup,
     SpendTotals,
+    UsageLine,
     record_probe_egress_request,
 )
 from ufo.runtime.billing.spend import NO_SPEND_GATES, PARK, GateDeploy, SpendDecision, SpendGates
@@ -1349,6 +1351,7 @@ async def test_an_extension_reads_what_the_gates_alone_decide_now(db: None) -> N
         assert (await context.spend_admitted()).outcome == "allow"
         assert (await context.spend_admitted(MODEL)).outcome == "allow"
         assert await context.spend_admitted("gpt-5.6-luna") == refused
+        assert await context.spend_admitted(platform_paid=True) == refused
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1462,3 +1465,44 @@ async def test_an_extension_records_a_service_row_once(db: None) -> None:
         workspace_id: ("proxy", "requests", 3, 3, {"team": "platform"}),
         neighbor: ("proxy", "requests", 3, 3, {"team": "platform"}),
     }
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_an_extension_reads_usage_lines_and_spend_windows_of_its_workspace_alone(
+    db: None,
+) -> None:
+    workspace_id, neighbor = await _workspace(), await _workspace()
+    context = context_for("core", frozenset(), ledger=UNGATED_LEDGER)
+    token_id, session_id, now = uuid4(), uuid4(), datetime.now(UTC)
+    record = {
+        "token_id": token_id,
+        "session_id": session_id,
+        "labels": {"team": "platform"},
+        "resource_id": None,
+        "attempt": "flush-1",
+        "occurred_at": now,
+        "byok": False,
+        "price_digest": "sha256:card",
+    }
+    with ws(neighbor):
+        await context.record_usage(
+            PROXY_SERVICE, GIB_DIMENSION, None, 2**30, price_micro_usd=168_750, **record
+        )
+    with ws(workspace_id):
+        await context.record_usage(
+            PROXY_SERVICE, REQUESTS_DIMENSION, None, 3, price_micro_usd=3, **record
+        )
+        lines = await context.usage_lines(
+            now - timedelta(hours=1),
+            now + timedelta(minutes=1),
+            keys=frozenset({"service", "dimension", "token"}),
+            label_keys=frozenset({"team"}),
+        )
+        token_spent = await context.token_spend(token_id, 3_600)
+        session_spent = await context.session_spend(session_id)
+    assert lines == (
+        UsageLine(
+            now.date(), "proxy", "requests", None, False, token_id, {"team": "platform"}, 3, 3
+        ),
+    )
+    assert (token_spent, session_spent) == (3, 3)
