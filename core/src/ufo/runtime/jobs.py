@@ -971,7 +971,7 @@ async def prune_conversation_changes(context: ExtensionContext) -> None:
 
 async def _backfill_ledger_service(context: ExtensionContext) -> None:
     async with workspace_tx() as connection:
-        await ServiceBackfill(ws_current().workspace_id).roll(connection, datetime.now(UTC))
+        await ServiceBackfill(ws_current().workspace_id).roll(connection)
 
 
 def core_jobs(

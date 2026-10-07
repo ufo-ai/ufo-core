@@ -5,11 +5,12 @@ token, session, labels, resource and attempt a service record carries; `ledger_s
 admits each service its units. `ledger_job_day` gains the service key the fold keeps, and the
 folded rows take the service their dimension belongs to.
 
-A row inserted with no service is filled by `ledger_fill_service`: `tokens`, `images` and `videos`
-go under `models`; `sandbox_tokens` becomes `(models, tokens)`, platform-paid, labelled `via: proxy`
-and its turn; `egress` becomes `(proxy, requests)` labelled with its turn. Postgres assigns the row
-before insert from one `plpgsql` function; SQLite cannot assign to `new`, so its trigger updates the
-row after insert. The rows the ledger already holds are filled by the `ledger_service_backfill` job.
+No row or folded day changes its dimension, so the image this revision replaces reads every row it
+leaves. A row inserted with no service is filled by `ledger_fill_service`: `egress` goes under
+`proxy`, every other dimension under `models`; `sandbox_tokens` is labelled `via: proxy` and its
+turn, `egress` its turn. Postgres assigns the row before insert from one `plpgsql` function; SQLite
+cannot assign to `new`, so its trigger updates the row after insert. The rows the ledger already
+holds are filled the same way by the `ledger_service_backfill` job.
 
 The ledger is written on every model call and egress request, so nothing here scans it under a lock
 those writes wait on: the transaction changes only its catalog (nullable columns, a constant
@@ -52,23 +53,17 @@ DOWNGRADE_LEDGER_DIMENSION = (
 DOWNGRADE_LEDGER_BYOK_DIMENSION = "not byok or dimension = 'tokens'"
 JOB_DAY_SERVICES = (
     "update ledger_job_day set service = 'models' "
-    "where dimension in ('tokens', 'images', 'videos')",
-    "update ledger_job_day set service = 'models', dimension = 'tokens' "
-    "where dimension = 'sandbox_tokens'",
-    "update ledger_job_day set service = 'proxy', dimension = 'requests' "
-    "where dimension = 'egress'",
+    "where dimension in ('tokens', 'sandbox_tokens', 'images', 'videos')",
+    "update ledger_job_day set service = 'proxy' where dimension = 'egress'",
 )
 FILL_LEDGER_SERVICE = """
 create function fill_ledger_service() returns trigger as $$
 begin
     if new.dimension = 'sandbox_tokens' then
         new.service := 'models';
-        new.dimension := 'tokens';
-        new.byok := false;
         new.labels := jsonb_strip_nulls(jsonb_build_object('via', 'proxy', 'turn', new.turn_id));
     elsif new.dimension = 'egress' then
         new.service := 'proxy';
-        new.dimension := 'requests';
         new.labels := jsonb_strip_nulls(jsonb_build_object('turn', new.turn_id));
     else
         new.service := 'models';
@@ -93,12 +88,6 @@ when new.service is null
 begin
     update ledger
     set service = case new.dimension when 'egress' then 'proxy' else 'models' end,
-        dimension = case new.dimension
-            when 'sandbox_tokens' then 'tokens'
-            when 'egress' then 'requests'
-            else new.dimension
-        end,
-        byok = case new.dimension when 'sandbox_tokens' then 0 else new.byok end,
         labels = case new.dimension
             when 'sandbox_tokens'
                 then json_patch(json_object(), json_object('via', 'proxy', 'turn', {turn}))

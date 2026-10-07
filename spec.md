@@ -1182,10 +1182,10 @@ billing).
 
 Every ledger row names the service that metered it and the unit it counts (`dimension`):
 
-| Service | Units |
-|---|---|
-| `models` | `tokens` (with the six token classes), `images`, `videos` |
-| `proxy` | `requests`, `gib` (bytes) |
+| Service | Units an extension records | Units the egress proxy meters |
+|---|---|---|
+| `models` | `tokens` (with the six token classes), `images`, `videos` | `sandbox_tokens` |
+| `proxy` | `requests`, `gib` (bytes) | `egress` |
 
 An extension books what a service metered through `ExtensionContext.record_usage`: service, unit,
 backend, amount, token, session, labels, resource, attempt, `occurred_at`, `byok`, price and rate
@@ -1195,11 +1195,11 @@ card digest, and for `tokens` the model and its six classes. One row is written 
 day the fold has not closed, and at most 60 seconds ahead. Labels are at most 16 keys
 (`[a-z0-9_.-]`) with values of at most 64 characters; a `turn` label naming a turn of the workspace
 binds the row to that turn, so member and agent caps and attribution count it. Model calls the
-sandbox makes through the egress proxy are `(models, tokens)` rows labelled `via: proxy` on their
-turn, so the turn's cost counts them; its egress is a zero-priced `(proxy, requests)` count. A row
-inserted with no service takes the one its dimension belongs to (trigger `ledger_fill_service`,
-which files `sandbox_tokens` and `egress` as the rows above), and the per-minute
-`ledger_service_backfill` job files any row still without one, 5000 per workspace per tick.
+sandbox makes through the egress proxy are one `sandbox_tokens` row per turn labelled `via: proxy`
+and the turn, and its egress a zero-priced `egress` count labelled with its turn. A row inserted
+with no service takes the one its dimension belongs to and keeps its dimension (trigger
+`ledger_fill_service`), and the per-minute `ledger_service_backfill` job files any row still
+without one the same way, 5000 per workspace per tick.
 
 An extension reads usage back through `ctx.usage_lines`: a window `[since, until)` per UTC day,
 grouped by any of `service`, `dimension`, `backend`, `byok` and `token` and by label keys, and

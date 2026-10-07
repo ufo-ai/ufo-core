@@ -13,11 +13,19 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_testsupport.plugin import drop_postgres_database, reset_postgres_database
 
-from ufo.db import MIGRATIONS_DIR, workspace_tx
+from ufo.db import MIGRATIONS_DIR, dispose_db, init_db, workspace_tx
+from ufo.runtime.billing.accounting import ServiceBackfill
 from ufo.schema import tables
 
 SERVICE_LEDGER = "20261006230332"
 LEDGER_INDEXES = {"ledger_workspace_token", "ledger_workspace_session", "ledger_unserviced"}
+OUTGOING_SERVICE_OF_DIMENSION = {
+    "tokens": "models",
+    "egress": "proxy",
+    "sandbox_tokens": "models",
+    "images": "models",
+    "videos": "models",
+}
 UNSERVICED_INSERT = sa.text(
     "insert into ledger (id, workspace_id, turn_id, dimension, amount, priced_micro_usd, model, "
     "created_at, updated_at) values (:id, :workspace_id, :turn_id, :dimension, 1, 0, '', :now, "
@@ -26,6 +34,16 @@ UNSERVICED_INSERT = sa.text(
     sa.bindparam("id", type_=sa.Uuid()),
     sa.bindparam("workspace_id", type_=sa.Uuid()),
     sa.bindparam("turn_id", type_=sa.Uuid()),
+    sa.bindparam("now", type_=sa.DateTime(timezone=True)),
+)
+JOB_DAY_INSERT = sa.text(
+    "insert into ledger_job_day (id, workspace_id, day, dimension, model, amount, "
+    "priced_micro_usd, first_used_at, created_at, updated_at) values (:id, :workspace_id, :day, "
+    ":dimension, '', 1, 0, :now, :now, :now)"
+).bindparams(
+    sa.bindparam("id", type_=sa.Uuid()),
+    sa.bindparam("workspace_id", type_=sa.Uuid()),
+    sa.bindparam("day", type_=sa.Date()),
     sa.bindparam("now", type_=sa.DateTime(timezone=True)),
 )
 
@@ -80,7 +98,7 @@ async def test_a_row_inserted_with_no_service_takes_the_service_of_its_dimension
     db: None,
 ) -> None:
     now = datetime.now(UTC)
-    tokens, sandbox, egress, probe = uuid4(), uuid4(), uuid4(), uuid4()
+    tokens, sandbox, egress, probe, images, videos = (uuid4() for _ in range(6))
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _turn(connection)
         for ledger_id, turn, dimension in (
@@ -88,6 +106,8 @@ async def test_a_row_inserted_with_no_service_takes_the_service_of_its_dimension
             (sandbox, turn_id, "sandbox_tokens"),
             (egress, turn_id, "egress"),
             (probe, None, "egress"),
+            (images, turn_id, "images"),
+            (videos, turn_id, "videos"),
         ):
             await connection.execute(
                 UNSERVICED_INSERT,
@@ -113,10 +133,13 @@ async def test_a_row_inserted_with_no_service_takes_the_service_of_its_dimension
         ).all()
     assert {row.id: tuple(row)[1:] for row in rows} == {
         tokens: ("models", "tokens", {}, None),
-        sandbox: ("models", "tokens", {"via": "proxy", "turn": str(turn_id)}, False),
-        egress: ("proxy", "requests", {"turn": str(turn_id)}, None),
-        probe: ("proxy", "requests", {}, None),
+        sandbox: ("models", "sandbox_tokens", {"via": "proxy", "turn": str(turn_id)}, None),
+        egress: ("proxy", "egress", {"turn": str(turn_id)}, None),
+        probe: ("proxy", "egress", {}, None),
+        images: ("models", "images", {}, None),
+        videos: ("models", "videos", {}, None),
     }
+    assert all(OUTGOING_SERVICE_OF_DIMENSION[row.dimension] == row.service for row in rows)
 
 
 @pytest.fixture
@@ -151,28 +174,49 @@ def _migrated_before(url: str) -> Config:
     return config
 
 
+def _filed(
+    connection: sa.Connection, table: sa.Table, written: dict[UUID, str]
+) -> dict[str, tuple[str | None, str]]:
+    return {
+        written[row.id]: (row.service, row.dimension)
+        for row in connection.execute(sa.select(table.c.id, table.c.service, table.c.dimension))
+    }
+
+
+async def _backfill(url: str, workspace_id: UUID) -> int:
+    init_db(url)
+    try:
+        async with workspace_tx() as connection:
+            return await ServiceBackfill(workspace_id).roll(connection)
+    finally:
+        await dispose_db()
+
+
 @pytest.mark.parametrize("database_url", ["sqlite", "postgres"], indirect=True)
-def test_the_upgrade_files_folded_days_under_their_service_and_keeps_the_ledger_checks(
+def test_the_upgrade_keeps_every_dimension_the_outgoing_image_reads_and_the_ledger_checks(
     scratch_urls: tuple[str, str],
 ) -> None:
     migration_url, sync_url = scratch_urls
     config = _migrated_before(migration_url)
     workspace_id, now = uuid4(), datetime.now(UTC)
-    folded = {uuid4(): dimension for dimension in ("tokens", "sandbox_tokens", "egress", "images")}
+    rows = {uuid4(): dimension for dimension in OUTGOING_SERVICE_OF_DIMENSION}
+    days = {uuid4(): dimension for dimension in OUTGOING_SERVICE_OF_DIMENSION}
     engine = sa.create_engine(sync_url)
     with engine.connect() as connection:
-        for day_id, dimension in folded.items():
+        for row_id, dimension in rows.items():
             connection.execute(
-                sa.text(
-                    "insert into ledger_job_day (id, workspace_id, day, dimension, model, amount, "
-                    "priced_micro_usd, first_used_at, created_at, updated_at) values (:id, "
-                    ":workspace_id, :day, :dimension, '', 1, 0, :now, :now, :now)"
-                ).bindparams(
-                    sa.bindparam("id", type_=sa.Uuid()),
-                    sa.bindparam("workspace_id", type_=sa.Uuid()),
-                    sa.bindparam("day", type_=sa.Date()),
-                    sa.bindparam("now", type_=sa.DateTime(timezone=True)),
-                ),
+                UNSERVICED_INSERT,
+                {
+                    "id": row_id,
+                    "workspace_id": workspace_id,
+                    "turn_id": None,
+                    "dimension": dimension,
+                    "now": now,
+                },
+            )
+        for day_id, dimension in days.items():
+            connection.execute(
+                JOB_DAY_INSERT,
                 {
                     "id": day_id,
                     "workspace_id": workspace_id,
@@ -185,16 +229,12 @@ def test_the_upgrade_files_folded_days_under_their_service_and_keeps_the_ledger_
     engine.dispose()
     command.upgrade(config, SERVICE_LEDGER)
     with engine.connect() as connection:
-        filed = {
-            row.id: (row.service, row.dimension)
-            for row in connection.execute(
-                sa.select(
-                    tables.ledger_job_day.c.id,
-                    tables.ledger_job_day.c.service,
-                    tables.ledger_job_day.c.dimension,
-                )
-            )
-        }
+        unserviced = _filed(connection, tables.ledger, rows)
+        folded = _filed(connection, tables.ledger_job_day, days)
+    engine.dispose()
+    moved = asyncio.run(_backfill(migration_url, workspace_id))
+    with engine.connect() as connection:
+        backfilled = _filed(connection, tables.ledger, rows)
         with pytest.raises(sa.exc.IntegrityError, match="ledger_amount"):
             connection.execute(
                 sa.insert(tables.ledger).values(
@@ -210,12 +250,20 @@ def test_the_upgrade_files_folded_days_under_their_service_and_keeps_the_ledger_
                 )
             )
     engine.dispose()
-    assert {dimension: filed[day_id] for day_id, dimension in folded.items()} == {
+    filed = {
         "tokens": ("models", "tokens"),
-        "sandbox_tokens": ("models", "tokens"),
-        "egress": ("proxy", "requests"),
+        "egress": ("proxy", "egress"),
+        "sandbox_tokens": ("models", "sandbox_tokens"),
         "images": ("models", "images"),
+        "videos": ("models", "videos"),
     }
+    assert unserviced == {dimension: (None, dimension) for dimension in filed}
+    assert folded == filed
+    assert (moved, backfilled) == (len(rows), filed)
+    assert {
+        (OUTGOING_SERVICE_OF_DIMENSION[dimension], dimension)
+        for _service, dimension in (*unserviced.values(), *folded.values(), *backfilled.values())
+    } == set(filed.values())
 
 
 @pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
