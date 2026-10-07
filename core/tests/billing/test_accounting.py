@@ -497,7 +497,7 @@ async def test_egress_request_accumulates_a_priced_zero_count(db: None) -> None:
                 ).where(tables.ledger.c.turn_id == turn_id)
             )
         ).one()
-    assert (row.service, row.dimension, row.labels) == ("proxy", "requests", {"turn": str(turn_id)})
+    assert (row.service, row.dimension, row.labels) == ("proxy", "egress", {"turn": str(turn_id)})
     assert (int(row.amount), int(row.priced_micro_usd)) == (10, 0)
 
 
@@ -542,7 +542,7 @@ async def test_sandbox_tokens_row_is_disjoint_from_the_host_token_row(db: None) 
         host: ("models", "tokens", {}, 10_000, 96_500, PRICE_DIGEST),
         sandbox: (
             "models",
-            "tokens",
+            "sandbox_tokens",
             {"via": "proxy", "turn": str(turn_id)},
             10_000,
             96_500,
@@ -550,7 +550,7 @@ async def test_sandbox_tokens_row_is_disjoint_from_the_host_token_row(db: None) 
         ),
     }
     assert cost == TurnCost(
-        tokens=20_000, micro_usd=193_000, model="claude-opus-4-8", cache_percent=38
+        tokens=10_000, micro_usd=96_500, model="claude-opus-4-8", cache_percent=38
     )
 
 
@@ -575,7 +575,11 @@ async def test_sandbox_tokens_accumulate_into_one_row(db: None) -> None:
                 ).where(tables.ledger.c.turn_id == turn_id)
             )
         ).one()
-    assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == ("tokens", 6000, 110_000)
+    assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == (
+        "sandbox_tokens",
+        6000,
+        110_000,
+    )
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -616,11 +620,11 @@ async def test_sandbox_rows_from_both_proxy_shapes_roll_up_and_export_once(db: N
             await connection.execute(
                 sa.select(tables.ledger.c.id, tables.ledger.c.amount, tables.ledger.c.labels).where(
                     tables.ledger.c.turn_id == turn_id,
-                    tables.ledger.c.dimension == TOKENS_DIMENSION,
+                    tables.ledger.c.dimension == SANDBOX_TOKENS_DIMENSION,
                 )
             )
         ).all()
-        cost = await read_turn_cost(connection, turn_id, TOKENS_DIMENSION)
+        cost = await read_turn_cost(connection, turn_id, SANDBOX_TOKENS_DIMENSION)
         report = await SpendRollup(workspace_id).read(connection, None)
         await _settle_turn(connection, turn_id, age_seconds=PAST_EXPORT_MARGIN_SECONDS)
         await accounting.mint_usage_exports(
@@ -640,7 +644,9 @@ async def test_sandbox_rows_from_both_proxy_shapes_roll_up_and_export_once(db: N
     assert sum(int(row.amount) for row in rows) == 175
     assert all(row.labels == {"via": "proxy", "turn": str(turn_id)} for row in rows)
     assert cost is not None and cost.tokens == 175
-    assert [(total.dimension, total.amount) for total in report.by_dimension] == [("tokens", 175)]
+    assert [(total.dimension, total.amount) for total in report.by_dimension] == [
+        ("sandbox_tokens", 175)
+    ]
     assert sorted(export.amount for export in exports) == [75, 100]
     assert not any(export.byok for export in exports)
 
@@ -745,7 +751,7 @@ async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
         report = await SpendRollup(workspace_id).read(connection, 3600)
     assert report.total_micro_usd == 96_500
     assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
-        "requests": (2, 0),
+        "egress": (2, 0),
         "tokens": (10_000, 96_500),
     }
     assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 96_500)]
@@ -806,6 +812,12 @@ def test_every_ledger_dimension_belongs_to_a_service() -> None:
         if isinstance(c, sa.CheckConstraint) and c.name == "ledger_dimension"
     )
     assert set(SERVICE_OF_DIMENSION) == set(re.findall(r"'([a-z_]+)'", str(check.sqltext)))
+
+
+def test_egress_requests_and_gib_belong_to_the_proxy_service() -> None:
+    assert [
+        SERVICE_OF_DIMENSION[unit] for unit in (EGRESS_DIMENSION, REQUESTS_DIMENSION, GIB_DIMENSION)
+    ] == [PROXY_SERVICE] * 3
 
 
 def test_every_service_unit_pair_is_in_the_check() -> None:
@@ -1097,7 +1109,7 @@ async def test_the_service_backfill_moves_a_batch_and_stops(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(accounting, "LEDGER_SERVICE_BACKFILL_BATCH", 1)
-    now = datetime.now(UTC)
+    written = datetime.now(UTC) - timedelta(hours=1)
     tokens, sandbox, egress, probe = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -1117,8 +1129,8 @@ async def test_the_service_backfill_moves_a_batch_and_stops(
                     amount=1,
                     priced_micro_usd=0,
                     model="",
-                    created_at=now,
-                    updated_at=now,
+                    created_at=written,
+                    updated_at=written,
                 )
             )
         await connection.execute(
@@ -1130,7 +1142,7 @@ async def test_the_service_backfill_moves_a_batch_and_stops(
     moved = []
     for _tick in range(5):
         async with workspace_tx() as connection:
-            moved.append(await ServiceBackfill(workspace_id).roll(connection, now))
+            moved.append(await ServiceBackfill(workspace_id).roll(connection))
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
@@ -1140,17 +1152,19 @@ async def test_the_service_backfill_moves_a_batch_and_stops(
                     tables.ledger.c.dimension,
                     tables.ledger.c.labels,
                     tables.ledger.c.byok,
+                    tables.ledger.c.updated_at,
                 ).where(tables.ledger.c.workspace_id == workspace_id)
             )
         ).all()
     assert moved == [1, 1, 1, 1, 0]
     assert await ledger_service_backfill_candidates()() == ()
-    assert {row.id: tuple(row)[1:] for row in rows} == {
+    assert {row.id: tuple(row)[1:5] for row in rows} == {
         tokens: ("models", "tokens", {}, None),
-        sandbox: ("models", "tokens", {"via": "proxy", "turn": str(turn_id)}, False),
-        egress: ("proxy", "requests", {"turn": str(turn_id)}, None),
-        probe: ("proxy", "requests", {}, None),
+        sandbox: ("models", "sandbox_tokens", {"via": "proxy", "turn": str(turn_id)}, None),
+        egress: ("proxy", "egress", {"turn": str(turn_id)}, None),
+        probe: ("proxy", "egress", {}, None),
     }
+    assert {row.updated_at.replace(tzinfo=UTC) for row in rows} == {written}
 
 
 async def _spawn_child_turn(
@@ -1483,7 +1497,7 @@ async def test_usage_lines_filters_backend_and_byok(db: None) -> None:
     today = now.date()
     own_key = UsageLine(today, "models", "tokens", "openrouter", True, None, {}, 1_000, 5_000)
     platform = UsageLine(today, "models", "tokens", "anthropic", False, None, {}, 1_000, 5_000)
-    egress = UsageLine(today, "proxy", "requests", None, False, None, {}, 1, 0)
+    egress = UsageLine(today, "proxy", "egress", None, False, None, {}, 1, 0)
     since = now - timedelta(hours=1)
     async with workspace_tx() as connection:
         until = datetime.now(UTC) + timedelta(minutes=1)
@@ -2044,7 +2058,7 @@ async def test_member_spend_reads_only_that_members_turns_and_caps(db: None) -> 
         report = await SpendRollup(workspace_id).read_member(connection, member_id, 3600)
         rollup = await SpendRollup(workspace_id).read(connection, 3600)
     assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
-        "requests": (1, 0),
+        "egress": (1, 0),
         "tokens": (10_000, 96_500),
     }
     assert report.total_micro_usd == 96_500
@@ -2118,13 +2132,19 @@ async def test_usage_export_settlement_rules(db: None) -> None:
     settled = await _pending(workspace_id)
     assert {export.dimension for export in settled} == {"tokens", "gib"}
     assert all(export.from_amount == 0 and export.price_digest for export in settled)
-    assert {export.amount for export in settled} == {1000, 250, 175, GIB}
-    sandbox = next(export for export in settled if export.amount == 175)
-    assert (sandbox.turn_id, sandbox.byok) == (turn_id, False)
+    assert {export.amount for export in settled} == {1000, 250, GIB}
+
+    async with workspace_tx() as connection:
+        await _settle_turn(connection, turn_id, age_seconds=0)
+    assert await _pending(workspace_id) == settled
 
     async with workspace_tx() as connection:
         await _settle_turn(connection, turn_id, age_seconds=PAST_EXPORT_MARGIN_SECONDS)
-    assert await _pending(workspace_id) == settled
+    settled = await _pending(workspace_id)
+    assert {export.dimension for export in settled} == {"tokens", "sandbox_tokens", "gib"}
+    sandbox = next(export for export in settled if export.dimension == "sandbox_tokens")
+    assert (sandbox.amount, sandbox.from_amount, sandbox.turn_id) == (175, 0, turn_id)
+    assert (sandbox.service, sandbox.byok) == ("models", False)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite", "postgres"], indirect=True)

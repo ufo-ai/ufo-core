@@ -157,8 +157,8 @@ async def test_in_sandbox_and_media_spend_charge_each_increment_and_egress_charg
     sandbox = ledger_id_for(workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION, SANDBOX_TOKENS_ATTEMPT)
     charges = await _charges(workspace_id)
     assert [(charge[0], charge[2], charge[4]) for charge in charges] == [
-        (sandbox, TOKENS_DIMENSION, True),
-        (sandbox, TOKENS_DIMENSION, True),
+        (sandbox, SANDBOX_TOKENS_DIMENSION, True),
+        (sandbox, SANDBOX_TOKENS_DIMENSION, True),
         (ledger_id_for(workspace_id, turn_id, IMAGES_DIMENSION), IMAGES_DIMENSION, True),
         (ledger_id_for(workspace_id, turn_id, VIDEOS_DIMENSION), VIDEOS_DIMENSION, True),
     ]

@@ -43,7 +43,7 @@ SERVICE_UNITS: Mapping[str, tuple[str, ...]] = {
     MODELS_SERVICE: (TOKENS_DIMENSION, IMAGES_DIMENSION, VIDEOS_DIMENSION),
     PROXY_SERVICE: (REQUESTS_DIMENSION, GIB_DIMENSION),
 }
-"""The units each service meters: the `(service, dimension)` pairs a service record may carry."""
+"""The `(service, dimension)` pairs a service record may carry."""
 TURN_LABEL = "turn"
 VIA_LABEL = "via"
 PROXY_VIA = "proxy"
@@ -398,21 +398,23 @@ class Ledger:
         usage: Usage,
         pricing: Pricing = CORE_PRICING,
     ) -> None:
-        """Meter a model call the sandbox made through the egress proxy onto the turn's in-sandbox
-        row — `(models, tokens)` labelled `via: proxy` and the turn — its tokens and priced cost
-        accumulated atomically so several in-sandbox calls on one turn never lose a burn. Disjoint
-        from the host turn loop's row: that path runs the model host-side and never touches the
-        proxy, so the two sources never overlap and `read_turn_cost` adds them. Priced through the
-        deploy's merged `pricing` (core plus every provider-contributed rate, `CORE_PRICING` when
-        none) and stamped with its digest — the same table and stamp the host turn's bill uses, so a
-        contributed slug is billed at its real rate and the two rows reconcile by digest. Its id is
-        derived from the `sandbox_tokens` key and the `sandbox` attempt, so it can never collide
-        with the host row `Ledger.record_turn_usage` writes for the same turn. The row carries the
-        burn's prompt split beside its total, exactly as the host row does.
+        """Meter a model call the sandbox made through the egress proxy onto the turn's
+        `(models, sandbox_tokens)` row, labelled `via: proxy` and the turn, its tokens and priced
+        cost accumulated atomically so several in-sandbox calls on one turn never lose a burn.
+        Disjoint from the host turn loop's `tokens` bill: that path runs the model host-side and
+        never touches the proxy, so the two sources never overlap and metering here is additive,
+        not a double-count. Priced through the deploy's merged `pricing` (core plus every
+        provider-contributed rate, `CORE_PRICING` when none) and stamped with its digest — the same
+        table and stamp the host turn's `tokens` bill uses, so a contributed slug is billed at its
+        real rate and sandbox rows reconcile with turn rows by digest. Its id is derived from the
+        `sandbox_tokens` key and the `sandbox` attempt, so it can never collide with the host row
+        `Ledger.record_turn_usage` writes for the same turn. The row carries the burn's prompt split
+        beside its total, exactly as the host row does, so `read_turn_cost` reads this dimension's
+        cache share off the same row its tokens and cost come from.
 
         The model host's key comes from the proxy's environment, so an in-sandbox call is always
-        served by the platform: the row is not `byok` and its charge is `platform_paid`, whatever
-        key the workspace holds for the host loop."""
+        served by the platform: its charge is `platform_paid` whatever key the workspace holds for
+        the host loop."""
         total = _total_tokens(usage)
         if total == 0:
             return
@@ -429,7 +431,7 @@ class Ledger:
                 workspace_id=workspace_id,
                 turn_id=turn_id,
                 service=MODELS_SERVICE,
-                dimension=TOKENS_DIMENSION,
+                dimension=SANDBOX_TOKENS_DIMENSION,
                 labels={VIA_LABEL: PROXY_VIA, TURN_LABEL: str(turn_id)},
                 amount=total,
                 prompt_tokens=prompt,
@@ -439,7 +441,6 @@ class Ledger:
                 cache_write_5m_tokens=usage.cache_write_5m_tokens,
                 cache_write_30m_tokens=usage.cache_write_30m_tokens,
                 cache_write_1h_tokens=usage.cache_write_1h_tokens,
-                byok=False,
                 token_classes_complete=True,
                 priced_micro_usd=priced,
                 model=model,
@@ -469,7 +470,7 @@ class Ledger:
             )
         )
         await self._charged(
-            connection, ledger_id, workspace_id, turn_id, TOKENS_DIMENSION, priced, True
+            connection, ledger_id, workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION, priced, True
         )
 
     async def record_image_usage(
@@ -764,9 +765,9 @@ async def read_turn_cost(
     the true provider charge — and the cache share is the cached part of the whole prompt, computed
     from the split those same rows carry rather than from any in-memory account of the burn.
 
-    `dimension` names which of the turn's spends that is: `tokens` counts ufo's own rounds, billed
-    host-side, together with the model calls a loop makes from inside the sandbox, which the egress
-    proxy meters onto the same turn labelled `via: proxy`."""
+    `dimension` names which of the turn's spends that is: ufo's own rounds bill `tokens` host-side,
+    while a loop that makes its model calls from inside the sandbox has them metered onto the same
+    turn by the egress proxy under `sandbox_tokens`."""
     row = (
         await connection.execute(
             sa.select(
@@ -792,13 +793,13 @@ async def read_turn_cost(
 async def record_egress_request(
     connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, amount: int = 1
 ) -> None:
-    """Meter one sandbox egress request onto the turn's `(proxy, requests)` row, labelled with the
+    """Meter one sandbox egress request onto the turn's `(proxy, egress)` row, labelled with the
     turn and incremented atomically so concurrent proxy writes never lose a count. A request COUNT
-    priced at zero, never a dollar charge: it neither re-bills the model tokens
-    `Ledger.record_turn_usage` bills at terminal nor moves a spend cap. Its id is derived from the
-    `egress` key with an empty attempt — the egress proxy has no run attempt, and a turn's egress
-    count is per turn, not per run — so it can never collide with a token row and a
-    parked-then-resumed turn keeps accumulating into the one row."""
+    priced at zero, never a dollar charge, under a dimension distinct from `tokens`: it neither
+    re-bills the model tokens `Ledger.record_turn_usage` bills at terminal nor moves a spend cap.
+    Keyed with an empty attempt — the egress proxy has no run attempt, and a turn's egress count is
+    per turn, not per run — so the id can never collide with a token row (different dimension) and
+    a parked-then-resumed turn keeps accumulating into the one row."""
     ledger_id = ledger_id_for(workspace_id, turn_id, EGRESS_DIMENSION)
     insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
     await connection.execute(
@@ -808,7 +809,7 @@ async def record_egress_request(
             workspace_id=workspace_id,
             turn_id=turn_id,
             service=PROXY_SERVICE,
-            dimension=REQUESTS_DIMENSION,
+            dimension=EGRESS_DIMENSION,
             labels={TURN_LABEL: str(turn_id)},
             amount=amount,
             priced_micro_usd=0,
@@ -826,11 +827,11 @@ async def record_egress_request(
 async def record_probe_egress_request(
     connection: AsyncConnection, workspace_id: UUID, amount: int = 1
 ) -> None:
-    """Meter an off-turn probe's sandbox egress as the same `(proxy, requests)` count a turn's is:
+    """Meter an off-turn probe's sandbox egress as the same `(proxy, egress)` count a turn's is:
     priced at zero, on a row whose `turn_id` is NULL because a probe runs off every turn. Reaching
     the network from a conversation's sandbox is one act with one meaning whether a turn or a probe
-    made it, so it is one unit — the NULL FK is what separates them, and it separates them the way
-    a background job's model spend is separated from a turn's (`Ledger.record_workspace_usage`):
+    made it, so it is one dimension — the NULL FK is what separates them, and it separates them the
+    way a background job's model spend is separated from a turn's (`Ledger.record_workspace_usage`):
     the row lands in the workspace total and every workspace-scoped cap window, and drops out of
     per-member and per-agent attribution, which join through `turn`.
 
@@ -843,7 +844,7 @@ async def record_probe_egress_request(
             workspace_id=workspace_id,
             turn_id=None,
             service=PROXY_SERVICE,
-            dimension=REQUESTS_DIMENSION,
+            dimension=EGRESS_DIMENSION,
             amount=amount,
             priced_micro_usd=0,
             model="",
@@ -891,15 +892,14 @@ async def mint_usage_exports(
     """Freeze the consumer's unshipped usage growth into `ledger_export` intent rows. This is the
     export seam's settlement knowledge, kept beside the writers that define it: a host `tokens` row
     normally lands once at terminal, but a cancelled workflow may write a partial cumulative
-    snapshot that recovery later advances, and an in-sandbox `tokens` row grows while its turn
-    runs, so any growth mints a further intent from the prior high-water mark. An `images`,
-    `videos` or `sandbox_tokens` row accumulates until its turn is terminal, and
-    `EXPORT_SETTLE_MARGIN_SECONDS` past `turn.updated_at` only bounds how often a late write costs
-    an extra top-up intent. No growth is lost to timing. A priced `proxy` row is written once and
-    never grows, so it mints at once. Request counts (zero-priced) never export. Usage settling
-    before `floor` never mints — the consumer's backfill bound. Idempotent: an intent's
-    `(consumer, ledger_id, from_amount)` key makes concurrent or replayed mints collapse onto one
-    frozen row.
+    snapshot that recovery later advances, so any growth mints a further intent from the prior
+    high-water mark. A `sandbox_tokens`, `images` or `videos` row accumulates until its turn is
+    terminal, and `EXPORT_SETTLE_MARGIN_SECONDS` past `turn.updated_at` only bounds how often a late
+    egress-proxy write costs an extra top-up intent. No growth is lost to timing. A priced `proxy`
+    row is written once and never grows, so it mints at once; zero-priced counts, `egress` among
+    them, never export. Usage settling before `floor` never mints — the consumer's backfill bound.
+    Idempotent: an intent's `(consumer, ledger_id, from_amount)` key makes concurrent or replayed
+    mints collapse onto one frozen row.
 
     Each intent copies the `byok` value the ledger writer froze when the provider attempt began.
     Credential changes after that attempt cannot change who paid for it."""
@@ -1608,16 +1608,17 @@ LEDGER_SERVICE_BACKFILL_BATCH = 5000
 @dataclass(frozen=True)
 class ServiceBackfill:
     """File a workspace's rows that carry no service under the service their dimension belongs to,
-    as `ledger_fill_service` files every insert: `tokens`, `images` and `videos` under `models`;
-    `sandbox_tokens` as `(models, tokens)`, platform-paid, labelled `via: proxy` and its turn;
-    `egress` as `(proxy, requests)` labelled with its turn.
+    as `ledger_fill_service` files every insert: `egress` under `proxy`, every other dimension under
+    `models`; `sandbox_tokens` labelled `via: proxy` and its turn, `egress` its turn. It writes only
+    `service` and `labels`, so a row keeps the dimension every image reads and the `updated_at` its
+    export is stamped with.
 
     A tick moves at most `LEDGER_SERVICE_BACKFILL_BATCH` rows, so no statement holds the row locks
     of a busy workspace's whole ledger while its meter writers queue behind them."""
 
     workspace_id: UUID
 
-    async def roll(self, connection: AsyncConnection, now: datetime) -> int:
+    async def roll(self, connection: AsyncConnection) -> int:
         ledger = tables.ledger
         sandbox = ledger.c.dimension == SANDBOX_TOKENS_DIMENSION
         egress = ledger.c.dimension == EGRESS_DIMENSION
@@ -1631,18 +1632,11 @@ class ServiceBackfill:
             .where(ledger.c.service.is_(None), ledger.c.id.in_(batch))
             .values(
                 service=sa.case((egress, PROXY_SERVICE), else_=MODELS_SERVICE),
-                dimension=sa.case(
-                    (sandbox, TOKENS_DIMENSION),
-                    (egress, REQUESTS_DIMENSION),
-                    else_=ledger.c.dimension,
-                ),
-                byok=sa.case((sandbox, sa.false()), else_=ledger.c.byok),
                 labels=sa.case(
                     (sandbox, self._turn_labels(connection, VIA_LABEL, PROXY_VIA)),
                     (egress, self._turn_labels(connection)),
                     else_=ledger.c.labels,
                 ),
-                updated_at=now,
             )
         )
         return moved.rowcount
