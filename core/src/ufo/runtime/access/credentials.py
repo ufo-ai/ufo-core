@@ -202,24 +202,21 @@ class CredentialStore:
             raise ValueError("credential value is empty")
         ciphertext = self.fernet.encrypt(plaintext.encode())
         async with workspace_tx() as connection:
-            updated = await connection.execute(
-                sa.update(tables.credential)
-                .values(ciphertext=ciphertext, updated_at=sa.func.now())
-                .where(
-                    tables.credential.c.workspace_id == workspace_id,
-                    tables.credential.c.slot == slot,
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(tables.credential)
+                .values(
+                    workspace_id=workspace_id,
+                    slot=slot,
+                    ciphertext=ciphertext,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                .on_conflict_do_update(
+                    index_elements=[tables.credential.c.workspace_id, tables.credential.c.slot],
+                    set_={"ciphertext": ciphertext, "updated_at": sa.func.now()},
                 )
             )
-            if updated.rowcount == 0:
-                await connection.execute(
-                    sa.insert(tables.credential).values(
-                        workspace_id=workspace_id,
-                        slot=slot,
-                        ciphertext=ciphertext,
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                )
 
     async def fulfill(
         self,
