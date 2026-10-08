@@ -87,12 +87,10 @@ from ufo.harness.models.registry import ModelRegistry, ServingModel
 from ufo.harness.models.spec import RepeatedToolRollover
 from ufo.harness.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
-    UNSIGNED_RUN_TOKEN,
     ConversationSandbox,
 )
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
-    ProxyEndpoint,
     SandboxProviderUnavailable,
 )
 from ufo.host import assemble as host_assemble
@@ -140,11 +138,10 @@ async def test_workspace_host_path_is_absolute_for_a_relative_workspace_root(
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
         workspace_root=Path("workspaces"),
     )
     with ws(seed.workspace_id):
-        handle = (await sandboxes.open(seed.conversation_id, None, UNSIGNED_RUN_TOKEN, {})).handle
+        handle = (await sandboxes.open(seed.conversation_id, None, {})).handle
     assert handle.workspace_host_path is not None
     assert Path(handle.workspace_host_path).is_absolute()
     assert await asyncio.to_thread(Path(handle.workspace_host_path).is_dir)
@@ -1274,6 +1271,7 @@ async def test_a_background_child_wakes_its_parent_with_its_own_result(
         registry=runtime.subagents,
         parent=parent,
         audience=conversation_audience(None),
+        sessions=None,
     )
     (finished,) = await subagents.wait((child_id,))
     assert finished.status == "done"
@@ -2012,6 +2010,7 @@ async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
         parent=parent,
         audience=conversation_audience(None),
         invoker=runtime.invoker_for(parent.workspace_id),
+        sessions=None,
     )
     queued = await subagents.message(
         child_id, FOLLOWUP_INBOUND, dedup_key="turn-1/message_spawn/call-1"
@@ -2090,6 +2089,7 @@ async def test_a_followup_left_pending_by_an_ended_child_runs_as_its_next_turn(
         registry=runtime.subagents,
         parent=parent,
         audience=conversation_audience(None),
+        sessions=None,
     )
     (followup,) = await subagents.wait((followup_id,))
     assert followup.status == "done"

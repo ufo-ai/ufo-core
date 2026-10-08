@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -38,17 +37,15 @@ from ufo.runtime.access.credentials import (
     open_credential_request,
     seal_credential_request,
 )
-from ufo.runtime.access.egress_rules import (
-    InjectionRule,
-    MeterRule,
-    ScopeRule,
-    derive_credential_rules,
-)
+from ufo.runtime.access.egress_rules import Bind, derive_credential_binds
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
+from ufo.runtime.ext.context import CredentialAccess, UndeclaredCredentialSlot
 from ufo.runtime.ext.manifest import (
     CredentialSlot,
     InjectionTarget,
     Manifest,
+    declared_slots,
+    minted_slots,
 )
 from ufo.runtime.seats import create_member
 from ufo.runtime.workspace import (
@@ -67,6 +64,7 @@ from ufo.schema import tables
 DATADOG_HOST = "api.datadoghq.com"
 US5_HOST = "api.us5.datadoghq.com"
 PERPLEXITY_HOST = "api.perplexity.ai"
+LOCK_OBSERVE_TIMEOUT_SECONDS = 5
 
 
 DATADOG_SITES = HostChoice(
@@ -94,9 +92,7 @@ def _keyed_manifest() -> Manifest:
                 injection=InjectionTarget(
                     host=DATADOG_SITES,
                     header="DD-API-KEY",
-                    sentinel="SENTINEL_DD_API",
                     env="DD_API_KEY",
-                    dimension="requests",
                 ),
             ),
             CredentialSlot(
@@ -105,9 +101,7 @@ def _keyed_manifest() -> Manifest:
                 injection=InjectionTarget(
                     host=DATADOG_SITES,
                     header="DD-APPLICATION-KEY",
-                    sentinel="SENTINEL_DD_APP",
                     env="DD_APP_KEY",
-                    dimension="requests",
                 ),
             ),
             CredentialSlot(name="datadog_api_host", description="site host"),
@@ -161,7 +155,6 @@ async def test_rotate_updates_only_the_expected_existing_value(db: None) -> None
         await store.rotate(workspace_id, "oauth", "new", "")
 
 
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_writes_bump_the_egress_rules_generation(db: None) -> None:
     """The proxy's rule cache pins this counter, so a filled, rotated, or cleared key re-derives
     its injection rules at the next CONNECT instead of waiting out the cache TTL."""
@@ -181,7 +174,9 @@ async def test_credential_writes_bump_the_egress_rules_generation(db: None) -> N
     start = await generation()
     await store.put(workspace_id, "sample_api", "one")
     filled = await generation()
-    assert await store.rotate(workspace_id, "sample_api", "one", "two")
+    await store.put(workspace_id, "sample_api", "two")
+    refilled = await generation()
+    assert await store.rotate(workspace_id, "sample_api", "two", "three")
     rotated = await generation()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -192,7 +187,7 @@ async def test_credential_writes_bump_the_egress_rules_generation(db: None) -> N
         )
     cleared = await generation()
     assert start == 0
-    assert start < filled < rotated < cleared
+    assert start < filled < refilled < rotated < cleared
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -222,6 +217,81 @@ async def test_a_stored_slot_is_told_apart_from_the_platform_default(
         await store.put(workspace_id, "sample_api", "workspace-owned")
         assert await ws_current().credential("sample_api") == "workspace-owned"
         assert await ws_current().credential_is_stored("sample_api")
+
+
+async def test_an_extension_puts_only_the_slots_it_mints(db: None) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    access = CredentialAccess(
+        declared=frozenset({"sample_minted", "sample_api"}), minted=frozenset({"sample_minted"})
+    )
+    with ws(workspace_id):
+        await access.put("sample_minted", "first-mint")
+        assert await access.get("sample_minted") == "first-mint"
+        await access.put("sample_minted", "reissued")
+        assert await access.get("sample_minted") == "reissued"
+        with pytest.raises(UndeclaredCredentialSlot, match="sample_api"):
+            await access.put("sample_api", "handed-over")
+        with pytest.raises(ValueError, match="empty"):
+            await access.put("sample_minted", "")
+    assert await store.get(workspace_id, "sample_minted") == "reissued"
+    with pytest.raises(CredentialSlotUnset):
+        await store.get(workspace_id, "sample_api")
+
+
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
+async def test_a_mint_meeting_another_first_mint_in_flight_replaces_it(db: None) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    access = CredentialAccess(
+        declared=frozenset({"sample_minted"}), minted=frozenset({"sample_minted"})
+    )
+    with ws(workspace_id):
+        async with workspace_tx() as other_pod:
+            holder = (await other_pod.execute(sa.text("select pg_backend_pid()"))).scalar_one()
+            await other_pod.execute(
+                sa.insert(tables.credential).values(
+                    workspace_id=workspace_id,
+                    slot="sample_minted",
+                    ciphertext=store.fernet.encrypt(b"first-mint"),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            mint = asyncio.create_task(access.put("sample_minted", "second-mint"))
+            async with asyncio.timeout(LOCK_OBSERVE_TIMEOUT_SECONDS):
+                while True:
+                    async with workspace_tx() as observer:
+                        blocked = (
+                            await observer.execute(
+                                sa.text(
+                                    "select exists ("
+                                    "select 1 from pg_stat_activity "
+                                    "where cast(:holder as integer) = any(pg_blocking_pids(pid))"
+                                    ")"
+                                ),
+                                {"holder": holder},
+                            )
+                        ).scalar_one()
+                    if blocked:
+                        break
+        await mint
+    assert await store.get(workspace_id, "sample_minted") == "second-mint"
+
+
+def test_a_slot_its_extension_mints_is_no_members_to_fill() -> None:
+    manifest = Manifest(
+        name="minter",
+        version="1",
+        credentials=(
+            CredentialSlot(name="minter_api_key", description="The member's API key."),
+            CredentialSlot(name="minter_token", description="A token minter mints.", minted=True),
+        ),
+    )
+    assert [slot.name for slot in declared_slots((manifest,))] == ["minter_api_key"]
+    assert minted_slots(manifest) == frozenset({"minter_token"})
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -411,7 +481,7 @@ async def test_an_unfilled_slot_opens_no_egress_and_a_code_only_slot_never_rides
     workspace_id = await _workspace()
     store = _store()
     assert (
-        await derive_credential_rules(
+        await derive_credential_binds(
             WorkspaceSlots(deploy=injecting_slots((_keyed_manifest(),))), workspace_id, store
         )
         == ()
@@ -424,19 +494,15 @@ async def test_an_unfilled_slot_opens_no_egress_and_a_code_only_slot_never_rides
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_one_workspace_never_derives_anothers_secret(db: None) -> None:
-    """Per-workspace resolution is the tenant isolation the one shared proxy leans on: the same
-    declaration resolved for a second workspace yields that workspace's own secret, or nothing."""
+async def test_one_workspace_never_binds_anothers_slot(db: None) -> None:
     first, second = await _workspace(), await _workspace()
     store = _store()
     await store.put(first, "datadog_api_key", "first-secret")
     slots = WorkspaceSlots(deploy=injecting_slots((_keyed_manifest(),)))
-    assert [
-        rule.real
-        for rule in await derive_credential_rules(slots, first, store)
-        if isinstance(rule, InjectionRule)
-    ] == ["first-secret"]
-    assert await derive_credential_rules(slots, second, store) == ()
+    assert await derive_credential_binds(slots, first, store) == (
+        Bind(host=DATADOG_HOST, header="DD-API-KEY", secret="datadog_api_key", env="DD_API_KEY"),
+    )
+    assert await derive_credential_binds(slots, second, store) == ()
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -467,7 +533,7 @@ def test_a_host_choice_must_name_a_declared_slot() -> None:
     keyed = CredentialSlot(
         name="dd_key",
         description="k",
-        injection=InjectionTarget(host=DATADOG_SITES, header="DD-API-KEY", sentinel="S_DD"),
+        injection=InjectionTarget(host=DATADOG_SITES, header="DD-API-KEY", env="DD_API_KEY"),
     )
     typo = replace(
         keyed,
@@ -480,7 +546,7 @@ def test_a_host_choice_must_name_a_declared_slot() -> None:
     assert injecting_slots((Manifest(name="k", version="1", credentials=(keyed,)), elsewhere))
 
 
-def test_two_slots_claiming_one_sentinel_or_env_fail_loud() -> None:
+def test_two_slots_claiming_one_env_fail_loud() -> None:
     first = Manifest(
         name="a",
         version="1",
@@ -488,27 +554,10 @@ def test_two_slots_claiming_one_sentinel_or_env_fail_loud() -> None:
             CredentialSlot(
                 name="a_key",
                 description="key",
-                injection=InjectionTarget(
-                    host="api.a.test", header="x-key", sentinel="SHARED", env="A_KEY"
-                ),
+                injection=InjectionTarget(host="api.a.test", header="x-key", env="A_KEY"),
             ),
         ),
     )
-    same_sentinel = Manifest(
-        name="b",
-        version="1",
-        credentials=(
-            CredentialSlot(
-                name="b_key",
-                description="key",
-                injection=InjectionTarget(
-                    host="api.b.test", header="x-key", sentinel="SHARED", env="B_KEY"
-                ),
-            ),
-        ),
-    )
-    with pytest.raises(RuntimeError, match="sentinel"):
-        injecting_slots((first, same_sentinel))
     same_env = Manifest(
         name="c",
         version="1",
@@ -516,18 +565,17 @@ def test_two_slots_claiming_one_sentinel_or_env_fail_loud() -> None:
             CredentialSlot(
                 name="c_key",
                 description="key",
-                injection=InjectionTarget(
-                    host="api.c.test", header="x-key", sentinel="OWN", env="A_KEY"
-                ),
+                injection=InjectionTarget(host="api.c.test", header="x-key", env="A_KEY"),
             ),
         ),
     )
-    with pytest.raises(RuntimeError, match="env"):
+    with pytest.raises(RuntimeError, match="env 'A_KEY'"):
         injecting_slots((first, same_env))
+    assert len(injecting_slots((first,))) == 1
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_the_proxy_withholds_every_rule_for_a_selection_the_row_does_not_offer(
+async def test_the_policy_binds_nothing_for_a_selection_the_row_does_not_offer(
     db: None, caplog: pytest.LogCaptureFixture
 ) -> None:
     workspace_id = await _workspace()
@@ -538,9 +586,9 @@ async def test_the_proxy_withholds_every_rule_for_a_selection_the_row_does_not_o
     await store.put(workspace_id, "datadog_api_host", "169.254.169.254")
 
     with caplog.at_level(logging.WARNING, logger="ufo"):
-        rules = await derive_credential_rules(slots, workspace_id, store)
+        binds = await derive_credential_binds(slots, workspace_id, store)
 
-    assert rules == ()
+    assert binds == ()
     warned = [
         record.ufo
         for record in caplog.records
@@ -553,68 +601,9 @@ async def test_the_proxy_withholds_every_rule_for_a_selection_the_row_does_not_o
     assert not any("169.254" in str(entry) for entry in warned)
 
     await store.put(workspace_id, "datadog_api_host", US5_HOST)
-    assert {
-        rule.host
-        for rule in await derive_credential_rules(slots, workspace_id, store)
-        if isinstance(rule, InjectionRule)
-    } == {US5_HOST}
-
-
-def test_slots_reaching_one_host_must_meter_it_the_same_way() -> None:
-    """A host is metered once however many keys reach it, so the derivation emits one meter per
-    host — and a second dimension would simply be dropped."""
-
-    def keyed(name: str, dimension: str) -> CredentialSlot:
-        return CredentialSlot(
-            name=name,
-            description="key",
-            injection=InjectionTarget(
-                host="api.one.test",
-                header=f"X-{name}",
-                sentinel=f"S_{name}",
-                dimension=dimension,
-            ),
-        )
-
-    agreed = Manifest(
-        name="agreed",
-        version="1",
-        credentials=(keyed("a_key", "requests"), keyed("b_key", "requests")),
-    )
-    assert len(injecting_slots((agreed,))) == 2
-    diverged = Manifest(
-        name="diverged",
-        version="1",
-        credentials=(keyed("c_key", "requests"), keyed("d_key", "tokens")),
-    )
-    with pytest.raises(RuntimeError, match="metered once"):
-        injecting_slots((diverged,))
-
-    aliased = Manifest(
-        name="aliased",
-        version="1",
-        credentials=(
-            CredentialSlot(
-                name="e_key",
-                description="key",
-                injection=InjectionTarget(
-                    host=HostChoice(
-                        slot="e_host",
-                        description="site",
-                        hosts=("api.one.test", "api.other.test"),
-                        default="api.other.test",
-                        env="E_HOST",
-                    ),
-                    header="X-E",
-                    sentinel="S_E",
-                    dimension="tokens",
-                ),
-            ),
-            CredentialSlot(name="e_host", description="site"),
-        ),
-    )
-    with pytest.raises(RuntimeError, match=re.escape("api.one.test")):
-        injecting_slots((agreed, aliased))
+    assert {bind.host for bind in await derive_credential_binds(slots, workspace_id, store)} == {
+        US5_HOST
+    }
 
 
 def _connector_grant(
@@ -670,8 +659,7 @@ async def test_a_slot_fault_withholds_its_own_host_and_leaves_the_rest_deriving(
                 injection=InjectionTarget(
                     host=PERPLEXITY_HOST,
                     header="authorization",
-                    sentinel="SENTINEL_PPLX",
-                    dimension="requests",
+                    env="PPLX_API_KEY",
                 ),
             ),
         ),
@@ -679,14 +667,15 @@ async def test_a_slot_fault_withholds_its_own_host_and_leaves_the_rest_deriving(
     slots = WorkspaceSlots(deploy=injecting_slots((_keyed_manifest(), fixed)))
 
     with caplog.at_level(logging.WARNING, logger="ufo"):
-        rules = await derive_credential_rules(slots, workspace_id, store)
+        binds = await derive_credential_binds(slots, workspace_id, store)
 
-    assert rules == (
-        ScopeRule(allowed_hosts=frozenset({PERPLEXITY_HOST})),
-        InjectionRule(
-            host=PERPLEXITY_HOST, header="authorization", sentinel="SENTINEL_PPLX", real="pplx-real"
+    assert binds == (
+        Bind(
+            host=PERPLEXITY_HOST,
+            header="authorization",
+            secret="perplexity_api_key",
+            env="PPLX_API_KEY",
         ),
-        MeterRule(host=PERPLEXITY_HOST, dimension="requests"),
     )
     withheld = [
         record.ufo
@@ -698,10 +687,9 @@ async def test_a_slot_fault_withholds_its_own_host_and_leaves_the_rest_deriving(
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_secret_row_this_deploy_cannot_decrypt_withholds_its_own_host_alone(
+async def test_a_secret_row_this_deploy_cannot_decrypt_still_binds_by_name(
     db: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The same totality claim over the slot's own secret, not its host selection."""
     workspace_id = await _workspace()
     store = _store()
     await _store().put(workspace_id, "datadog_api_key", "dd-api-real")
@@ -718,8 +706,7 @@ async def test_a_secret_row_this_deploy_cannot_decrypt_withholds_its_own_host_al
                 injection=InjectionTarget(
                     host=PERPLEXITY_HOST,
                     header="authorization",
-                    sentinel="SENTINEL_PPLX",
-                    dimension="requests",
+                    env="PPLX_API_KEY",
                 ),
             ),
         ),
@@ -727,23 +714,26 @@ async def test_a_secret_row_this_deploy_cannot_decrypt_withholds_its_own_host_al
     slots = WorkspaceSlots(deploy=injecting_slots((_keyed_manifest(), fixed)))
 
     with caplog.at_level(logging.WARNING, logger="ufo"):
-        rules = await derive_credential_rules(slots, workspace_id, store)
+        binds = await derive_credential_binds(slots, workspace_id, store)
 
-    assert rules == (
-        ScopeRule(allowed_hosts=frozenset({PERPLEXITY_HOST})),
-        InjectionRule(
-            host=PERPLEXITY_HOST, header="authorization", sentinel="SENTINEL_PPLX", real="pplx-real"
+    assert binds == (
+        Bind(host=DATADOG_HOST, header="DD-API-KEY", secret="datadog_api_key", env="DD_API_KEY"),
+        Bind(
+            host=DATADOG_HOST,
+            header="DD-APPLICATION-KEY",
+            secret="datadog_application_key",
+            env="DD_APP_KEY",
         ),
-        MeterRule(host=PERPLEXITY_HOST, dimension="requests"),
+        Bind(
+            host=PERPLEXITY_HOST,
+            header="authorization",
+            secret="perplexity_api_key",
+            env="PPLX_API_KEY",
+        ),
     )
-    withheld = [
-        record.ufo
-        for record in caplog.records
-        if record.getMessage() == "egress.credential_slot_failed"
-    ]
-    assert [entry["slot"] for entry in withheld] == ["datadog_api_key", "datadog_application_key"]
-    assert {entry["error_class"] for entry in withheld} == {"InvalidToken"}
-    assert not any("dd-api-real" in str(entry) for entry in withheld)
+    assert not any(
+        record.getMessage() == "egress.credential_slot_failed" for record in caplog.records
+    )
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

@@ -4,23 +4,19 @@ import asyncio
 import hmac
 import json
 import os
-import secrets
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
+import httpx
 import uvicorn
-from cryptography import x509
 from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from dbos import DBOS, DBOSClient
 from fastapi import FastAPI, WebSocket
 from openfeature.provider import FeatureProvider
@@ -31,9 +27,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ufo.blob import (
     BlobStore,
-    FilesystemBlobStore,
     FleetBlobStore,
-    S3BlobStore,
     WorkspaceBlobStore,
     blob_store_for,
 )
@@ -56,26 +50,13 @@ from ufo.harness.document_renderer import DocumentRenderer
 from ufo.harness.durability import ReplaySafeSerializer, replay_safe_client
 from ufo.harness.models.catalog_skill import model_catalog_skill
 from ufo.harness.models.interface import AUTO_MODEL
-from ufo.harness.models.pricing import Pricing
 from ufo.harness.models.registry import ModelRegistry, model_registry
 from ufo.harness.o11y import init_o11y, init_service_checks, log, warn
-from ufo.harness.sandbox.cache import (
-    CACHE_CONTROL_TOKEN_ENV,
-    CACHE_HOST,
-    CACHE_PKG_HOSTS,
-    parse_cache_daemon,
-)
 from ufo.harness.sandbox.conversation import ConversationSandbox
 from ufo.harness.sandbox.exec_env import ProbeEnv
 from ufo.harness.sandbox.preview import parse_preview_service
 from ufo.harness.sandbox.select import select_carriers
-from ufo.harness.sandbox.session import (
-    EGRESS_CA_CERT_ENV,
-    EGRESS_CONTROL_TOKEN_ENV,
-    ProbeTokenCodec,
-    ProxyEndpoint,
-    RunTokenCodec,
-)
+from ufo.harness.sandbox.session import RunTokenCodec
 from ufo.harness.sandbox.site_report import SiteReports
 from ufo.harness.sandbox.terminal import Terminals, TerminalTransport
 from ufo.host.assemble import HostEnvironment
@@ -94,6 +75,7 @@ from ufo.host.ext.loader import (
     member_object_registry,
     member_skill_listing,
     memory_search,
+    proxy_credentials,
     skill_registry,
     turn_subagent_grants,
     turn_subagents,
@@ -101,7 +83,7 @@ from ufo.host.ext.loader import (
     workspace_slot_source,
 )
 from ufo.product import ProductCensus
-from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
+from ufo.proxy_serve import MODEL_KEY_ENVS, OWNER_DSN_ENV, model_bindings
 from ufo.runtime.access.connectors import (
     AuthProxy,
     ConnectorEntry,
@@ -112,15 +94,25 @@ from ufo.runtime.access.credentials import (
     CredentialStore,
     deploy_env,
 )
-from ufo.runtime.access.egress_control import EgressControl
+from ufo.runtime.access.egress_control import (
+    CACHE_CONTROL_TOKEN_ENV,
+    PREVIEW_RELAY_TIMEOUT_SECONDS,
+    PROXY_PUBLIC_KEY_ENV,
+    EgressControl,
+    PreviewRelay,
+    load_proxy_public_key,
+)
 from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import (
+    HostEntry,
     connector_transfer_hosts,
-    derive_artifact_store_rules,
-    derive_manifest_rules,
-    derive_residential_rules,
+    derive_artifact_store_hosts,
+    derive_manifest_internet,
 )
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
+from ufo.runtime.access.proxy_sessions import PROXY_CALL_TIMEOUT_SECONDS, ProxySessions
+from ufo.runtime.access.turn_sessions import DeploySessions, ProbeSessions
+from ufo.runtime.access.vault import VaultReads
 from ufo.runtime.background_tasks import BackgroundTaskSweep
 from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger
 from ufo.runtime.billing.spend import NO_SPEND_GATES, GateDeploy, SpendGates, built_gates
@@ -145,6 +137,7 @@ from ufo.runtime.ext.manifest import (
     SearchProviderSpec,
     conversation_slot_declarations,
     declared_slots,
+    minted_slots,
     open_connector_namespace,
 )
 from ufo.runtime.ext.operator import OperatorSetup, install_operator, select_operator_rule
@@ -430,31 +423,29 @@ def run(fleet: Fleet) -> None:
 
     app = FastAPI(lifespan=_serve_lifespan)
     tailer = HubTailer(hub=hub, spend=spend)
+    proxy_sessions = deploy_proxy_sessions(config, manifests)
+    rules = deploy_rules(
+        config, manifests, credentials, _one_shot(derive_artifact_store_hosts(blob_backend))
+    )
+    deploy_sessions = (
+        None if proxy_sessions is None else DeploySessions(proxy_sessions, rules, run_tokens)
+    )
     tool_bridge = ToolBridge(
         dbos=dbos_client,
         tailer=tailer,
         tools=bridge_tools(manifests),
         subagents=subagents,
         subagent_grants=subagent_grants,
+        sessions=deploy_sessions,
         actions=deploy_actions,
     )
+    _proxy_control(app, config, rules, run_tokens, tool_bridge, proxy_sessions)
     sandboxes = ConversationSandbox(
         carrier=carrier,
         backend=config.sandbox.backend,
         off_cluster=carrier_spec.off_cluster,
         resume_carriers=carriers.resume,
         image_ref=config.sandbox.image_ref,
-        proxy=_proxy_endpoint(
-            app,
-            config,
-            manifests,
-            credentials,
-            registry.pricing,
-            run_tokens,
-            blob_backend,
-            tool_bridge,
-            ledger,
-        ),
         workspace_root=config.sandbox.workspace_root,
         terminals=_select_terminal_transport(config, manifests, fleet_blob),
         document_renderer=document_renderer,
@@ -462,7 +453,7 @@ def run(fleet: Fleet) -> None:
     )
     probes = ConversationProbes(
         sandboxes,
-        ProbeTokenCodec(secret=run_tokens.secret),
+        None if proxy_sessions is None else ProbeSessions(proxy_sessions, rules),
         ProbeEnv(
             grants=GrantStore() if credentials is not None else None,
             clis=connector_clis(manifests),
@@ -521,6 +512,8 @@ def run(fleet: Fleet) -> None:
         ledger=ledger,
         home_surface=browser_home,
         tailer=tailer,
+        rules=rules,
+        sessions=proxy_sessions,
     )
     init_runtime(runtime)
     install_connect_flow(
@@ -553,6 +546,7 @@ def run(fleet: Fleet) -> None:
     app.state.fleet = fleet
     app.state.hub = hub
     app.state.dbos = dbos_client
+    app.state.deploy_sessions = deploy_sessions
     app.state.instance_id = instance_id
     app.state.durable_surfaces = durable_surfaces(manifests)
     app.state.writeback_poller = None
@@ -591,7 +585,20 @@ def run(fleet: Fleet) -> None:
     page_feed = CorePageFeed(blob=blob)
     _launch_jobs(runtime, invoker_for, sync_driver, page_feed, probes)
     _mount_ext_routes(
-        app, manifests, credentials, index, embed, config.connect.public_base_url, spend, ledger
+        app,
+        manifests,
+        credentials,
+        index,
+        embed,
+        config.connect.public_base_url,
+        spend,
+        ledger,
+        vault=VaultReads(
+            credentials,
+            workspace_slot_source(manifests),
+            connector_clis(manifests),
+            MODEL_KEY_ENVS(config),
+        ),
     )
     _mount_shared_surfaces(
         app,
@@ -605,6 +612,7 @@ def run(fleet: Fleet) -> None:
         config.connect.public_base_url,
         config.sandbox.ingress_public_url,
         (AUTO_MODEL, *sorted(registry.specs)),
+        deploy_sessions=deploy_sessions,
         probes=probes,
         runtime_identity=runtime_identity,
         connectors=connectors,
@@ -733,7 +741,7 @@ def _launch_jobs(
             TurnDispatcher(client=runtime.dbos, spend=runtime.spend),
             page_change_runner,
             DeliverySweep(invoker_for=invoker_for, registry=runtime.subagents),
-            BackgroundTaskSweep(probes=probes, invoker_for=invoker_for),
+            BackgroundTaskSweep(probes=probes, invoker_for=invoker_for, sessions=runtime.sessions),
             preview_renderer,
             ProductCensus(
                 contributions=tuple(
@@ -1094,6 +1102,8 @@ def _mount_ext_routes(
     public_base_url: str | None,
     spend: SpendGates,
     ledger: Ledger,
+    *,
+    vault: VaultReads | None = None,
 ) -> None:
     for manifest in manifests:
         if not manifest.routes:
@@ -1110,8 +1120,11 @@ def _mount_ext_routes(
             embed,
             public_base_url=public_base_url,
             home_surface=home_surface(manifests),
+            minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
+            vault_read=manifest.vault_read,
+            vault=vault,
         )
         for spec in manifest.routes:
 
@@ -1121,6 +1134,8 @@ def _mount_ext_routes(
                 identify=spec.identify,
                 extension_context=context,
             ) -> Response:
+                if identify is None:
+                    return await handler(extension_context, request)
                 identified = identify(request)
                 if identified is None:
                     return JSONResponse(
@@ -1288,6 +1303,7 @@ def _mount_shared_surfaces(
     ingress_public_url: str | None,
     models: tuple[str, ...],
     *,
+    deploy_sessions: DeploySessions | None,
     probes: ConversationProbes | None = None,
     runtime_identity: RuntimeIdentity | None = None,
     connectors: ConnectorRegistry | None = None,
@@ -1312,7 +1328,7 @@ def _mount_shared_surfaces(
         )
     admission = _admission(dbos_client, manifests, hub, spend)
     tailer = HubTailer(hub=hub, spend=spend)
-    stopper = MemberStop(client=dbos_client, hub=hub, admission=admission)
+    stopper = MemberStop(client=dbos_client, hub=hub, admission=admission, sessions=deploy_sessions)
     turn_steps = DurableTurnSteps(client=dbos_client)
     system_skill_bundle = SystemSkillBundle.from_skills(skills.bundled_skills())
     registered: dict[str, SurfaceSpec] = {}
@@ -1328,6 +1344,7 @@ def _mount_shared_surfaces(
             ext=extension_context_for(
                 manifest.name,
                 frozenset(slot.name for slot in manifest.credentials),
+                minted=minted_slots(manifest),
                 spend=spend,
                 ledger=ledger,
             ),
@@ -1475,25 +1492,37 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     if app.state.configured_sources:
         with ws(await sole_workspace()):
             await register_sources(app.state.configured_sources)
-    async with asyncio.TaskGroup() as group:
-        tasks = [
-            group.create_task(ExecutorRecovery().run()),
-            group.create_task(CancelReconciler(client=app.state.dbos).run()),
-            group.create_task(StrandedTurnReconciler(client=app.state.dbos).run()),
-        ]
-        if app.state.fleet.surfaces:
-            for boot in app.state.surface_boots:
-                boot(FleetBlobStore(backend=app.state.blob.backend))
-            for poller in (app.state.writeback_poller, app.state.mid_turn_reply_poller):
-                if poller is not None:
-                    tasks.append(group.create_task(poller.run()))
-            for listener in app.state.surface_listeners:
-                tasks.append(group.create_task(listener.run()))
-        try:
-            yield
-        finally:
-            for task in tasks:
-                task.cancel()
+    try:
+        async with asyncio.TaskGroup() as group:
+            tasks = [
+                group.create_task(ExecutorRecovery().run()),
+                group.create_task(
+                    CancelReconciler(
+                        client=app.state.dbos, sessions=app.state.deploy_sessions
+                    ).run()
+                ),
+                group.create_task(
+                    StrandedTurnReconciler(
+                        client=app.state.dbos, sessions=app.state.deploy_sessions
+                    ).run()
+                ),
+            ]
+            if app.state.fleet.surfaces:
+                for boot in app.state.surface_boots:
+                    boot(FleetBlobStore(backend=app.state.blob.backend))
+                for poller in (app.state.writeback_poller, app.state.mid_turn_reply_poller):
+                    if poller is not None:
+                        tasks.append(group.create_task(poller.run()))
+                for listener in app.state.surface_listeners:
+                    tasks.append(group.create_task(listener.run()))
+            try:
+                yield
+            finally:
+                for task in tasks:
+                    task.cancel()
+    finally:
+        for client in app.state.http_clients:
+            await client.aclose()
 
 
 def _preview_settings(config: Config) -> tuple[tuple[str, int], str] | None:
@@ -1508,97 +1537,97 @@ def _preview_settings(config: Config) -> tuple[tuple[str, int], str] | None:
     return preview_service, preview_token
 
 
-def _proxy_endpoint(
-    app: FastAPI,
+def deploy_rules(
     config: Config,
     manifests: tuple[Manifest, ...],
     credentials: CredentialStore | None,
-    pricing: Pricing,
-    run_tokens: RunTokenCodec,
-    blob: FilesystemBlobStore | S3BlobStore,
-    bridge: ToolBridge | None,
-    ledger: Ledger,
-) -> ProxyEndpoint:
-    """A local `ufoctl serve` with no `ufo-egress` beside it mounts the control RPC under a
-    throwaway CA, so an in-sandbox CONNECT to the unmanned proxy port is refused."""
-    if config.sandbox.proxy_public_url is not None:
-        ca_cert = os.environ.get(EGRESS_CA_CERT_ENV)
-        if not ca_cert:
-            raise RuntimeError(
-                f"{EGRESS_CA_CERT_ENV} must hold the shared egress CA certificate (PEM) so the "
-                "sandbox trusts the proxy's TLS; the egress wire runs as a separate `ufo-egress` "
-                "process that holds the matching key"
-            )
-        control_token = os.environ.get(EGRESS_CONTROL_TOKEN_ENV)
-        if not control_token:
-            raise RuntimeError(
-                f"{EGRESS_CONTROL_TOKEN_ENV} must be set so `ufo-egress` authenticates to serve's "
-                "egress-control RPC"
-            )
-    else:
-        ca_cert = os.environ.get(EGRESS_CA_CERT_ENV) or _ephemeral_egress_ca()
-        control_token = os.environ.get(EGRESS_CONTROL_TOKEN_ENV) or secrets.token_urlsafe(32)
-    cache_daemon = parse_cache_daemon(config.sandbox.cache_daemon)
+    artifact_hosts: tuple[HostEntry, ...],
+) -> PerAgentRules:
+    """What compiles the deploy's session policies: its model hosts and binds, `artifact_hosts`,
+    and the grant, slot and CLI sources of `manifests`."""
     preview = _preview_settings(config)
-    cache_control_token = os.environ.get(CACHE_CONTROL_TOKEN_ENV)
-    if cache_daemon is not None and not cache_control_token:
-        raise RuntimeError(
-            f"{CACHE_CONTROL_TOKEN_ENV} must be set when the sandbox cache is enabled so the cache "
-            "daemon authenticates to serve's git-credential route; without it every cache-routed "
-            "git request is refused"
-        )
-    clis = connector_clis(manifests)
-    resolver = PerAgentRules(
-        base=(
-            *model_rule_base(config),
-            *_one_shot(derive_artifact_store_rules(blob)),
-            *derive_residential_rules(config.sandbox.residential_hosts),
-        ),
+    model_hosts, model_binds = model_bindings(config)
+    public_base_url = config.connect.public_base_url
+    served = None if public_base_url is None else public_base_url.rstrip("/")
+    return PerAgentRules(
+        hosts=(*model_hosts, *artifact_hosts),
+        binds=model_binds,
         grants=GrantStore() if credentials is not None else None,
         credentials=credentials,
         slots=workspace_slot_source(manifests),
-        internet=derive_manifest_rules(manifests),
+        internet=derive_manifest_internet(manifests),
         transfer_hosts=connector_transfer_hosts(manifests),
-        clis=clis,
-        cache_host=CACHE_HOST if cache_daemon is not None else None,
-        cache_pkg_hosts=CACHE_PKG_HOSTS if cache_daemon is not None else (),
-        preview_token=None if preview is None else preview[1],
+        clis=connector_clis(manifests),
+        bridge_upstream=None if served is None else f"{served}/internal/egress/tool-bridge",
+        preview_upstream=(
+            None if served is None or preview is None else f"{served}/internal/egress/preview"
+        ),
     )
+
+
+def _proxy_control(
+    app: FastAPI,
+    config: Config,
+    rules: PerAgentRules,
+    run_tokens: RunTokenCodec,
+    bridge: ToolBridge | None,
+    sessions: ProxySessions | None,
+) -> EgressControl:
+    preview = _preview_settings(config)
+    public_base_url = config.connect.public_base_url
+    proxy_url = config.sandbox.proxy_url
+    if proxy_url is not None and (
+        public_base_url is None or not public_base_url.startswith("https://")
+    ):
+        raise RuntimeError(
+            "[connect] public_base_url must be this deploy's https:// URL when [sandbox] proxy_url "
+            "is set, because the proxy service relays its routes only to a TLS upstream."
+        )
+    stamp_key = None if proxy_url is None else _proxy_public_key()
     control = EgressControl(
-        control_token=control_token,
-        cache_control_token=cache_control_token or secrets.token_urlsafe(32),
-        resolver=resolver,
-        pricing=pricing,
+        cache_control_token=os.environ.get(CACHE_CONTROL_TOKEN_ENV) or None,
+        resolver=rules,
         run_tokens=run_tokens,
         bridge=bridge,
-        ledger=ledger,
+        stamp_key=stamp_key,
+        preview=(
+            None
+            if stamp_key is None or preview is None
+            else PreviewRelay(*preview, httpx.AsyncClient(timeout=PREVIEW_RELAY_TIMEOUT_SECONDS))
+        ),
     )
-    app.include_router(control.router())
-    app.include_router(control.git_credential_router())
-    return ProxyEndpoint(
-        port=config.sandbox.proxy_port,
-        ca_cert=ca_cert,
-        public_url=config.sandbox.proxy_public_url,
+    if control.cache_control_token is not None:
+        app.include_router(control.git_credential_router())
+    if stamp_key is not None:
+        app.include_router(control.router())
+    app.state.http_clients = (
+        *(() if control.preview is None else (control.preview.http,)),
+        *(() if sessions is None else (sessions.http,)),
+    )
+    return control
+
+
+def deploy_proxy_sessions(config: Config, manifests: tuple[Manifest, ...]) -> ProxySessions | None:
+    """The client of the proxy service's session API under `[sandbox] proxy_url`, or None when
+    the deploy runs no proxy service."""
+    proxy_url = config.sandbox.proxy_url
+    if proxy_url is None:
+        return None
+    return ProxySessions(
+        proxy_url.rstrip("/"),
+        proxy_credentials(manifests),
+        httpx.AsyncClient(timeout=PROXY_CALL_TIMEOUT_SECONDS),
     )
 
 
-def _ephemeral_egress_ca() -> str:
-    """Cert only: the signing key lives in `ufo-egress`, and with none running a CONNECT is refused
-    before any leaf is validated."""
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ufo-egress-local")])
-    certificate = (
-        x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.now(UTC))
-        .not_valid_after(datetime.now(UTC) + timedelta(days=3650))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .sign(key, hashes.SHA256())
-    )
-    return certificate.public_bytes(serialization.Encoding.PEM).decode()
+def _proxy_public_key() -> Ed25519PublicKey:
+    raw = os.environ.get(PROXY_PUBLIC_KEY_ENV)
+    if not raw:
+        raise RuntimeError(
+            f"{PROXY_PUBLIC_KEY_ENV} must hold the proxy service's Ed25519 public key so the "
+            "routes it relays can be verified."
+        )
+    return load_proxy_public_key(raw)
 
 
 WILDCARD_BINDS = frozenset({"0.0.0.0", "::"})

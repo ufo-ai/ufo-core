@@ -1,13 +1,16 @@
 import asyncio
-from base64 import b64encode
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import sqlalchemy as sa
+import ufo_ext_sample.manifest as sample
 from cryptography.fernet import Fernet
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
@@ -16,10 +19,12 @@ from opentelemetry.sdk.metrics.export import (
     NumberDataPoint,
 )
 from ufo_ext_sample.spend import CHARGE_TABLE, SampleGate, allow
+from ufo_ext_sample.tools import TOOL_NAME
 
+from core.tests.access.proxy_fake import SENTINEL_HEAD, proxy_app
 from ufo.db import workspace_tx
 from ufo.harness import o11y
-from ufo.harness.models.catalog import CORE_PRICING
+from ufo.harness.models.catalog import ANTHROPIC_KEY_ENV, CORE_PRICING, OPENAI_KEY_ENV
 from ufo.harness.models.interface import (
     PROVIDER_ANTHROPIC,
     Message,
@@ -42,29 +47,54 @@ from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSand
 from ufo.harness.sandbox.exec_env import CONVERSATION_ID_ENV, ProbeEnv
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
-    SENTINEL_MODEL_KEY,
-    ProbeToken,
-    ProbeTokenCodec,
-    ProxyEndpoint,
+    PROXY_SESSION_ENV_NAMES,
+    Carrier,
+    DialTarget,
+    ExecResult,
     SandboxHandle,
     SandboxSpec,
 )
 from ufo.harness.sandbox.terminal import TerminalGone
-from ufo.runtime.access.credentials import CredentialStore
+from ufo.host.ext.loader import turn_hooks, turn_tools
+from ufo.runtime.access.connectors import CliCredential
+from ufo.runtime.access.credentials import CredentialStore, HostChoice
+from ufo.runtime.access.egress_resolver import PerAgentRules
+from ufo.runtime.access.egress_rules import (
+    CONNECTION_SECRET_PREFIX,
+    UFO_MODELS_SECRET,
+    Bind,
+    PolicyScope,
+)
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.access.proxy_sessions import (
+    IDEMPOTENCY_HEADER,
+    ProxySessions,
+)
+from ufo.runtime.access.turn_sessions import PROBE_SESSION_MARGIN_SECONDS, ProbeSessions
+from ufo.runtime.access.vault import SecretUnbound, SecretValue, VaultReads
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
+from ufo.runtime.agent_scope import agent
 from ufo.runtime.billing.accounting import (
+    AGENT_LABEL,
+    CONVERSATION_LABEL,
+    GIB_DIMENSION,
+    MEMBER_LABEL,
+    PROBE_LABEL,
+    PROXY_SERVICE,
+    REQUESTS_DIMENSION,
     UNGATED_LEDGER,
     Ledger,
     OffTurnSpendRefused,
     ServiceTotal,
     SpendRollup,
     SpendTotals,
-    record_probe_egress_request,
+    UsageLine,
 )
 from ufo.runtime.billing.spend import NO_SPEND_GATES, PARK, GateDeploy, SpendDecision, SpendGates
 from ufo.runtime.ext.context import (
     CORE_EXTENSION,
     PROBE_TIMEOUT_MAX_SECONDS,
+    PROBE_TIMEOUT_SECONDS,
     ConversationFacts,
     ConversationFiles,
     ConversationProbes,
@@ -607,6 +637,25 @@ async def test_credential_access_gates_a_slot_the_extension_resolves_per_workspa
         assert await store.stored_slots(workspace_id) == frozenset()
 
 
+async def test_the_sample_manifests_contexts_carry_the_slots_it_mints(db: None) -> None:
+    manifest = sample.manifest()
+    store = _store()
+    init_workspace_credentials(store)
+    _tools, ext_by_tool, _verbs = turn_tools((manifest,), store, audience=SHARED_AUDIENCE)
+    chain = turn_hooks((manifest,), store, audience=SHARED_AUDIENCE)
+    contexts = [
+        ext_by_tool[TOOL_NAME],
+        *(hook.ext for hooks in chain.hooks.values() for hook in hooks),
+    ]
+    assert {context.credentials.minted for context in contexts} == {frozenset({sample.MINTED_SLOT})}
+    credentials = ext_by_tool[TOOL_NAME].credentials
+    with ws(await _workspace()):
+        await credentials.put(sample.MINTED_SLOT, "minted-by-the-sample")
+        assert await credentials.get(sample.MINTED_SLOT) == "minted-by-the-sample"
+        with pytest.raises(UndeclaredCredentialSlot, match=sample.API_SLOT):
+            await credentials.put(sample.API_SLOT, "handed-over")
+
+
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_core_context_builds_and_is_usable(db: None) -> None:
     with ws(await _workspace()):
@@ -883,15 +932,12 @@ def _sandboxes(root: Path, carrier: LocalCarrier | None = None) -> ConversationS
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
         workspace_root=root,
     )
 
 
 def _probes(sandboxes: ConversationSandbox) -> ConversationProbes:
-    return ConversationProbes(
-        sandboxes, ProbeTokenCodec(b"probe-token-test-secret"), ProbeEnv().exports
-    )
+    return ConversationProbes(sandboxes, None, ProbeEnv().exports)
 
 
 def _files(sandboxes: ConversationSandbox) -> ConversationFiles:
@@ -916,22 +962,19 @@ async def test_probe_runs_in_the_conversations_own_sandbox(db: None, tmp_path: P
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_probes_acting_member_reaches_the_environment_and_token(
-    db: None, tmp_path: Path
-) -> None:
+async def test_a_probes_acting_member_reaches_its_environment(db: None, tmp_path: Path) -> None:
     asked: list[tuple[UUID, UUID | None]] = []
 
     async def env(conversation_id: UUID, probe_id: UUID, member_id: UUID | None) -> dict[str, str]:
         asked.append((probe_id, member_id))
-        return {}
+        return {"PROBE_ID": str(probe_id)}
 
     workspace_id = await _workspace()
     carrier = _RecordingProbeCarrier()
-    codec = ProbeTokenCodec(b"probe-token-test-secret")
     member_id = uuid4()
     with ws(workspace_id):
         conversation_id = await _conversation(workspace_id)
-        probes = ConversationProbes(_sandboxes(tmp_path / "workspaces", carrier), codec, env)
+        probes = ConversationProbes(_sandboxes(tmp_path / "workspaces", carrier), None, env)
         await probes.run(
             conversation_id,
             "true",
@@ -942,21 +985,153 @@ async def test_a_probes_acting_member_reaches_the_environment_and_token(
 
     assert [member for _, member in asked] == [member_id, None]
     assert len({probe_id for probe_id, _ in asked}) == 2
-    assert len(carrier.specs) == 2
-    principals = tuple(
-        codec.from_proxy_auth("Basic " + b64encode(f"{spec.run_token}:x".encode()).decode())
-        for spec in carrier.specs
+    assert [spec.env for spec in carrier.specs] == [
+        {"PROBE_ID": str(probe_id)} for probe_id, _ in asked
+    ]
+    assert all(PROXY_SESSION_ENV_NAMES.isdisjoint(spec.env) for spec in carrier.specs)
+
+
+PROBE_BEARER = "ufo_probe-system-token"
+PROBE_MODEL_BIND = Bind(
+    host="api.anthropic.com", header="x-api-key", secret=UFO_MODELS_SECRET, env="ANTHROPIC_API_KEY"
+)
+
+
+@dataclass(frozen=True)
+class _ProbeBearer:
+    async def bearer(self) -> str:
+        return PROBE_BEARER
+
+
+@dataclass(frozen=True)
+class _NoToken:
+    async def secret(self, workspace_id: UUID, account_id: str) -> str:
+        raise AssertionError("a session names a connection and never reads its token")
+
+
+@dataclass
+class _OffClusterCarrier:
+    envs: list[dict[str, str]] = field(default_factory=list)
+    refuses: bool = False
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        return SandboxHandle(
+            conversation_id=spec.conversation_id, container_id="sbx-probe", egress_env=spec.env
+        )
+
+    async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
+        return None
+
+    async def exec(
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
+    ) -> ExecResult:
+        self.envs.append(dict(handle.egress_env))
+        if self.refuses:
+            raise RuntimeError("The sandbox refused the command.")
+        return ExecResult(stdout="ok\n", stderr="", exit_code=0)
+
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        raise AssertionError("a probe never writes")
+
+    def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
+        raise AssertionError("a probe never reads")
+
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        raise AssertionError("a probe never dials a port")
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_probe_egresses_under_its_own_session_revoked_after_the_exec(
+    db: None, tmp_path: Path
+) -> None:
+    fake = proxy_app(PROBE_BEARER)
+    carrier = _OffClusterCarrier()
+    workspace_id = await _workspace()
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="watcher@work.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    rules = PerAgentRules(
+        binds=(PROBE_MODEL_BIND,),
+        grants=GrantStore(),
+        internet=True,
+        clis={"hub": CliCredential(env="HUB_TOKEN", header="authorization", secret=_NoToken())},
+        bridge_upstream="https://serve.test/internal/egress/tool-bridge",
     )
-    assert principals[0] == ProbeToken(
-        workspace_id=workspace_id,
-        conversation_id=conversation_id,
-        probe_id=asked[0][0],
-        expires_at=principals[0].expires_at,
-        member_id=member_id,
-        internet_access=False,
+    sandboxes = ConversationSandbox(
+        carrier=cast(Carrier, carrier),
+        backend="remote",
+        off_cluster=True,
+        image_ref=SANDBOX_IMAGE_REF,
+        workspace_root=tmp_path / "workspaces",
     )
-    assert principals[1].member_id is None
-    assert principals[1].internet_access is None
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=fake), base_url="https://proxy.test"
+    ) as http:
+        probes = ConversationProbes(
+            sandboxes,
+            ProbeSessions(ProxySessions("https://proxy.test", _ProbeBearer(), http), rules),
+            ProbeEnv().exports,
+        )
+        with ws(workspace_id):
+            with agent(agent_id):
+                connection_id = await GrantStore().record(
+                    provider="hub",
+                    account_id="acct-watcher",
+                    host="api.hub.test",
+                    grantor_member_id=member_id,
+                    shared=False,
+                )
+            conversation_id = await _conversation(workspace_id)
+            result = await probes.run(conversation_id, "true", acting_member_id=member_id)
+            carrier.refuses = True
+            with pytest.raises(RuntimeError, match="refused"):
+                await probes.run(conversation_id, "true", internet_access=False)
+
+    created = [
+        (headers[IDEMPOTENCY_HEADER.lower()], json.loads(body))
+        for method, target, headers, body in fake.state.calls
+        if (method, target) == ("POST", "/v1/sessions")
+    ]
+    (watched_key, watched), (narrowed_key, narrowed) = created
+    probe_id = watched_key.removeprefix("probe:")
+    assert narrowed_key.startswith("probe:") and narrowed_key != watched_key
+    assert watched["labels"] == {
+        CONVERSATION_LABEL: str(conversation_id),
+        AGENT_LABEL: str(agent_id),
+        PROBE_LABEL: probe_id,
+        MEMBER_LABEL: str(member_id),
+    }
+    assert MEMBER_LABEL not in narrowed["labels"]
+    assert watched["ttl_s"] == PROBE_TIMEOUT_SECONDS + PROBE_SESSION_MARGIN_SECONDS
+    assert watched["policy"]["routes"] == narrowed["policy"]["routes"] == []
+    assert [bind["secret"] for bind in watched["policy"]["bind"]] == [
+        f"{CONNECTION_SECRET_PREFIX}{connection_id}"
+    ]
+    assert narrowed["policy"]["bind"] == []
+    assert (watched["policy"]["internet"], narrowed["policy"]["internet"]) == (True, False)
+    sessions = list(fake.state.sessions.values())
+    assert [held["revoked_at"] is not None for held in sessions] == [True, True]
+    assert carrier.envs[0]["HTTPS_PROXY"].startswith(f"https://{sessions[0]['token']}:")
+    assert carrier.envs[0]["HUB_TOKEN"].startswith(SENTINEL_HEAD)
+    assert carrier.envs[1]["HTTPS_PROXY"].startswith(f"https://{sessions[1]['token']}:")
+    assert (result.stdout, result.exit_code) == ("ok\n", 0)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -966,28 +1141,46 @@ async def test_the_probe_environment_exports_keyed_connectors_but_never_a_model_
     workspace_id = await _workspace()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     await store.put(workspace_id, "datadog_api_key", "dd-real")
-    slots = (
-        CredentialSlot(
-            name="datadog_api_key",
-            description="datadog key",
-            injection=InjectionTarget(
-                host="api.datadoghq.com",
-                header="dd-api-key",
-                sentinel="UFO_SENTINEL_DATADOG_API_KEY",
-                env="DD_API_KEY",
+    await store.put(workspace_id, "datadog_api_host", "api.us5.datadoghq.com")
+    slots = WorkspaceSlots(
+        deploy=(
+            CredentialSlot(
+                name="datadog_api_key",
+                description="datadog key",
+                injection=InjectionTarget(
+                    host=HostChoice(
+                        slot="datadog_api_host",
+                        description="Datadog site.",
+                        hosts=("api.datadoghq.com", "api.us5.datadoghq.com"),
+                        default="api.datadoghq.com",
+                        env="DD_HOST",
+                    ),
+                    header="dd-api-key",
+                    env="DD_API_KEY",
+                ),
             ),
-        ),
+            CredentialSlot(name="datadog_api_host", description="Datadog site."),
+        )
     )
     with ws(workspace_id):
-        exports = await ProbeEnv(credentials=store, slots=WorkspaceSlots(deploy=slots)).exports(
-            uuid4(), uuid4()
+        exports = await ProbeEnv(credentials=store, slots=slots).exports(uuid4(), uuid4())
+        policy = await PerAgentRules(
+            binds=(PROBE_MODEL_BIND,), credentials=store, slots=slots
+        ).session_policy(
+            PolicyScope(
+                workspace_id=workspace_id,
+                member_id=None,
+                internet_access_allowed=False,
+                running=False,
+                run_token=None,
+            )
         )
         bare = await ProbeEnv().exports(uuid4(), uuid4())
 
-    assert exports["DD_API_KEY"] == "UFO_SENTINEL_DATADOG_API_KEY"
+    assert exports["DD_HOST"] == "api.us5.datadoghq.com"
     assert "dd-real" not in exports.values()
-    assert SENTINEL_MODEL_KEY not in exports.values()
-    assert SENTINEL_MODEL_KEY not in bare.values()
+    assert {"DD_API_KEY", ANTHROPIC_KEY_ENV, OPENAI_KEY_ENV}.isdisjoint(exports)
+    assert [(bind.secret, bind.env) for bind in policy.bind] == [("datadog_api_key", "DD_API_KEY")]
     assert set(bare) == {
         CONVERSATION_ID_ENV,
         "GIT_CONFIG_COUNT",
@@ -1347,6 +1540,7 @@ async def test_an_extension_reads_what_the_gates_alone_decide_now(db: None) -> N
         assert (await context.spend_admitted()).outcome == "allow"
         assert (await context.spend_admitted(MODEL)).outcome == "allow"
         assert await context.spend_admitted("gpt-5.6-luna") == refused
+        assert await context.spend_admitted(platform_paid=True) == refused
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1359,6 +1553,22 @@ async def test_a_context_wired_with_no_spend_refuses_to_read_or_meter_it(db: Non
             await context.meter_tokens(
                 uuid4(), "provider", Usage(input_tokens=10), ModelPrice(1, 0, 0, 0, 0), byok=False
             )
+        with pytest.raises(RuntimeError, match="record_usage requires the deploy's ledger"):
+            await context.record_usage(
+                PROXY_SERVICE,
+                REQUESTS_DIMENSION,
+                None,
+                1,
+                token_id=None,
+                session_id=uuid4(),
+                labels={},
+                resource_id=None,
+                attempt="flush-1",
+                occurred_at=datetime.now(UTC),
+                byok=False,
+                price_micro_usd=1,
+                price_digest="sha256:card",
+            )
     with pytest.raises(ValueError, match="spend gates and ledger"):
         context_for(
             "core",
@@ -1367,6 +1577,70 @@ async def test_a_context_wired_with_no_spend_refuses_to_read_or_meter_it(db: Non
             model_job=JOB,
             ledger=UNGATED_LEDGER,
         )
+
+
+class _AccountToken:
+    async def secret(self, workspace_id: UUID, account_id: str) -> str:
+        return f"token-{account_id}"
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_only_a_vault_read_context_wired_with_the_vault_resolves_a_secret(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    slot = CredentialSlot(
+        name="acme_api_key",
+        description="Acme's API key.",
+        injection=InjectionTarget(
+            host="api.acmekeys.com",
+            header="x-api-key",
+            env="ACME_KEY",
+        ),
+    )
+    await store.put(workspace_id, slot.name, "sk-acme")
+    vault = VaultReads(
+        store,
+        WorkspaceSlots(deploy=(slot,)),
+        {"hub": CliCredential(env="HUB_TOKEN", header="authorization", secret=_AccountToken())},
+        {},
+    )
+    connection_id = uuid4()
+    with ws(workspace_id):
+        owner, other = await _member(workspace_id), await _member(workspace_id)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.connection).values(
+                    id=connection_id,
+                    workspace_id=workspace_id,
+                    provider="hub",
+                    account_id="acct-owner",
+                    host="api.hub.test",
+                    owner_member_id=owner,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    private = f"{CONNECTION_SECRET_PREFIX}{connection_id}"
+    reader = context_for("core", frozenset(), vault_read=True, vault=vault)
+
+    with ws(workspace_id):
+        resolved = await reader.resolve_secret(slot.name, "api.acmekeys.com", None)
+        owned = await reader.resolve_secret(private, "api.hub.test", owner)
+        with pytest.raises(SecretUnbound):
+            await reader.resolve_secret(private, "api.hub.test", other)
+        with pytest.raises(PermissionError, match="cannot resolve secrets"):
+            await context_for("core", frozenset(), vault=vault).resolve_secret(
+                slot.name, "api.acmekeys.com", None
+            )
+        with pytest.raises(RuntimeError, match="vault; none is wired"):
+            await context_for("core", frozenset(), vault_read=True).resolve_secret(
+                slot.name, "api.acmekeys.com", None
+            )
+
+    assert resolved == SecretValue(value="sk-acme", expires_at=None)
+    assert owned == SecretValue(value="token-acct-owner", expires_at=None)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1391,7 +1665,21 @@ async def test_spend_rollup_reads_the_bound_workspaces_totals_naming_no_member_o
             await UNGATED_LEDGER.record_turn_usage(
                 connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1_000)
             )
-            await record_probe_egress_request(connection, workspace_id)
+        await context.record_usage(
+            PROXY_SERVICE,
+            REQUESTS_DIMENSION,
+            None,
+            1,
+            token_id=None,
+            session_id=uuid4(),
+            labels={},
+            resource_id=None,
+            attempt="flush-1",
+            occurred_at=datetime.now(UTC),
+            byok=False,
+            price_micro_usd=0,
+            price_digest="sha256:card",
+        )
         totals = await context.spend_rollup(None)
         async with workspace_tx() as connection:
             report = await SpendRollup(workspace_id).read(connection, None)
@@ -1403,3 +1691,85 @@ async def test_spend_rollup_reads_the_bound_workspaces_totals_naming_no_member_o
         None, report.total_micro_usd, report.by_dimension, report.by_service, report.usage
     )
     assert totals.by_service == (ServiceTotal("models", 5_084), ServiceTotal("proxy", 0))
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_an_extension_records_a_service_row_once(db: None) -> None:
+    workspace_id, neighbor = await _workspace(), await _workspace()
+    context = context_for("core", frozenset(), ledger=UNGATED_LEDGER)
+    session_id = uuid4()
+    record = {
+        "token_id": None,
+        "session_id": session_id,
+        "labels": {"team": "platform"},
+        "resource_id": None,
+        "attempt": "flush-1",
+        "occurred_at": datetime.now(UTC),
+        "byok": False,
+        "price_micro_usd": 3,
+        "price_digest": "sha256:card",
+    }
+    with ws(workspace_id):
+        written = await context.record_usage(PROXY_SERVICE, REQUESTS_DIMENSION, None, 3, **record)
+        replayed = await context.record_usage(PROXY_SERVICE, REQUESTS_DIMENSION, None, 3, **record)
+    with ws(neighbor):
+        elsewhere = await context.record_usage(PROXY_SERVICE, REQUESTS_DIMENSION, None, 3, **record)
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.workspace_id,
+                    tables.ledger.c.service,
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.labels,
+                ).where(tables.ledger.c.session_id == session_id)
+            )
+        ).all()
+    assert (written, replayed, elsewhere) == (True, False, True)
+    assert {row.workspace_id: tuple(row)[1:] for row in rows} == {
+        workspace_id: ("proxy", "requests", 3, 3, {"team": "platform"}),
+        neighbor: ("proxy", "requests", 3, 3, {"team": "platform"}),
+    }
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_an_extension_reads_usage_lines_and_spend_windows_of_its_workspace_alone(
+    db: None,
+) -> None:
+    workspace_id, neighbor = await _workspace(), await _workspace()
+    context = context_for("core", frozenset(), ledger=UNGATED_LEDGER)
+    token_id, session_id, now = uuid4(), uuid4(), datetime.now(UTC)
+    record = {
+        "token_id": token_id,
+        "session_id": session_id,
+        "labels": {"team": "platform"},
+        "resource_id": None,
+        "attempt": "flush-1",
+        "occurred_at": now,
+        "byok": False,
+        "price_digest": "sha256:card",
+    }
+    with ws(neighbor):
+        await context.record_usage(
+            PROXY_SERVICE, GIB_DIMENSION, None, 2**30, price_micro_usd=168_750, **record
+        )
+    with ws(workspace_id):
+        await context.record_usage(
+            PROXY_SERVICE, REQUESTS_DIMENSION, None, 3, price_micro_usd=3, **record
+        )
+        lines = await context.usage_lines(
+            now - timedelta(hours=1),
+            now + timedelta(minutes=1),
+            keys=frozenset({"service", "dimension", "token"}),
+            label_keys=frozenset({"team"}),
+        )
+        token_spent = await context.token_spend(token_id, 3_600)
+        session_spent = await context.session_spend(session_id)
+    assert lines == (
+        UsageLine(
+            now.date(), "proxy", "requests", None, False, token_id, {"team": "platform"}, 3, 3
+        ),
+    )
+    assert (token_spent, session_spent) == (3, 3)

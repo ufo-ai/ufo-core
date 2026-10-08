@@ -38,9 +38,9 @@ GITHUB_USER_TIMEOUT_SECONDS = 10.0
 
 @dataclass(frozen=True)
 class PipedreamGrantSecret:
-    """Reads a granted account's token from Pipedream, held for `TOKEN_CACHE_SECONDS` so the rule
-    derivations one turn runs share a read rather than each asking the broker. The client is
-    resolved per read so a test's transport override is honoured."""
+    """Reads a granted account's token from Pipedream, held for `TOKEN_CACHE_SECONDS` so the
+    secret resolves and git credential reads one turn makes share a read rather than each asking
+    the broker. The client is resolved per read so a test's transport override is honoured."""
 
     held: dict[str, tuple[str, float]] = field(default_factory=dict)
 

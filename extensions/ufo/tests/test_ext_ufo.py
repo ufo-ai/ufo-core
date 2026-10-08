@@ -52,7 +52,7 @@ from ufo.harness.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.harness.sandbox.session import RunTokenCodec
 from ufo.harness.sandbox.terminal import TerminalOp, TerminalOpFailed
 from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import skill_registry
@@ -63,6 +63,7 @@ from ufo.runtime.access.credentials import (
     CredentialStore,
     seal_credential_request,
 )
+from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest
 from ufo.runtime.hub import (
@@ -880,7 +881,6 @@ def runtime(
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
         workspace_root=config.blob.root.parent / "workspaces",
     )
     dbos_client = replay_safe_client(config.database.system_url)
@@ -912,6 +912,7 @@ def runtime(
             index=default_index(),
             embed=StubEmbed(),
             artifact_token_secret=SECRET,
+            rules=PerAgentRules(),
         )
     )
     yield config, hub, blob, sandboxes
@@ -950,6 +951,7 @@ async def _ufo_client(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
         yield client
@@ -997,6 +999,7 @@ async def shared_ufo(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
         yield client
@@ -1630,6 +1633,7 @@ async def ufo_delivering_artifacts(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
         yield client, workspace_id
@@ -1900,6 +1904,7 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     foreign = _mint(SECRET, workspace_id, "late@example.com", _future())

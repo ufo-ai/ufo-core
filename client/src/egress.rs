@@ -25,11 +25,11 @@ struct Wiring {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Proxy {
-    tls: bool,
-    host: String,
-    port: u16,
-    authorization: Option<String>,
+pub(crate) struct Proxy {
+    pub(crate) tls: bool,
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) authorization: Option<String>,
 }
 
 trait Io: Read + Write {}
@@ -67,7 +67,10 @@ pub(crate) fn loopback_proxy_url(raw: &str, ca_file: Option<&str>) -> Result<Str
     Ok(format!("http://{userinfo}{LOOPBACK_HOST}:{port}"))
 }
 
-fn start_loopback_proxy(proxy: Proxy, config: Arc<rustls::ClientConfig>) -> Result<u16, String> {
+pub(crate) fn start_loopback_proxy(
+    proxy: Proxy,
+    config: Arc<rustls::ClientConfig>,
+) -> Result<u16, String> {
     let listener = TcpListener::bind((LOOPBACK_HOST, 0))
         .map_err(|error| format!("could not bind the local egress proxy: {error}"))?;
     let port = listener
@@ -75,13 +78,13 @@ fn start_loopback_proxy(proxy: Proxy, config: Arc<rustls::ClientConfig>) -> Resu
         .map_err(|error| format!("could not read the local egress proxy address: {error}"))?
         .port();
     thread::Builder::new()
-        .name("ufo-egress-proxy".to_string())
+        .name("ufo-proxy".to_string())
         .spawn(move || {
             for local in listener.incoming().flatten() {
                 let proxy = proxy.clone();
                 let config = config.clone();
                 let _ = thread::Builder::new()
-                    .name("ufo-egress-relay".to_string())
+                    .name("ufo-proxy-relay".to_string())
                     .spawn(move || relay(local, &proxy, config));
             }
         })
@@ -406,7 +409,7 @@ fn roots(ca_file: Option<&str>) -> Result<rustls::RootCertStore, String> {
     Ok(store)
 }
 
-fn tls_config(ca_file: Option<&str>) -> Result<Arc<rustls::ClientConfig>, String> {
+pub(crate) fn tls_config(ca_file: Option<&str>) -> Result<Arc<rustls::ClientConfig>, String> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -737,7 +740,7 @@ mod tests {
             pem.push('\n');
         }
         pem.push_str("-----END CERTIFICATE-----\n");
-        let path = std::env::temp_dir().join(format!("ufo-egress-ca-{}.pem", std::process::id()));
+        let path = std::env::temp_dir().join(format!("ufo-proxy-ca-{}.pem", std::process::id()));
         std::fs::write(&path, pem).unwrap();
         let named = path.to_str().unwrap();
         assert_eq!(

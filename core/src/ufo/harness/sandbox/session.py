@@ -10,7 +10,6 @@ A caller holds a sandbox either way round: `SandboxSession` over one that exists
 over one the first operation creates — the same operations, so no tool knows which it was handed."""
 
 import asyncio
-import base64
 import hashlib
 import json
 import os
@@ -21,7 +20,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from typing import Literal, Protocol, runtime_checkable
-from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
@@ -273,20 +271,23 @@ SANDBOX_FILE_COMMAND = (
     'if command -v ufo >/dev/null 2>&1; then exec ufo fs "$@"; fi; exec sbxfs "$@"',
     "sh",
 )
-SENTINEL_MODEL_KEY = "UFO_SENTINEL_MODEL_KEY"
 SANDBOX_UID = 1000
 SANDBOX_GID = 1000
-PROXY_ENV_NAMES = frozenset(("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"))
+PROXY_SESSION_ENV_NAMES = frozenset(
+    {"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"}
+)
+PROXY_CA_CERT_ENV = "UFO_PROXY_CA_CERT"
+"""The variable the terminal carrier exports a session's CA under, which the client merges with
+the member's own trust store."""
 NO_PROXY_HOSTS = "localhost,127.0.0.1,::1"
-"""The destinations every carrier's egress env exempts from the proxy, in both spellings the
-ecosystem reads. A sandbox reaching its own loopback is not egress: the proxy admits only globally
-routable addresses, so a proxied loopback request can only 403, and a service the turn started
-inside the container — Chrome's DevTools port, a dev-server preview — would be unreachable from
-inside it. Exempting loopback grants no reach a raw socket does not already have."""
-CA_STAGING_PATH = "/root/.ufo-egress-ca.pem"
-CA_SANDBOX_PATH = "/usr/local/share/ca-certificates/ufo-egress-ca.crt"
+"""The destinations an off-cluster carrier's egress env exempts from the proxy, in both spellings
+the ecosystem reads. A sandbox reaching its own loopback is not egress: the proxy admits only
+globally routable addresses, so a proxied loopback request can only 403, and a service the turn
+started inside the container — Chrome's DevTools port, a dev-server preview — would be unreachable
+from inside it. Exempting loopback grants no reach a raw socket does not already have."""
+CA_STAGING_PATH = "/root/.ufo-proxy-ca.pem"
+CA_SANDBOX_PATH = "/usr/local/share/ca-certificates/ufo-proxy-ca.crt"
 SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
-PROXY_PASSWORD = "ufo"
 NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
 PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
 PLAYWRIGHT_VERSION = "1.62.0"
@@ -327,62 +328,13 @@ command's env instead — and that difference is the point, because a shell that
 itself moves only its own descendants, leaving every other exec on the tmpfs."""
 
 
-def egress_proxy_env(proxy: "ProxyEndpoint", run_token: str) -> dict[str, str]:
-    """The environment a remote sandbox's command runs under so its every call off the box routes
-    through the public egress proxy. `ufo run` gives its child a plaintext loopback endpoint and
-    carries that byte stream to this TLS URL, so standard clients including Python's `urllib` use
-    the forward-proxy protocol they implement while the run token remains encrypted off-box. The
-    token is the basic-auth username so the proxy attributes and meters each request to the turn;
-    the non-empty password makes `urllib` send authentication. `NO_PROXY` exempts the sandbox's own
-    loopback services, the model keys are the sentinels the proxy swaps for real keys on the wire,
-    and the CA is the one written into the sandbox so the proxy can terminate target TLS the
-    sandbox trusts. Off-cluster means the public base is required — absent it (the check `serve`
-    applies at boot), the sandbox would have no metered route out, so this fails loud rather than
-    build an open sandbox."""
-    if proxy.public_url is None:
-        raise RuntimeError(
-            "an off-cluster carrier runs outside the pod and needs a reachable egress proxy; "
-            "set [sandbox] proxy_public_url to the externally-reachable proxy URL"
-        )
-    parsed = urlsplit(proxy.public_url)
-    if parsed.scheme != "https" or parsed.hostname is None:
-        raise RuntimeError(
-            "an off-cluster carrier requires an HTTPS [sandbox] proxy_public_url so its run "
-            "token is encrypted in transit"
-        )
-    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
-    authority = f"{host}:{parsed.port}" if parsed.port is not None else host
-    proxy_url = f"https://{run_token}:{PROXY_PASSWORD}@{authority}"
-    return {
-        "HTTP_PROXY": proxy_url,
-        "HTTPS_PROXY": proxy_url,
-        "http_proxy": proxy_url,
-        "https_proxy": proxy_url,
-        "NO_PROXY": NO_PROXY_HOSTS,
-        "no_proxy": NO_PROXY_HOSTS,
-        "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
-        "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
-        "SSL_CERT_FILE": SYSTEM_CA_BUNDLE,
-        "REQUESTS_CA_BUNDLE": SYSTEM_CA_BUNDLE,
-        "CURL_CA_BUNDLE": SYSTEM_CA_BUNDLE,
-        "NODE_EXTRA_CA_CERTS": CA_SANDBOX_PATH,
-    }
-
-
-PROBE_TOKEN_KIND = "ufo-probe"
-OUTGOING_PROBE_MEMBER_FIELD = "connections"
-
-
-def _basic_username(header: str) -> str:
-    """The username inside a `Proxy-Authorization: Basic` header, where every token class rides: a
-    sandbox client is handed a proxy URL and nothing else, so userinfo is the only channel."""
-    scheme, _, encoded = header.partition(" ")
-    if scheme.lower() != "basic" or not encoded:
-        raise ValueError("proxy authorization is not basic auth")
-    return base64.b64decode(encoded, validate=True).decode("utf-8").split(":", 1)[0]
-
-
 RunActor = UUID | Literal["turn", "nobody"]
+
+
+def actor_wire(actor: RunActor) -> str:
+    """How a run token and a session key spell whom a run acts for: `-` for the turn's own member,
+    `~` for nobody, else the member id."""
+    return "-" if actor == "turn" else "~" if actor == "nobody" else str(actor)
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,7 +350,8 @@ class RunToken:
 
 @dataclass(frozen=True, slots=True)
 class RunTokenCodec:
-    """Sign the per-turn proxy username and recover only tokens minted by this deployment."""
+    """Sign a run token for the routes core compiles into a turn's session, and recover only tokens
+    minted by this deployment."""
 
     secret: bytes
 
@@ -410,20 +363,12 @@ class RunTokenCodec:
         return cls(secret=value.encode())
 
     def encode(self, run: RunToken) -> str:
-        actor = (
-            "-"
-            if run.acts_for == "turn"
-            else "~"
-            if run.acts_for == "nobody"
-            else str(run.acts_for)
-        )
-        payload = f"ufo-run/{run.workspace_id}/{run.turn_id}/{actor}".encode()
+        payload = f"ufo-run/{run.workspace_id}/{run.turn_id}/{actor_wire(run.acts_for)}".encode()
         return sign_token(self.secret, payload)
 
-    def from_proxy_auth(self, header: str) -> RunToken:
-        username = _basic_username(header)
+    def decode(self, token: str) -> RunToken:
         try:
-            fields = verify_token(username, self.secret).decode().split("/")
+            fields = verify_token(token, self.secret).decode().split("/")
             kind, workspace, turn, actor = fields
             if kind != "ufo-run":
                 raise ValueError("invalid run token domain")
@@ -434,87 +379,6 @@ class RunTokenCodec:
             )
         except (UnicodeDecodeError, SignedTokenError, ValueError) as error:
             raise ValueError("invalid signed run token") from error
-
-
-@dataclass(frozen=True, slots=True)
-class ProbeToken:
-    """The conversation and member attributed to one off-turn sandbox exec, until it expires.
-
-    A turn's egress is authorized by the turn: the proxy admits a CONNECT while the DB still reports
-    that turn running. A probe runs off every turn, so there is no row whose status answers whether
-    it is still live — the token carries its own deadline, minted per exec for that exec's timeout,
-    and the proxy compares it fresh per CONNECT. `probe_id` names the one exec.
-
-    `member_id` is the member the exec acts for — the creator of the watch that runs it — whose
-    private connections reach it beside the shared ones; None reaches the shared ones alone.
-    `internet_access` preserves a caller's narrowed internet policy."""
-
-    workspace_id: UUID
-    conversation_id: UUID
-    probe_id: UUID
-    expires_at: int
-    member_id: UUID | None = None
-    internet_access: Literal[False] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ProbeTokenCodec:
-    """Sign the per-probe proxy username and recover only probes minted by this deployment. It holds
-    the same deploy secret `RunTokenCodec` does, and each class names its own domain inside the
-    signed payload — so a run token presented as a probe (or the reverse) is refused as firmly as a
-    forgery, and neither codec can be made to read the other's token as its own. Eight fields ride
-    the wire: the image a deploy replaces reads a connection list in the seventh, `-` here, and
-    writes the word `connections` where the member goes; both decode."""
-
-    secret: bytes
-
-    def encode(self, probe: ProbeToken) -> str:
-        member = "-" if probe.member_id is None else str(probe.member_id)
-        internet = "0" if probe.internet_access is False else "-"
-        payload = (
-            f"{PROBE_TOKEN_KIND}/{probe.workspace_id}/{probe.conversation_id}"
-            f"/{probe.probe_id}/{member}/{probe.expires_at}/-/{internet}"
-        ).encode()
-        return sign_token(self.secret, payload)
-
-    def from_proxy_auth(self, header: str) -> ProbeToken:
-        username = _basic_username(header)
-        try:
-            fields = verify_token(username, self.secret).decode().split("/")
-            kind, workspace, conversation, probe, member, expires, _, internet = fields
-            if kind != PROBE_TOKEN_KIND:
-                raise ValueError("invalid probe token domain")
-            if internet not in {"-", "0"}:
-                raise ValueError("invalid probe internet scope")
-            return ProbeToken(
-                workspace_id=UUID(workspace),
-                conversation_id=UUID(conversation),
-                probe_id=UUID(probe),
-                expires_at=int(expires),
-                member_id=(None if member in ("-", OUTGOING_PROBE_MEMBER_FIELD) else UUID(member)),
-                internet_access=False if internet == "0" else None,
-            )
-        except (UnicodeDecodeError, SignedTokenError, ValueError) as error:
-            raise ValueError("invalid signed probe token") from error
-
-
-EGRESS_CA_CERT_ENV = "UFO_EGRESS_CA_CERT"
-EGRESS_CA_KEY_ENV = "UFO_EGRESS_CA_KEY"
-EGRESS_CONTROL_TOKEN_ENV = "UFO_EGRESS_CONTROL_TOKEN"
-
-
-@dataclass(frozen=True)
-class ProxyEndpoint:
-    """Where the egress proxy listens, backend-neutral: the port plus the CA the sandbox trusts so
-    the proxy can terminate TLS and swap sentinels onto the wire. Each carrier decides how its
-    sandbox addresses the host the proxy runs on — that reachability detail is the carrier's, not
-    the proxy's. `public_url` is the externally-reachable base an off-cluster sandbox (e2b) dials
-    the proxy at; unset for an in-pod carrier (docker/local) whose sandbox reaches the proxy over a
-    host-local address it forms from `port` alone."""
-
-    port: int
-    ca_cert: str
-    public_url: str | None = None
 
 
 SANDBOX_SIZES: tuple[str, ...] = ("small", "medium", "large")
@@ -546,15 +410,19 @@ class SandboxSpec:
     A `CommandStopping` carrier keys the commands it leaves running on it, so a stop reaches the
     turn's own groups and no sibling's. None means no turn owns the open (a read, an off-turn write,
     a probe) and nothing will ever stop its commands; a carrier whose commands die with the call
-    that launched them ignores it."""
+    that launched them ignores it.
+
+    `env` is what every command of the open runs under: the conversation's own exports and, on a
+    proxied open, the session's env — its proxy variables and a sentinel per binding. `proxy_ca` is
+    the PEM of the CA that session's proxy terminates TLS under, which the sandbox must trust; it is
+    empty on an unenforced open, which carries no proxy variable either."""
 
     conversation_id: UUID
     image_ref: str
     workspace_host_path: str
-    proxy: ProxyEndpoint
-    run_token: str
     resume_id: str | None = None
     env: Mapping[str, str] = field(default_factory=dict)
+    proxy_ca: str = ""
     size: str | None = None
     turn_id: UUID | None = None
 
@@ -563,8 +431,8 @@ class SandboxSpec:
 class SandboxHandle:
     """An opaque reference to a created-or-attached container; the carrier reads it, not tools. It
     carries `workspace_host_path` so a host-path carrier can rewrite a logical `/workspace` path to
-    where it actually serves it, and the base `run_token` plus `egress_env` a scoped session
-    rewrites for each exec. A container shared across turns never pins either one's capabilities.
+    where it actually serves it, and the base `egress_env` a scoped session rewrites for each exec.
+    A container shared across turns never pins either one's capabilities.
     Whatever a public per-port host requires on the wire is not here: `dial` reads it off the live
     container, so a handle rebuilt from the durable row alone (the ingress) reaches a port exactly
     as the process that created it does. `turn_id` names the turn this reference was opened for —
@@ -574,7 +442,6 @@ class SandboxHandle:
     conversation_id: UUID
     container_id: str
     workspace_host_path: str | None = None
-    run_token: str | None = None
     egress_env: Mapping[str, str] = field(default_factory=dict)
     turn_id: UUID | None = None
     runtime_root: str = ""
@@ -914,6 +781,10 @@ def _resolve_parts(parts: tuple[str, ...]) -> list[str]:
     return stack
 
 
+type EgressEnv = Callable[[], Awaitable[Mapping[str, str]]]
+"""Answers the proxy env one authorization of an enforced sandbox egresses under."""
+
+
 class Sandbox:
     """What a caller reaches a conversation's `/workspace` through: run a command in it, write bytes
     in, stream bytes out, dial a port something inside it opened.
@@ -941,15 +812,13 @@ class Sandbox:
         """Whether a sandbox exists to run an operation against."""
         raise NotImplementedError
 
-    def authorize(
-        self,
-        run_token: str,
-        cleared_env: frozenset[str],
-        env: Mapping[str, str],
+    async def authorize(
+        self, cleared_env: frozenset[str], env: Mapping[str, str], egress: EgressEnv | None = None
     ) -> "Sandbox":
-        """The same sandbox under exact connection capabilities: its run token on the proxy
-        environment, connector variables outside that scope dropped, and its admitted variables
-        exported."""
+        """The same sandbox under exact connection capabilities: the variables in `cleared_env`
+        dropped from the base environment, and `env` exported over what remains. On a sandbox whose
+        carrier enforces egress, `egress` is asked once, when the sandbox first binds, for the proxy
+        env its commands egress under, laid beneath `env`; an unenforced sandbox never asks it."""
         raise NotImplementedError
 
     async def _bound(self) -> "SandboxSession":
@@ -1267,6 +1136,10 @@ class SandboxSession(Sandbox):
     carrier: Carrier
     handle: SandboxHandle
     system_skill_archive: bytes = b""
+    enforced: bool = False
+    """Whether the carrier enforces this sandbox's egress through a proxy session — the member's
+    terminal or an off-cluster carrier — so an authorization lays the acting member's session env
+    over it."""
 
     @property
     def conversation_id(self) -> UUID:
@@ -1283,34 +1156,18 @@ class SandboxSession(Sandbox):
     async def _bound(self) -> "SandboxSession":
         return self
 
-    def authorize(
-        self,
-        run_token: str,
-        cleared_env: frozenset[str],
-        env: Mapping[str, str],
+    async def authorize(
+        self, cleared_env: frozenset[str], env: Mapping[str, str], egress: EgressEnv | None = None
     ) -> "SandboxSession":
-        current = self.handle.run_token
-        if current is None:
-            raise RuntimeError("sandbox handle carries no run token")
-        authorized = {
-            key: (value.replace(current, run_token) if key in PROXY_ENV_NAMES else value)
-            for key, value in self.handle.egress_env.items()
-            if key not in cleared_env
+        session_env = await egress() if egress is not None and self.enforced else {}
+        kept = {
+            key: value for key, value in self.handle.egress_env.items() if key not in cleared_env
         }
-        if any(current not in self.handle.egress_env.get(name, "") for name in PROXY_ENV_NAMES):
-            raise RuntimeError("sandbox proxy environment does not carry its run token")
         return SandboxSession(
             carrier=self.carrier,
-            handle=SandboxHandle(
-                conversation_id=self.handle.conversation_id,
-                container_id=self.handle.container_id,
-                workspace_host_path=self.handle.workspace_host_path,
-                run_token=run_token,
-                egress_env={**authorized, **env},
-                turn_id=self.handle.turn_id,
-                runtime_root=self.handle.runtime_root,
-            ),
+            handle=replace(self.handle, egress_env=kept | dict(session_env) | dict(env)),
             system_skill_archive=self.system_skill_archive,
+            enforced=self.enforced,
         )
 
 
@@ -1341,13 +1198,10 @@ class _LateSandbox(Sandbox):
     def created(self) -> bool:
         return self._session is not None
 
-    def authorize(
-        self,
-        run_token: str,
-        cleared_env: frozenset[str],
-        env: Mapping[str, str],
+    async def authorize(
+        self, cleared_env: frozenset[str], env: Mapping[str, str], egress: EgressEnv | None = None
     ) -> Sandbox:
-        return _AuthorizedSandbox(late=self, run_token=run_token, cleared_env=cleared_env, env=env)
+        return _AuthorizedSandbox(self, cleared_env, env, egress)
 
     async def _bound(self) -> SandboxSession:
         if self._session is None:
@@ -1362,32 +1216,43 @@ class _LateSandbox(Sandbox):
             await bound.carrier.stop_commands(replace(bound.handle, turn_id=self._turn_id))
 
 
-@dataclass(frozen=True)
 class _AuthorizedSandbox(Sandbox):
-    late: _LateSandbox
-    run_token: str
-    cleared_env: frozenset[str]
-    env: Mapping[str, str]
+    def __init__(
+        self,
+        late: _LateSandbox,
+        cleared_env: frozenset[str],
+        env: Mapping[str, str],
+        egress: EgressEnv | None,
+    ) -> None:
+        self._late = late
+        self._cleared_env = cleared_env
+        self._env = env
+        self._egress = egress
+        self._lock = asyncio.Lock()
+        self._session: SandboxSession | None = None
 
     @property
     def conversation_id(self) -> UUID:
-        return self.late.conversation_id
+        return self._late.conversation_id
 
     @property
     def turn_id(self) -> UUID:
-        return self.late.turn_id
+        return self._late.turn_id
 
     @property
     def created(self) -> bool:
-        return self.late.created
+        return self._late.created
 
-    def authorize(
-        self,
-        run_token: str,
-        cleared_env: frozenset[str],
-        env: Mapping[str, str],
+    async def authorize(
+        self, cleared_env: frozenset[str], env: Mapping[str, str], egress: EgressEnv | None = None
     ) -> Sandbox:
-        return self.late.authorize(run_token, cleared_env, env)
+        return await self._late.authorize(cleared_env, env, egress)
 
     async def _bound(self) -> SandboxSession:
-        return (await self.late._bound()).authorize(self.run_token, self.cleared_env, self.env)
+        if self._session is None:
+            async with self._lock:
+                if self._session is None:
+                    self._session = await (await self._late._bound()).authorize(
+                        self._cleared_env, self._env, self._egress
+                    )
+        return self._session

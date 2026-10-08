@@ -84,7 +84,6 @@ from ufo.harness.sandbox.session import (
     TOOL_OUTPUT_DIRNAME,
     UFO_HOME_ENV,
     ExecResult,
-    ProxyEndpoint,
     Sandbox,
     SandboxHandle,
     SandboxProviderUnavailable,
@@ -5716,8 +5715,6 @@ async def test_a_write_survives_a_mid_turn_rollover_into_the_changes_scan(
             conversation_id=turn.conversation_id,
             image_ref="unused",
             workspace_host_path="/p",
-            proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem", public_url=None),
-            run_token="run-token",
             env={"UFO_CONVERSATION_ID": str(turn.conversation_id)},
         )
     )
@@ -5771,8 +5768,6 @@ async def test_a_shell_turn_scans_the_workspace_root(db: None, tmp_path: Path) -
             conversation_id=turn.conversation_id,
             image_ref="unused",
             workspace_host_path="/p",
-            proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem", public_url=None),
-            run_token="run-token",
             env={"UFO_CONVERSATION_ID": str(turn.conversation_id)},
         )
     )
@@ -9634,6 +9629,7 @@ async def test_a_spawn_a_gate_parks_parks_the_parent_turn(db: None, tmp_path: Pa
         parent=turn,
         audience=conversation_audience(None),
         spend=SAMPLE_SPEND,
+        sessions=None,
     )
     engine = replace(_engine(turn, SpawningModel(), tmp_path), spawn=subagents.spawn)
     with pytest.raises(TurnParked, match="allowance is spent at spawn"):

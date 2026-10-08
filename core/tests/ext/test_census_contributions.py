@@ -191,7 +191,7 @@ def _served_jobs(
         config=Config(
             database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db"),
             blob=BlobConfig(backend="filesystem", root=tmp_path),
-            sandbox=SandboxConfig(backend="local", proxy_port=0),
+            sandbox=SandboxConfig(backend="local"),
         ),
         manifests=manifests,
         dbos=None,
@@ -203,6 +203,7 @@ def _served_jobs(
         subagents=None,
         spend=spend,
         ledger=ledger,
+        sessions=None,
     )
     serve._launch_jobs(
         runtime,

@@ -9,7 +9,16 @@ from dbos import EnqueueOptions
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
-from ufo.runtime.billing.accounting import UNGATED_LEDGER, SpendEvaluator
+from ufo.harness.models.catalog import PRICE_DIGEST
+from ufo.runtime.billing.accounting import (
+    MODELS_SERVICE,
+    PROXY_VIA,
+    TOKENS_DIMENSION,
+    TURN_LABEL,
+    UNGATED_LEDGER,
+    VIA_LABEL,
+    SpendEvaluator,
+)
 from ufo.runtime.ext.context import ExtensionContext
 from ufo.runtime.ext.manifest import JobSpec
 from ufo.runtime.jobs import (
@@ -370,7 +379,7 @@ async def test_under_cap_allows(db: None) -> None:
     assert decision.outcome == "allow"
 
 
-async def test_sandbox_tokens_count_toward_a_cap(db: None) -> None:
+async def test_models_tokens_via_proxy_count_toward_a_cap(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
         turn_id = uuid4()
@@ -389,12 +398,24 @@ async def test_sandbox_tokens_count_toward_a_cap(db: None) -> None:
                 updated_at=sa.func.now(),
             )
         )
-        await UNGATED_LEDGER.record_sandbox_tokens(
+        await UNGATED_LEDGER.record_service_usage(
             connection,
             workspace_id,
-            turn_id,
-            "claude-opus-4-8",
-            Usage(input_tokens=1000, output_tokens=2000),
+            service=MODELS_SERVICE,
+            dimension=TOKENS_DIMENSION,
+            backend=None,
+            amount=3000,
+            token_id=None,
+            session_id=uuid4(),
+            labels={VIA_LABEL: PROXY_VIA, TURN_LABEL: str(turn_id)},
+            resource_id=None,
+            attempt="flush-1",
+            occurred_at=datetime.now(UTC),
+            byok=False,
+            priced_micro_usd=55_000,
+            price_digest=PRICE_DIGEST,
+            model="claude-opus-4-8",
+            usage=Usage(input_tokens=1000, output_tokens=2000),
         )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
         decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)

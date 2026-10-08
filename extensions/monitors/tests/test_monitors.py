@@ -48,15 +48,13 @@ from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSand
 from ufo.harness.sandbox.exec_env import ProbeEnv
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
-    ProbeTokenCodec,
-    ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
 )
 from ufo.harness.untrusted import UNTRUSTED_CLOSE, UNTRUSTED_CLOSE_ESCAPE
 from ufo.host.ext.loader import turn_tools
-from ufo.runtime.access.connectors import CliCredential
-from ufo.runtime.access.grants import GrantStore, grant_sentinel
+from ufo.runtime.access.connectors import CliCredential, GitWire
+from ufo.runtime.access.grants import CommitIdentity, GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import (
     ConversationProbes,
@@ -107,11 +105,18 @@ class StubDbos:
 @dataclass(frozen=True)
 class _NeverSecret:
     async def secret(self, workspace_id: UUID, account_id: str) -> str:
-        raise AssertionError("the probe environment exports a sentinel, not the account token")
+        raise AssertionError("the probe environment never reads an account token")
 
 
-HUB_CLI = {"hub": CliCredential(env="HUB_TOKEN", header="authorization", secret=_NeverSecret())}
-HUB_PROBE = 'printf "$HUB_TOKEN"'
+HUB_CLI = {
+    "hub": CliCredential(
+        env="HUB_TOKEN",
+        header="authorization",
+        secret=_NeverSecret(),
+        git=GitWire(host="hub.test", basic_user="x-access-token", helper="!hub git-credential"),
+    )
+}
+IDENTITY_PROBE = 'printf "$GIT_AUTHOR_EMAIL"'
 
 
 async def _unavailable_spawn(
@@ -201,6 +206,8 @@ async def _connection(
             host="api.hub.test",
             grantor_member_id=owner,
             shared=shared,
+            account_label=account,
+            commit=CommitIdentity(name=account, email=f"{account}@work.com"),
         )
 
 
@@ -210,7 +217,6 @@ def _sandboxes(root: Path) -> ConversationSandbox:
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
         workspace_root=root,
     )
 
@@ -234,8 +240,6 @@ async def _tool_ctx(
             conversation_id=conversation_id,
             image_ref=SANDBOX_IMAGE_REF,
             workspace_host_path=str(root / str(conversation_id)),
-            proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
-            run_token="probe-run",
         )
     )
     sandboxes = _sandboxes(root)
@@ -267,7 +271,7 @@ async def _tool_ctx(
             sandboxes=sandboxes,
             probes=ConversationProbes(
                 sandboxes,
-                ProbeTokenCodec(secret=b"probe-test-secret"),
+                None,
                 ProbeEnv().exports if probe_env is None else probe_env,
             ),
         ),
@@ -283,7 +287,7 @@ def _runner_ctx(invoker: AdmissionInvoker, root: Path) -> ExtensionContext:
         sandboxes=sandboxes,
         probes=ConversationProbes(
             sandboxes,
-            ProbeTokenCodec(secret=b"probe-test-secret"),
+            None,
             ProbeEnv().exports,
         ),
     )
@@ -422,12 +426,12 @@ async def test_the_arming_probe_acts_for_the_speaker(db: None, tmp_path: Path) -
         probe_env=recording,
     )
     with ws(workspace_id), agent(agent_id):
-        result = await monitor(ctx, _input("ci-run", HUB_PROBE))
+        result = await monitor(ctx, _input("ci-run", IDENTITY_PROBE))
         [row] = await MonitorStore(ctx.ext).armed()
 
     assert result.is_error is False
     assert asked == [member_id]
-    assert row.baseline == grant_sentinel("acct-own")
+    assert row.baseline == "acct-own@work.com"
     assert row.created_by_member_id == member_id
 
 
@@ -452,12 +456,12 @@ async def test_a_speakerless_turn_arms_for_the_member_it_acts_for(db: None, tmp_
         probe_env=recording,
     )
     with ws(workspace_id), agent(agent_id):
-        result = await monitor(ctx, _input("ci-run", HUB_PROBE))
+        result = await monitor(ctx, _input("ci-run", IDENTITY_PROBE))
         [row] = await MonitorStore(ctx.ext).armed()
 
     assert result.is_error is False
     assert asked == [member_id]
-    assert row.baseline == grant_sentinel("acct-own")
+    assert row.baseline == "acct-own@work.com"
     assert row.created_by_member_id == member_id
 
 

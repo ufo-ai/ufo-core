@@ -52,12 +52,15 @@ from ufo.harness.models.interface import (
 from ufo.harness.models.pricing import MICRO_USD_PER_USD
 from ufo.harness.models.registry import model_registry
 from ufo.harness.sandbox.ingress_serve import run as ingress_run
+from ufo.harness.sandbox.session import RunTokenCodec
 from ufo.host.ext.loader import load_manifests, lockfile_path
 from ufo.host.ext.store import ExtensionStore, read_catalog
 from ufo.onboard.onboarding import AlreadyInitialized, Onboarding
 from ufo.proxy_serve import OWNER_DSN_ENV
 from ufo.runtime.access.credentials import CredentialStore, deploy_env, member_slot
+from ufo.runtime.access.egress_rules import derive_artifact_store_hosts
 from ufo.runtime.access.grants import GrantSummary, workspace_grant_summaries
+from ufo.runtime.access.turn_sessions import DeploySessions
 from ufo.runtime.billing.accounting import SpendReport, SpendRollup
 from ufo.runtime.ext.deploy import CommandRefused, CommandSpec, DeployContext
 from ufo.runtime.ext.manifest import Manifest
@@ -85,7 +88,15 @@ from ufo.schema.records import (
     DEFAULT_AGENT_NAME,
     ReasoningEffort,
 )
-from ufo.serve import FLEETS, WHOLE_FLEET, declared_flags, deploy_spend, home_surface
+from ufo.serve import (
+    FLEETS,
+    WHOLE_FLEET,
+    declared_flags,
+    deploy_proxy_sessions,
+    deploy_rules,
+    deploy_spend,
+    home_surface,
+)
 from ufo.serve import run as serve_run
 
 UFOCTL_DIR_ENV = "UFOCTL_DIR"
@@ -541,7 +552,7 @@ def new_migration(slug: str) -> None:
     ),
 )
 def serve(fleet: str) -> None:
-    """Run surfaces, workers, jobs, and the egress-control RPC the Rust proxy calls."""
+    """Run surfaces, workers, jobs, and the routes the proxy service relays to."""
     config = load_config()
     surface = home_surface(load_manifests(config.pack.name))
     if surface is not None:
@@ -1220,7 +1231,31 @@ async def _cancel_turn(config: Config, turn_id: UUID, named_workspace: str) -> b
                 if found is None:
                     raise click.ClickException(f"no turn {turn_id} in workspace {workspace_id}")
             client = replay_safe_client(config.database.system_url)
-            return await cancel_one_turn(client, turn_id) is not None
+            manifests = load_manifests(config.pack.name)
+            proxy = deploy_proxy_sessions(config, manifests)
+            try:
+                sessions = None
+                if proxy is not None:
+                    key = os.environ.get(config.credentials.key_env)
+                    if not key:
+                        raise click.ClickException(
+                            f"{config.credentials.key_env} must hold the credential key, "
+                            "because a cancelled turn's proxy sessions keep its credential binds."
+                        )
+                    sessions = DeploySessions(
+                        proxy,
+                        deploy_rules(
+                            config,
+                            manifests,
+                            CredentialStore(fernet=Fernet(key.encode())),
+                            await derive_artifact_store_hosts(blob_store_for(config.blob)),
+                        ),
+                        RunTokenCodec.from_env(),
+                    )
+                return await cancel_one_turn(client, sessions, turn_id) is not None
+            finally:
+                if proxy is not None:
+                    await proxy.http.aclose()
     finally:
         await dispose_db()
 

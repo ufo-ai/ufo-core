@@ -53,7 +53,6 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
-    ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
 )
@@ -766,8 +765,6 @@ async def _local_session(tmp_path) -> SandboxSession:
             conversation_id=uuid4(),
             image_ref="ufo-sandbox:latest",
             workspace_host_path=str(tmp_path / "workspace"),
-            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
-            run_token="run-token",
         )
     )
     return SandboxSession(carrier=carrier, handle=handle)

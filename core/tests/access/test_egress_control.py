@@ -1,71 +1,105 @@
 import base64
 import json
 import logging
-from dataclasses import dataclass, field, replace
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import sqlalchemy as sa
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncConnection
-from ufo_ext_sample.spend import CHARGE_TABLE, SampleGate
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import Response
+from starlette.routing import Route
 
 from ufo.db import workspace_tx
-from ufo.harness.models.catalog import CORE_PRICING
-from ufo.harness.sandbox.cache import CACHE_HOST
-from ufo.harness.sandbox.preview import PREVIEW_AUTH_HEADER, PREVIEW_HOST, PREVIEW_SENTINEL
-from ufo.harness.sandbox.session import (
-    SENTINEL_MODEL_KEY,
-    ProbeToken,
-    ProbeTokenCodec,
-    RunToken,
-    RunTokenCodec,
-)
+from ufo.harness.auth.token_signing import sign_token
+from ufo.harness.document_renderer import DOCUMENT_INPUT_MAX_BYTES
+from ufo.harness.sandbox.session import RunToken, RunTokenCodec
 from ufo.runtime.access.connectors import CliCredential, GitWire, GrantUnusable
-from ufo.runtime.access.egress_control import EgressControl, rule_json
+from ufo.runtime.access.egress_control import (
+    PROXY_PUBLIC_KEY_ENV,
+    SESSION_STAMP_HEADER,
+    SESSION_STAMP_MAX_AGE_SECONDS,
+    EgressControl,
+    PreviewRelay,
+    SessionStamp,
+    StampInvalid,
+    load_proxy_public_key,
+    verify_stamp,
+)
 from ufo.runtime.access.egress_resolver import PerAgentRules
-from ufo.runtime.access.egress_rules import (
-    InjectionRule,
-    InternetRule,
-    MeterRule,
-    ResidentialRule,
-    ScopeRule,
-    ServiceRule,
-)
-from ufo.runtime.access.grants import GrantStore, grant_sentinel
+from ufo.runtime.access.egress_rules import CONNECTION_SECRET_PREFIX, RUN_HEADER, PolicyScope
+from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.billing.accounting import Ledger
-from ufo.runtime.billing.spend import GateDeploy
-from ufo.runtime.tools.bridge import (
-    TOOL_BRIDGE_HOST,
-    ToolBridgePrincipal,
-    ToolBridgeRequest,
-    ToolBridgeSuccess,
-)
+from ufo.runtime.billing.accounting import TURN_LABEL
+from ufo.runtime.tools.bridge import ToolBridgePrincipal, ToolBridgeRequest, ToolBridgeSuccess
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import TurnRuntimeConfig
 
-CONTROL_TOKEN = "egress-control-secret"
 CACHE_TOKEN = "egress-cache-secret"
 RUN_TOKENS = RunTokenCodec(b"egress-control-test-token-secret")
-PROBE_TOKENS = ProbeTokenCodec(secret=RUN_TOKENS.secret)
+FORGED_TOKENS = RunTokenCodec(secret=b"another-deploy-secret")
+KEY = Ed25519PrivateKey.generate()
+PREVIEW_ADDRESS = ("127.0.0.1", 8930)
+PREVIEW_TOKEN = "preview-token"
+PREVIEW_BUNDLE = b"rendered-bundle"
+PREVIEW_REFUSED = b"refuse-this"
 PROVIDER = "sampleprov"
 HOST = "api.sample.test"
 ACCOUNT = "acct-9f3c"
 CLI_HEADER = "authorization"
-CONTRACT = Path(__file__).parents[3] / "servers" / "egress" / "tests" / "rule_contract.json"
+BRIDGE_REQUEST = {
+    "request_id": "00000000-0000-4000-8000-000000000001",
+    "action": "get_schema",
+    "tool_name": "object_list",
+    "arguments": {},
+}
+RFC_8032_PUBLIC_KEY = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="
+GOLDEN_STAMP = (
+    "eyJpc3N1ZWRfYXQiOjE3MDAwMDAwMDAsImxhYmVscyI6eyJhIjoiMSIsImIiOiIyIn0sInNlc3Npb25faWQiOiIyMjIy"
+    "MjIyMi0yMjIyLTIyMjItMjIyMi0yMjIyMjIyMjIyMjIiLCJ3b3Jrc3BhY2VfaWQiOiIxMTExMTExMS0xMTExLTExMTEt"
+    "MTExMS0xMTExMTExMTExMTEifQ._Jmu8T-nnsHQMOiAb8ykYC9wakbtWjbveZaptLHTbmtMrinCbSGkyA_vp9DjNv53DH"
+    "TSEkWMdfzX45jKpQqeDw"
+)
+
+
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _stamp(
+    workspace_id: UUID,
+    labels: dict[str, str],
+    *,
+    key: Ed25519PrivateKey = KEY,
+    issued_at: datetime | None = None,
+    **extra: object,
+) -> str:
+    payload = {
+        "issued_at": int((issued_at or datetime.now(UTC)).timestamp()),
+        "labels": labels,
+        "session_id": str(uuid4()),
+        "workspace_id": str(workspace_id),
+        **extra,
+    }
+    return _signed(json.dumps(payload, separators=(",", ":")).encode(), key)
+
+
+def _signed(payload: bytes, key: Ed25519PrivateKey = KEY) -> str:
+    body = _b64url(payload)
+    return f"{body}.{_b64url(key.sign(body.encode()))}"
 
 
 def _basic(token: str) -> str:
     return "Basic " + base64.b64encode(f"{token}:".encode()).decode()
-
-
-def _auth() -> dict[str, str]:
-    return {"Authorization": f"Bearer {CONTROL_TOKEN}"}
 
 
 def _cache_auth() -> dict[str, str]:
@@ -74,9 +108,6 @@ def _cache_auth() -> dict[str, str]:
 
 @dataclass(frozen=True)
 class _Tokens:
-    """The broker's token read behind a `CliCredential`: deterministic per account and recorded
-    per call, so a test asserts the token the route answered and which account it was read for."""
-
     fault: Exception | None = None
     asked: list[tuple[UUID, str]] = field(default_factory=list)
 
@@ -101,17 +132,41 @@ class _Bridge:
         return ToolBridgeSuccess(result={"name": request.tool_name})
 
 
+@dataclass
+class _PreviewService:
+    seen: list[tuple[str, str, bytes]] = field(default_factory=list)
+
+    def app(self) -> Starlette:
+        return Starlette(routes=[Route("/render", self._render, methods=["POST"])])
+
+    async def _render(self, request: Request) -> Response:
+        body = await request.body()
+        self.seen.append((request.headers["authorization"], request.headers["content-type"], body))
+        if body == PREVIEW_REFUSED:
+            return Response(b'{"error":"unreadable"}', 422, media_type="application/json")
+        return Response(PREVIEW_BUNDLE, media_type="application/zip")
+
+
 def _control(
     resolver: PerAgentRules,
     bridge: object | None = None,
+    preview: _PreviewService | None = None,
 ) -> EgressControl:
     return EgressControl(
-        control_token=CONTROL_TOKEN,
         cache_control_token=CACHE_TOKEN,
         resolver=resolver,
-        pricing=CORE_PRICING,
         run_tokens=RUN_TOKENS,
         bridge=bridge,
+        stamp_key=KEY.public_key(),
+        preview=(
+            None
+            if preview is None
+            else PreviewRelay(
+                PREVIEW_ADDRESS,
+                PREVIEW_TOKEN,
+                httpx.AsyncClient(transport=ASGITransport(app=preview.app())),
+            )
+        ),
     )
 
 
@@ -130,12 +185,25 @@ class _Seeded:
     member_id: UUID
     conversation_id: UUID
 
+    def headers(
+        self,
+        run: RunToken | None = None,
+        *,
+        key: Ed25519PrivateKey = KEY,
+        issued_at: datetime | None = None,
+        extra: dict[str, object] | None = None,
+    ) -> dict[str, str]:
+        labels = {TURN_LABEL: str(self.turn_id), "conversation": str(self.conversation_id)}
+        stamp = _stamp(self.workspace_id, labels, key=key, issued_at=issued_at, **(extra or {}))
+        return {
+            SESSION_STAMP_HEADER: stamp,
+            RUN_HEADER: RUN_TOKENS.encode(run or RunToken(self.workspace_id, self.turn_id)),
+        }
+
 
 async def _seed_turn(
     connection: AsyncConnection,
     status: str = "running",
-    internet_access_allowed: bool = True,
-    runtime_config: TurnRuntimeConfig | None = None,
     detached_until: datetime | None = None,
 ) -> _Seeded:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
@@ -161,7 +229,7 @@ async def _seed_turn(
             name="assistant",
             prompt="p",
             model="claude-opus-4-8",
-            internet_access_allowed=internet_access_allowed,
+            internet_access_allowed=True,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
@@ -178,7 +246,6 @@ async def _seed_turn(
             updated_at=sa.func.now(),
         )
     )
-    terminal = None if status in ("queued", "running", "parked") else {"status": status}
     await connection.execute(
         sa.insert(tables.turn).values(
             id=turn_id,
@@ -187,12 +254,9 @@ async def _seed_turn(
             agent_id=agent_id,
             seq=1,
             status=status,
-            inbound="hi",
-            terminal=terminal,
-            runtime_config=(
-                None if runtime_config is None else runtime_config.model_dump(mode="json")
-            ),
+            terminal=None if status in ("running", "parked") else {"status": status},
             detached_until=detached_until,
+            inbound="hi",
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
@@ -200,682 +264,286 @@ async def _seed_turn(
     return _Seeded(workspace_id, turn_id, agent_id, member_id, conversation_id)
 
 
-async def _seed_member(connection: AsyncConnection, workspace_id: UUID) -> UUID:
-    member_id = uuid4()
-    await connection.execute(
-        sa.insert(tables.member).values(
-            id=member_id,
-            workspace_id=workspace_id,
-            email="other@b.c",
-            seated_at=sa.func.now(),
-            created_at=sa.func.now(),
-            updated_at=sa.func.now(),
-        )
-    )
-    return member_id
-
-
-async def test_turn_runtime_config_can_disable_but_not_enable_public_egress(db: None) -> None:
-    runtime_config = TurnRuntimeConfig(model="claude-opus-4-8", internet_access=False)
+async def _seeded(status: str = "running", detached_until: datetime | None = None) -> _Seeded:
     async with workspace_tx() as connection:
-        narrowed = await _seed_turn(connection, runtime_config=runtime_config)
-    resolver = PerAgentRules(base=(), grants=None, internet=(InternetRule(),))
-
-    rules = await resolver.resolve(RunToken(narrowed.workspace_id, narrowed.turn_id))
-
-    assert InternetRule() not in rules
-    with pytest.raises(ValueError, match="False"):
-        TurnRuntimeConfig.model_validate({"model": "claude-opus-4-8", "internet_access": True})
+        return await _seed_turn(connection, status, detached_until)
 
 
-async def test_a_probe_preserves_a_narrowed_internet_scope(db: None) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
-    expires_at = int(datetime.now(UTC).timestamp()) + 300
-    resolver = PerAgentRules(base=(), grants=None, internet=(InternetRule(),))
-
-    unrestricted = await resolver.resolve(
-        ProbeToken(
-            seeded.workspace_id,
-            seeded.conversation_id,
-            uuid4(),
-            expires_at,
-        )
-    )
-    narrowed = await resolver.resolve(
-        ProbeToken(
-            seeded.workspace_id,
-            seeded.conversation_id,
-            uuid4(),
-            expires_at,
-            internet_access=False,
-        )
-    )
-
-    assert InternetRule() in unrestricted
-    assert InternetRule() not in narrowed
-
-
-def test_rule_json_matches_the_golden_contract() -> None:
-    rules = (
-        ScopeRule(allowed_hosts=frozenset({"api.openai.com", "api.anthropic.com"})),
-        ScopeRule(allowed_hosts=frozenset({"api.acmekeys.com"}), pinned=True),
-        InternetRule(),
-        InjectionRule(
-            host="api.anthropic.com",
-            header="x-api-key",
-            sentinel=SENTINEL_MODEL_KEY,
-            real="sk-ant-real-key",
-        ),
-        MeterRule(host="api.anthropic.com", dimension="tokens"),
-        ServiceRule(host="registry.npmjs.org", daemon_prefix="/pkg/registry.npmjs.org"),
-        ResidentialRule(host="news.example.com"),
-    )
-    assert json.loads(CONTRACT.read_text()) == {"rules": [rule_json(rule) for rule in rules]}
-
-
-async def test_authorize_admits_a_running_turn_and_refuses_an_ended_one(db: None) -> None:
-    async with workspace_tx() as connection:
-        running = await _seed_turn(connection)
-        ended = await _seed_turn(connection, status="done")
-    resolver = PerAgentRules(base=(), grants=None)
-    async with _client(_control(resolver)) as client:
-        live = await client.post(
-            "/internal/egress/authorize",
-            headers=_auth(),
-            json={
-                "proxy_auth": _basic(
-                    RUN_TOKENS.encode(RunToken(running.workspace_id, running.turn_id))
-                )
-            },
-        )
-        dead = await client.post(
-            "/internal/egress/authorize",
-            headers=_auth(),
-            json={
-                "proxy_auth": _basic(RUN_TOKENS.encode(RunToken(ended.workspace_id, ended.turn_id)))
-            },
-        )
-        forged = await client.post(
-            "/internal/egress/authorize",
-            headers=_auth(),
-            json={"proxy_auth": "Basic bm90LWEtdG9rZW4="},
-        )
-    assert live.json() == {"authorized": True, "generation": 0}
-    assert dead.json() == {"authorized": False, "generation": None}
-    assert forged.json() == {"authorized": False, "generation": None}
-
-
-async def test_an_ended_turn_answers_for_its_detached_commands_until_the_stamp(db: None) -> None:
-    async with workspace_tx() as connection:
-        followed = await _seed_turn(
-            connection, status="done", detached_until=datetime.now(UTC) + timedelta(hours=1)
-        )
-        lapsed = await _seed_turn(
-            connection, status="done", detached_until=datetime.now(UTC) - timedelta(seconds=1)
-        )
-    resolver = PerAgentRules(
-        base=(
-            ScopeRule(allowed_hosts=frozenset({HOST})),
-            InjectionRule(
-                host=HOST,
-                header="authorization",
-                sentinel=SENTINEL_MODEL_KEY,
-                real="deployment-model-key",
-            ),
-        ),
-        grants=None,
-    )
-    followed_run = RunToken(followed.workspace_id, followed.turn_id)
-    lapsed_run = RunToken(lapsed.workspace_id, lapsed.turn_id)
-    async with _client(_control(resolver)) as client:
-        admitted = await client.post(
-            "/internal/egress/authorize",
-            headers=_auth(),
-            json={"proxy_auth": _basic(RUN_TOKENS.encode(followed_run))},
-        )
-        refused = await client.post(
-            "/internal/egress/authorize",
-            headers=_auth(),
-            json={"proxy_auth": _basic(RUN_TOKENS.encode(lapsed_run))},
-        )
-        resolved = await client.post(
-            "/internal/egress/resolve",
-            headers=_auth(),
-            json={"proxy_auth": _basic(RUN_TOKENS.encode(followed_run))},
-        )
-    assert admitted.json() == {"authorized": True, "generation": 0}
-    assert refused.json() == {"authorized": False, "generation": None}
-    rules = resolved.json()["rules"]
-    assert any(rule["kind"] == "scope" for rule in rules)
-    assert not any(rule.get("sentinel") == SENTINEL_MODEL_KEY for rule in rules)
-    assert await resolver.live_bridge_principal(followed_run) is None
-
-
-async def test_authorize_admits_a_probe_until_its_deadline(db: None) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
-    now = int(datetime.now(UTC).timestamp())
-    resolver = PerAgentRules(base=(), grants=None)
-    live = PROBE_TOKENS.encode(
-        ProbeToken(
-            seeded.workspace_id,
-            seeded.conversation_id,
-            uuid4(),
-            now + 300,
-        )
-    )
-    expired = PROBE_TOKENS.encode(
-        ProbeToken(
-            seeded.workspace_id,
-            seeded.conversation_id,
-            uuid4(),
-            now - 1,
-        )
-    )
-    async with _client(_control(resolver)) as client:
-        admitted = await client.post(
-            "/internal/egress/authorize", headers=_auth(), json={"proxy_auth": _basic(live)}
-        )
-        refused = await client.post(
-            "/internal/egress/authorize", headers=_auth(), json={"proxy_auth": _basic(expired)}
-        )
-    assert admitted.json() == {"authorized": True, "generation": 0}
-    assert refused.json() == {"authorized": False, "generation": None}
-
-
-async def test_run_and_probe_tokens_do_not_encode_member_seat_identity(db: None) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
-    run = RUN_TOKENS.encode(
-        RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
-    )
-    probe = PROBE_TOKENS.encode(
-        ProbeToken(
-            seeded.workspace_id,
-            seeded.conversation_id,
-            uuid4(),
-            int(datetime.now(UTC).timestamp()) + 300,
-            member_id=seeded.member_id,
-        )
-    )
-    resolver = PerAgentRules(base=(), grants=None)
-    async with _client(_control(resolver)) as client:
-        for token in (run, probe):
-            response = await client.post(
-                "/internal/egress/authorize",
-                headers=_auth(),
-                json={"proxy_auth": _basic(token)},
-            )
-            assert response.json() == {"authorized": True, "generation": 0}
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.member)
-                .values(seated_at=None, updated_at=sa.func.now())
-                .where(tables.member.c.id == seeded.member_id)
-            )
-        for token in (run, probe):
-            response = await client.post(
-                "/internal/egress/authorize",
-                headers=_auth(),
-                json={"proxy_auth": _basic(token)},
-            )
-            assert response.json() == {"authorized": True, "generation": 0}
-
-
-async def test_tool_bridge_passes_only_a_run_principal_to_the_bridge(db: None) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
+async def _bridged(seeded: _Seeded, headers: dict[str, str]) -> tuple[httpx.Response, _Bridge]:
     bridge = _Bridge()
-    resolver = PerAgentRules(base=(), grants=None)
-    request_id = uuid4()
-    request = {
-        "request_id": str(request_id),
-        "action": "get_schema",
-        "tool_name": "object_list",
-        "arguments": {},
-    }
-    run = RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
-    probe = ProbeToken(
-        seeded.workspace_id,
-        seeded.conversation_id,
-        uuid4(),
-        int(datetime.now(UTC).timestamp()) + 300,
-        member_id=seeded.member_id,
+    async with _client(_control(PerAgentRules(), bridge=bridge)) as client:
+        response = await client.post(
+            "/internal/egress/tool-bridge/request", headers=headers, json=BRIDGE_REQUEST
+        )
+    return response, bridge
+
+
+def _refused(response: httpx.Response, bridge: _Bridge) -> bool:
+    return (response.status_code, response.json(), bridge.received) == (
+        403,
+        {"detail": "forbidden"},
+        [],
     )
-    async with _client(_control(resolver, bridge=bridge)) as client:
-        admitted = await client.post(
-            "/internal/egress/tool-bridge",
-            headers=_auth(),
-            json={"proxy_auth": _basic(RUN_TOKENS.encode(run)), "request": request},
-        )
-        refused = await client.post(
-            "/internal/egress/tool-bridge",
-            headers=_auth(),
-            json={"proxy_auth": _basic(PROBE_TOKENS.encode(probe)), "request": request},
-        )
-    assert admitted.json() == {"ok": True, "result": {"name": "object_list"}}
-    assert refused.status_code == 403
+
+
+async def test_a_stamped_route_with_core_s_run_token_reaches_the_bridge_as_the_member_it_acts_for(
+    db: None,
+) -> None:
+    seeded = await _seeded()
+    run = RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
+
+    response, bridge = await _bridged(seeded, seeded.headers(run))
+
+    assert response.json() == {"ok": True, "result": {"name": "object_list"}}
     assert bridge.received == [
         (
             ToolBridgePrincipal(run.workspace_id, run.turn_id, seeded.member_id),
-            ToolBridgeRequest(
-                request_id=request_id,
-                action="get_schema",
-                tool_name="object_list",
-            ),
+            ToolBridgeRequest.model_validate(BRIDGE_REQUEST),
         )
     ]
 
 
-async def test_resolve_returns_the_seeded_grant_and_injection_rules(db: None) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
-    with ws(seeded.workspace_id), agent(seeded.agent_id):
-        await GrantStore().record(
-            provider=PROVIDER,
-            account_id=ACCOUNT,
-            host=HOST,
-            grantor_member_id=seeded.member_id,
-            shared=False,
+async def test_a_verified_request_with_a_malformed_body_answers_422(db: None) -> None:
+    seeded = await _seeded()
+    bridge = _Bridge()
+    async with _client(_control(PerAgentRules(), bridge=bridge)) as client:
+        malformed = await client.post(
+            "/internal/egress/tool-bridge/request", headers=seeded.headers(), json={}
         )
-    tokens = _Tokens()
-    clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, secret=tokens)}
-    resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
-    async with _client(_control(resolver)) as client:
-        response = await client.post(
-            "/internal/egress/resolve",
-            headers=_auth(),
-            json={
-                "proxy_auth": _basic(
-                    RUN_TOKENS.encode(
-                        RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
-                    )
-                ),
-            },
+        unparsed = await client.post(
+            "/internal/egress/tool-bridge/request", headers=seeded.headers(), content=b"{"
         )
-    rules = response.json()["rules"]
-    assert {"kind": "scope", "hosts": [HOST], "pinned": False} in rules
-    assert {"kind": "meter", "host": HOST, "dimension": "requests"} in rules
-    assert [rule for rule in rules if rule["kind"] == "injection"] == [
-        {
-            "kind": "injection",
-            "host": HOST,
-            "header": CLI_HEADER,
-            "sentinel": grant_sentinel(ACCOUNT),
-            "real": f"token-{ACCOUNT}",
-        }
-    ]
-    assert tokens.asked == [(seeded.workspace_id, ACCOUNT)]
+    assert (malformed.status_code, unparsed.status_code, bridge.received) == (422, 422, [])
 
 
-async def test_a_principal_reaches_its_members_private_connections_and_the_shared_ones(
-    db: None,
-) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
-        other_member = await _seed_member(connection, seeded.workspace_id)
-    store = GrantStore()
-    with ws(seeded.workspace_id), agent(seeded.agent_id):
-        await store.record(
-            provider=PROVIDER,
-            account_id=ACCOUNT,
-            host="api.own.test",
-            grantor_member_id=seeded.member_id,
-            shared=False,
-        )
-        await store.record(
-            provider=PROVIDER,
-            account_id="acct-other",
-            host="api.other.test",
-            grantor_member_id=other_member,
-            shared=False,
-        )
-        await store.record(
-            provider=PROVIDER,
-            account_id="acct-shared",
-            host="api.shared.test",
-            grantor_member_id=other_member,
-            shared=True,
-        )
-    resolver = PerAgentRules(base=(), grants=store)
-    expires_at = int(datetime.now(UTC).timestamp()) + 300
-
-    def scoped(rules: tuple[object, ...]) -> set[str]:
-        return {
-            host for rule in rules if isinstance(rule, ScopeRule) for host in rule.allowed_hosts
-        }
-
-    acting_run = await resolver.resolve(
-        RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
-    )
-    nobody_run = await resolver.resolve(RunToken(seeded.workspace_id, seeded.turn_id))
-    acting_probe = await resolver.resolve(
-        ProbeToken(
-            seeded.workspace_id,
-            seeded.conversation_id,
-            uuid4(),
-            expires_at,
-            member_id=seeded.member_id,
-        )
-    )
-    nobody_probe = await resolver.resolve(
-        ProbeToken(seeded.workspace_id, seeded.conversation_id, uuid4(), expires_at)
-    )
-
-    assert scoped(acting_run) == scoped(acting_probe) == {"api.own.test", "api.shared.test"}
-    assert scoped(nobody_run) == scoped(nobody_probe) == {"api.shared.test"}
-
-
-async def test_resolve_rechecks_turn_and_probe_liveness(db: None) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
+async def test_the_bridge_refuses_a_missing_or_malformed_stamp(db: None) -> None:
+    seeded = await _seeded()
     run = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
-    expired_probe = PROBE_TOKENS.encode(
-        ProbeToken(
-            seeded.workspace_id,
-            seeded.conversation_id,
-            uuid4(),
-            int(datetime.now(UTC).timestamp()) - 1,
+    for stamp in (None, "", "no-separator", "a.b", f"{seeded.headers()[SESSION_STAMP_HEADER]}x"):
+        headers = (
+            {RUN_HEADER: run} if stamp is None else {RUN_HEADER: run, SESSION_STAMP_HEADER: stamp}
         )
-    )
-    resolver = PerAgentRules(
-        base=(
-            ScopeRule(allowed_hosts=frozenset({HOST})),
-            InjectionRule(
-                host=HOST,
-                header="authorization",
-                sentinel=SENTINEL_MODEL_KEY,
-                real="deployment-model-key",
-            ),
+        assert _refused(*await _bridged(seeded, headers)), stamp
+
+
+async def test_the_bridge_refuses_a_stale_stamp(db: None) -> None:
+    seeded = await _seeded()
+    now = datetime.now(UTC)
+    skew = timedelta(seconds=SESSION_STAMP_MAX_AGE_SECONDS + 5)
+    for issued_at in (now - skew, now + skew):
+        assert _refused(*await _bridged(seeded, seeded.headers(issued_at=issued_at)))
+
+
+async def test_the_bridge_refuses_a_stamp_by_another_key(db: None) -> None:
+    seeded = await _seeded()
+    headers = seeded.headers(key=Ed25519PrivateKey.generate())
+    assert _refused(*await _bridged(seeded, headers))
+
+
+async def test_the_bridge_refuses_a_stamp_of_another_shape(db: None) -> None:
+    seeded = await _seeded()
+    run = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
+    session_token = _signed(f"ufo-session/{seeded.workspace_id}/{uuid4()}".encode())
+    for stamp in (seeded.headers(extra={"v": 1})[SESSION_STAMP_HEADER], session_token):
+        headers = {RUN_HEADER: run, SESSION_STAMP_HEADER: stamp}
+        assert _refused(*await _bridged(seeded, headers))
+
+
+async def test_the_bridge_refuses_a_stamp_naming_another_workspace(db: None) -> None:
+    seeded = await _seeded()
+    other = await _seeded()
+    headers = {
+        **seeded.headers(),
+        SESSION_STAMP_HEADER: other.headers()[SESSION_STAMP_HEADER],
+    }
+    assert _refused(*await _bridged(seeded, headers))
+
+
+async def test_the_bridge_refuses_a_missing_or_foreign_run_token(db: None) -> None:
+    seeded = await _seeded()
+    stamp = seeded.headers()[SESSION_STAMP_HEADER]
+    run = RunToken(seeded.workspace_id, seeded.turn_id)
+    for token in (
+        None,
+        "",
+        FORGED_TOKENS.encode(run),
+        _basic(RUN_TOKENS.encode(run)),
+        sign_token(
+            RUN_TOKENS.secret, f"ufo-probe/{seeded.workspace_id}/{seeded.turn_id}/-".encode()
         ),
-        grants=None,
-        preview_token="preview-real",
-    )
-    async with _client(_control(resolver)) as client:
-        authorized = await client.post(
-            "/internal/egress/authorize",
-            headers=_auth(),
-            json={"proxy_auth": _basic(run)},
+    ):
+        headers = (
+            {SESSION_STAMP_HEADER: stamp}
+            if token is None
+            else {
+                SESSION_STAMP_HEADER: stamp,
+                RUN_HEADER: token,
+            }
         )
-        assert authorized.json() == {"authorized": True, "generation": 0}
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.turn)
-                .values(status="done", terminal={"status": "done"}, updated_at=sa.func.now())
-                .where(tables.turn.c.id == seeded.turn_id)
-            )
-        ended = await client.post(
-            "/internal/egress/resolve",
-            headers=_auth(),
-            json={"proxy_auth": _basic(run)},
-        )
-        expired = await client.post(
-            "/internal/egress/resolve",
-            headers=_auth(),
-            json={"proxy_auth": _basic(expired_probe)},
-        )
-
-    assert ended.json() == {"rules": []}
-    assert expired.json() == {"rules": []}
+        assert _refused(*await _bridged(seeded, headers)), token
 
 
-async def test_resolve_admits_the_preview_host_whatever_the_agents_internet_policy(
+async def test_the_bridge_refuses_a_turn_label_that_is_not_the_run_token_s(db: None) -> None:
+    seeded = await _seeded()
+    sibling = await _seeded()
+    run = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
+    for labels in ({TURN_LABEL: str(uuid4())}, {}, {"conversation": str(seeded.conversation_id)}):
+        headers = {SESSION_STAMP_HEADER: _stamp(seeded.workspace_id, labels), RUN_HEADER: run}
+        assert _refused(*await _bridged(seeded, headers))
+    sibling_run = RUN_TOKENS.encode(RunToken(sibling.workspace_id, sibling.turn_id))
+    assert _refused(*await _bridged(seeded, {**seeded.headers(), RUN_HEADER: sibling_run}))
+
+
+@pytest.mark.parametrize(
+    ("status", "detached"),
+    [("parked", False), ("done", False), ("done", True)],
+    ids=["parked", "done", "detached-only"],
+)
+async def test_the_bridge_refuses_a_turn_that_is_not_running(
+    db: None, status: str, detached: bool
+) -> None:
+    seeded = await _seeded(status, datetime.now(UTC) + timedelta(minutes=10) if detached else None)
+    assert _refused(*await _bridged(seeded, seeded.headers()))
+
+
+async def test_the_bridge_route_refuses_when_no_bridge_is_wired(db: None) -> None:
+    seeded = await _seeded()
+    async with _client(_control(PerAgentRules())) as client:
+        response = await client.post(
+            "/internal/egress/tool-bridge/request", headers=seeded.headers(), json=BRIDGE_REQUEST
+        )
+    assert (response.status_code, response.json()) == (403, {"detail": "forbidden"})
+
+
+async def _rendered(
+    seeded: _Seeded, preview: _PreviewService, content: bytes | AsyncIterator[bytes]
+) -> httpx.Response:
+    async with _client(_control(PerAgentRules(), preview=preview)) as client:
+        return await client.post(
+            "/internal/egress/preview/render",
+            headers={**seeded.headers(), "content-type": "multipart/form-data; boundary=b"},
+            content=content,
+        )
+
+
+async def test_the_preview_relay_forwards_the_body_with_the_real_bearer_and_streams_the_answer_back(
     db: None,
 ) -> None:
-    async with workspace_tx() as connection:
-        offline = await _seed_turn(connection, internet_access_allowed=False)
-        online = await _seed_turn(connection)
-    resolver = PerAgentRules(
-        base=(),
-        grants=None,
-        internet=(InternetRule(),),
-        cache_host=CACHE_HOST,
-        cache_pkg_hosts=("registry.npmjs.org",),
-        preview_token="preview-real",
+    seeded = await _seeded()
+    preview = _PreviewService()
+    body = b"--b\r\ncontent-disposition: form-data; name=file\r\n\r\nhello\r\n--b--\r\n"
+
+    rendered = await _rendered(seeded, preview, body)
+    refused = await _rendered(seeded, preview, PREVIEW_REFUSED)
+
+    assert (rendered.status_code, rendered.content) == (200, PREVIEW_BUNDLE)
+    assert rendered.headers["content-type"] == "application/zip"
+    assert (refused.status_code, refused.json()) == (422, {"error": "unreadable"})
+    assert preview.seen == [
+        (f"Bearer {PREVIEW_TOKEN}", "multipart/form-data; boundary=b", body),
+        (f"Bearer {PREVIEW_TOKEN}", "multipart/form-data; boundary=b", PREVIEW_REFUSED),
+    ]
+
+
+async def test_the_preview_relay_refuses_an_oversized_body(db: None) -> None:
+    seeded = await _seeded()
+    preview = _PreviewService()
+
+    async def chunked() -> AsyncIterator[bytes]:
+        yield b"unsized"
+
+    async with _client(_control(PerAgentRules(), preview=preview)) as client:
+        request = client.build_request(
+            "POST",
+            "/internal/egress/preview/render",
+            headers={**seeded.headers(), "content-type": "multipart/form-data; boundary=b"},
+            content=b"x",
+        )
+        request.headers["content-length"] = str(DOCUMENT_INPUT_MAX_BYTES + 1)
+        oversized = await client.send(request)
+    unsized = await _rendered(seeded, preview, chunked())
+
+    assert oversized.status_code == 413
+    assert unsized.status_code == 413
+    assert preview.seen == []
+
+
+async def test_the_preview_relay_answers_502_when_the_preview_service_is_unreachable(
+    db: None,
+) -> None:
+    seeded = await _seeded()
+
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    control = EgressControl(
+        cache_control_token=CACHE_TOKEN,
+        resolver=PerAgentRules(),
+        run_tokens=RUN_TOKENS,
+        stamp_key=KEY.public_key(),
+        preview=PreviewRelay(
+            PREVIEW_ADDRESS,
+            PREVIEW_TOKEN,
+            httpx.AsyncClient(transport=httpx.MockTransport(unreachable)),
+        ),
     )
-    async with _client(_control(resolver)) as client:
-        narrowed = await client.post(
-            "/internal/egress/resolve",
-            headers=_auth(),
-            json={
-                "proxy_auth": _basic(
-                    RUN_TOKENS.encode(RunToken(offline.workspace_id, offline.turn_id))
-                )
-            },
+    async with _client(control) as client:
+        response = await client.post(
+            "/internal/egress/preview/render",
+            headers={**seeded.headers(), "content-type": "text/plain"},
+            content=b"x",
         )
-        unnarrowed = await client.post(
-            "/internal/egress/resolve",
-            headers=_auth(),
-            json={
-                "proxy_auth": _basic(
-                    RUN_TOKENS.encode(RunToken(online.workspace_id, online.turn_id))
-                )
-            },
-        )
-    preview = {"kind": "service", "host": PREVIEW_HOST, "daemon_prefix": None}
-    tool_bridge = {"kind": "service", "host": TOOL_BRIDGE_HOST, "daemon_prefix": None}
-    injection = {
-        "kind": "injection",
-        "host": PREVIEW_HOST,
-        "header": PREVIEW_AUTH_HEADER,
-        "sentinel": PREVIEW_SENTINEL,
-        "real": "preview-real",
-    }
-    assert narrowed.json() == {"rules": [tool_bridge, preview, injection]}
-    assert unnarrowed.json() == {
-        "rules": [
-            {"kind": "internet"},
-            tool_bridge,
-            {"kind": "service", "host": CACHE_HOST, "daemon_prefix": None},
-            {
-                "kind": "service",
-                "host": "registry.npmjs.org",
-                "daemon_prefix": "/pkg/registry.npmjs.org",
-            },
-            preview,
-            injection,
-        ]
-    }
-
-
-async def test_cache_routes_require_the_deploy_internet_capability(db: None) -> None:
-    async with workspace_tx() as connection:
-        online = await _seed_turn(connection)
-    resolver = PerAgentRules(
-        base=(),
-        grants=None,
-        cache_host=CACHE_HOST,
-        cache_pkg_hosts=("registry.npmjs.org",),
+    assert (response.status_code, response.json()) == (
+        502,
+        {"detail": "The preview service did not answer."},
     )
-    async with _client(_control(resolver)) as client:
+
+
+async def test_the_preview_relay_refuses_an_unstamped_request(db: None) -> None:
+    seeded = await _seeded()
+    preview = _PreviewService()
+    async with _client(_control(PerAgentRules(), preview=preview)) as client:
         response = await client.post(
-            "/internal/egress/resolve",
-            headers=_auth(),
-            json={
-                "proxy_auth": _basic(
-                    RUN_TOKENS.encode(RunToken(online.workspace_id, online.turn_id))
-                )
-            },
+            "/internal/egress/preview/render",
+            headers={RUN_HEADER: seeded.headers()[RUN_HEADER], "content-type": "text/plain"},
+            content=b"x",
         )
-    assert response.json() == {
-        "rules": [{"kind": "service", "host": TOOL_BRIDGE_HOST, "daemon_prefix": None}]
-    }
+    assert (response.status_code, preview.seen) == (403, [])
 
 
-async def test_resolve_forged_principal_yields_the_base(db: None) -> None:
-    resolver = PerAgentRules(base=(ScopeRule(allowed_hosts=frozenset({HOST})),), grants=None)
-    async with _client(_control(resolver)) as client:
+async def test_the_preview_route_is_absent_with_no_preview_service(db: None) -> None:
+    seeded = await _seeded()
+    async with _client(_control(PerAgentRules(), bridge=_Bridge())) as client:
         response = await client.post(
-            "/internal/egress/resolve",
-            headers=_auth(),
-            json={"proxy_auth": "Basic bm90LWEtdG9rZW4="},
+            "/internal/egress/preview/render", headers=seeded.headers(), content=b"x"
         )
-    assert response.json() == {"rules": [{"kind": "scope", "hosts": [HOST], "pinned": False}]}
+    assert response.status_code == 404
 
 
-async def test_the_bearer_gate_refuses_a_request_with_no_control_token(db: None) -> None:
-    resolver = PerAgentRules(base=(), grants=None)
-    async with _client(_control(resolver)) as client:
-        missing = await client.post("/internal/egress/resolve", json={"proxy_auth": ""})
-        wrong = await client.post(
-            "/internal/egress/resolve",
-            headers={"Authorization": "Bearer wrong"},
-            json={"proxy_auth": ""},
-        )
-    assert missing.status_code == 401
-    assert wrong.status_code == 401
+def test_the_stamp_verifies_the_proxy_service_s_golden_signature() -> None:
+    issued = datetime.fromtimestamp(1_700_000_000, UTC)
+    key = load_proxy_public_key(RFC_8032_PUBLIC_KEY)
 
-
-async def test_meter_writes_the_egress_probe_and_token_ledger_rows(db: None) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
-    workspace_id, turn_id = seeded.workspace_id, seeded.turn_id
-    usage = {
-        "input_tokens": 1000,
-        "output_tokens": 2000,
-        "cache_read_tokens": 3000,
-        "cache_write_5m_tokens": 0,
-        "cache_write_1h_tokens": 4000,
-    }
-    resolver = PerAgentRules(base=(), grants=None)
-    gate = SampleGate(GateDeploy(public_base_url=None, home_surface=None))
-    async with _client(replace(_control(resolver), ledger=Ledger(gates=(gate,)))) as client:
-        response = await client.post(
-            "/internal/egress/meter",
-            headers=_auth(),
-            json={
-                "records": [
-                    {"kind": "egress", "workspace_id": str(workspace_id), "turn_id": str(turn_id)},
-                    {"kind": "egress", "workspace_id": str(workspace_id), "turn_id": str(turn_id)},
-                    {"kind": "egress", "workspace_id": str(workspace_id), "turn_id": None},
-                    {
-                        "kind": "tokens",
-                        "workspace_id": str(workspace_id),
-                        "turn_id": str(turn_id),
-                        "model": "claude-opus-4-8",
-                        "usage": usage,
-                    },
-                    {
-                        "kind": "tokens",
-                        "workspace_id": str(workspace_id),
-                        "turn_id": str(turn_id),
-                        "model": "claude-opus-4-8",
-                        "usage": usage,
-                    },
-                ]
-            },
-        )
-    assert response.json() == {}
-    async with workspace_tx() as connection:
-        rows = (
-            await connection.execute(
-                sa.select(
-                    tables.ledger.c.dimension, tables.ledger.c.turn_id, tables.ledger.c.amount
-                ).where(tables.ledger.c.workspace_id == workspace_id)
-            )
-        ).all()
-    by_key = {(row.dimension, row.turn_id): int(row.amount) for row in rows}
-    assert by_key[("egress", turn_id)] == 2
-    assert by_key[("egress", None)] == 1
-    assert by_key[("sandbox_tokens", turn_id)] == 2 * (1000 + 2000 + 3000 + 4000)
-    async with workspace_tx() as connection:
-        charges = (
-            await connection.execute(
-                sa.select(
-                    CHARGE_TABLE.c.turn_id,
-                    CHARGE_TABLE.c.dimension,
-                    CHARGE_TABLE.c.delta_micro_usd,
-                    CHARGE_TABLE.c.platform_paid,
-                ).where(CHARGE_TABLE.c.workspace_id == workspace_id)
-            )
-        ).all()
-        priced = (
-            await connection.execute(
-                sa.select(tables.ledger.c.priced_micro_usd).where(
-                    tables.ledger.c.workspace_id == workspace_id,
-                    tables.ledger.c.dimension == "sandbox_tokens",
-                )
-            )
-        ).scalar_one()
-    assert [tuple(charge) for charge in charges] == [(turn_id, "sandbox_tokens", priced, True)]
-
-
-async def test_meter_folds_unpriced_cache_write_30m_into_input(monkeypatch, db: None) -> None:
-    """The proxy carries OpenAI's cache-write share on cache_write_30m ungated; a model that
-    prices a 30m write tier keeps it, one that does not bills it as input."""
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
-    workspace_id, turn_id = seeded.workspace_id, seeded.turn_id
-    captured: dict[str, object] = {}
-
-    async def _capture(_ledger, _connection, _ws, _turn, model, usage, _pricing):
-        captured[model] = usage
-
-    monkeypatch.setattr(Ledger, "record_sandbox_tokens", _capture)
-    usage = {
-        "input_tokens": 1000,
-        "output_tokens": 500,
-        "cache_read_tokens": 0,
-        "cache_write_5m_tokens": 0,
-        "cache_write_30m_tokens": 5000,
-        "cache_write_1h_tokens": 0,
-    }
-    resolver = PerAgentRules(base=(), grants=None)
-    async with _client(_control(resolver)) as client:
-        response = await client.post(
-            "/internal/egress/meter",
-            headers=_auth(),
-            json={
-                "records": [
-                    {
-                        "kind": "tokens",
-                        "workspace_id": str(workspace_id),
-                        "turn_id": str(turn_id),
-                        "model": "gpt-5.6-terra",
-                        "usage": usage,
-                    },
-                    {
-                        "kind": "tokens",
-                        "workspace_id": str(workspace_id),
-                        "turn_id": str(turn_id),
-                        "model": "claude-opus-4-8",
-                        "usage": usage,
-                    },
-                ]
-            },
-        )
-    assert response.json() == {}
-    assert captured["gpt-5.6-terra"].cache_write_30m_tokens == 5000
-    assert captured["gpt-5.6-terra"].input_tokens == 1000
-    assert captured["claude-opus-4-8"].cache_write_30m_tokens == 0
-    assert captured["claude-opus-4-8"].input_tokens == 6000
-
-
-async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(monkeypatch) -> None:
-    calls: list[tuple[str, int, str, str]] = []
-    monkeypatch.setattr(
-        "ufo.runtime.access.egress_control.emit_metric",
-        lambda name, amount, **dims: calls.append((name, amount, dims["host"], dims["dimension"])),
+    assert verify_stamp(key, GOLDEN_STAMP, issued) == SessionStamp(
+        issued_at=1_700_000_000,
+        labels={"a": "1", "b": "2"},
+        session_id=UUID(int=0x2222_2222_2222_2222_2222_2222_2222_2222),
+        workspace_id=UUID(int=0x1111_1111_1111_1111_1111_1111_1111_1111),
     )
-    resolver = PerAgentRules(base=(), grants=None)
-    async with _client(_control(resolver)) as client:
-        response = await client.post(
-            "/internal/egress/meter",
-            headers=_auth(),
-            json={
-                "records": [
-                    {"kind": "metric", "host": "api.anthropic.com", "dimension": "tokens"},
-                    {"kind": "metric", "host": "api.anthropic.com", "dimension": "tokens"},
-                    {"kind": "metric", "host": "github.com", "dimension": "requests"},
-                ]
-            },
+    with pytest.raises(StampInvalid):
+        verify_stamp(
+            key, GOLDEN_STAMP, issued + timedelta(seconds=SESSION_STAMP_MAX_AGE_SECONDS + 1)
         )
-    assert response.json() == {}
-    assert set(calls) == {
-        ("sandbox_egress_total", 2, "api.anthropic.com", "tokens"),
-        ("sandbox_egress_total", 1, "github.com", "requests"),
-    }
+
+
+def test_the_proxy_public_key_is_the_raw_key_in_standard_base64() -> None:
+    raw = KEY.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    loaded = load_proxy_public_key(base64.b64encode(raw).decode())
+    assert loaded.public_bytes(Encoding.Raw, PublicFormat.Raw) == raw
+    pem = KEY.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+    for raw in ("", "not base64!", base64.b64encode(b"short").decode(), pem):
+        with pytest.raises(RuntimeError, match=PROXY_PUBLIC_KEY_ENV):
+            load_proxy_public_key(raw)
 
 
 async def _seed_git_cli(
@@ -893,7 +561,7 @@ async def _seed_git_cli(
         )
     tokens = _Tokens(fault=fault)
     clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, secret=tokens, git=GIT)}
-    return seeded, PerAgentRules(base=(), grants=GrantStore(), clis=clis), tokens
+    return seeded, PerAgentRules(grants=GrantStore(), clis=clis), tokens
 
 
 async def test_git_credential_answers_the_granted_accounts_token_for_the_wired_host(
@@ -991,38 +659,42 @@ async def test_git_credential_is_public_when_the_broker_will_not_answer(
     assert withheld[0]["error_class"] == type(fault).__name__
 
 
-async def test_git_credential_is_gated_by_the_cache_token_not_the_egress_token() -> None:
-    """Least privilege: the cache credential reaches only git-credential, and the egress control
-    token — the key to the secrets tier — is not accepted here."""
-    resolver = PerAgentRules(base=(), grants=None)
+async def test_git_credential_is_gated_by_the_cache_token_alone(db: None) -> None:
+    seeded = await _seeded()
     body = {"host": GIT.host}
-    async with _client(_control(resolver)) as client:
+    async with _client(_control(PerAgentRules(), bridge=_Bridge())) as client:
         none = await client.post("/internal/git-credential", json=body)
-        egress = await client.post("/internal/git-credential", headers=_auth(), json=body)
+        stamped = await client.post("/internal/git-credential", headers=seeded.headers(), json=body)
         cross = await client.post(
-            "/internal/egress/resolve", headers=_cache_auth(), json={"proxy_auth": ""}
+            "/internal/egress/tool-bridge/request", headers=_cache_auth(), json=BRIDGE_REQUEST
         )
     assert none.status_code == 401
-    assert egress.status_code == 401
-    assert cross.status_code == 401
+    assert stamped.status_code == 401
+    assert cross.status_code == 403
 
 
-def _injected(rules: tuple[object, ...]) -> set[str]:
-    return {rule.sentinel for rule in rules if isinstance(rule, InjectionRule)}
+async def _bound(resolver: PerAgentRules, seeded: _Seeded, member_id: UUID | None) -> set[str]:
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        policy = await resolver.session_policy(
+            PolicyScope(seeded.workspace_id, member_id, True, False, None)
+        )
+    return {bind.secret for bind in policy.bind}
 
 
-async def test_proxy_and_git_credentials_prefer_the_members_private_account(db: None) -> None:
+async def test_session_binds_and_git_credentials_prefer_the_members_private_account(
+    db: None,
+) -> None:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
     with ws(seeded.workspace_id), agent(seeded.agent_id):
-        await GrantStore().record(
+        private = await GrantStore().record(
             provider=PROVIDER,
             account_id=ACCOUNT,
             host=HOST,
             grantor_member_id=seeded.member_id,
             shared=False,
         )
-        await GrantStore().record(
+        shared = await GrantStore().record(
             provider=PROVIDER,
             account_id="acct-other",
             host=HOST,
@@ -1031,22 +703,22 @@ async def test_proxy_and_git_credentials_prefer_the_members_private_account(db: 
         )
     tokens = _Tokens()
     clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, secret=tokens, git=GIT)}
-    resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
+    resolver = PerAgentRules(grants=GrantStore(), clis=clis)
     acting = RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
     nobody = RunToken(seeded.workspace_id, seeded.turn_id)
 
-    acting_rules = await resolver.resolve(acting)
     acting_credential = await resolver.git_credential(acting, GIT.host)
-    nobody_rules = await resolver.resolve(nobody)
     nobody_credential = await resolver.git_credential(nobody, GIT.host)
 
-    assert _injected(acting_rules) == {grant_sentinel(ACCOUNT)}
+    assert await _bound(resolver, seeded, seeded.member_id) == {
+        f"{CONNECTION_SECRET_PREFIX}{private}"
+    }
     assert acting_credential == (GIT, f"token-{ACCOUNT}", ACCOUNT)
-    assert _injected(nobody_rules) == {grant_sentinel("acct-other")}
+    assert await _bound(resolver, seeded, None) == {f"{CONNECTION_SECRET_PREFIX}{shared}"}
     assert nobody_credential == (GIT, "token-acct-other", "acct-other")
 
 
-async def test_a_probe_acting_for_a_member_loses_a_disconnected_grant(db: None) -> None:
+async def test_a_run_acting_for_a_member_loses_a_disconnected_grant(db: None) -> None:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
     store = GrantStore()
@@ -1058,25 +730,19 @@ async def test_a_probe_acting_for_a_member_loses_a_disconnected_grant(db: None) 
             grantor_member_id=seeded.member_id,
             shared=False,
         )
-    probe = ProbeToken(
-        seeded.workspace_id,
-        seeded.conversation_id,
-        uuid4(),
-        int(datetime.now(UTC).timestamp()) + 300,
-        member_id=seeded.member_id,
-    )
+    run = RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
     tokens = _Tokens()
     clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, secret=tokens, git=GIT)}
-    resolver = PerAgentRules(base=(), grants=store, clis=clis)
+    resolver = PerAgentRules(grants=store, clis=clis)
 
-    granted_rules = await resolver.resolve(probe)
-    granted_credential = await resolver.git_credential(probe, GIT.host)
+    granted = await _bound(resolver, seeded, seeded.member_id)
+    granted_credential = await resolver.git_credential(run, GIT.host)
     with ws(seeded.workspace_id), agent(seeded.agent_id):
         assert await store.disconnect(connection_id, actor_member_id=seeded.member_id) is True
-    removed_rules = await resolver.resolve(probe)
-    removed_credential = await resolver.git_credential(probe, GIT.host)
+    removed = await _bound(resolver, seeded, seeded.member_id)
+    removed_credential = await resolver.git_credential(run, GIT.host)
 
-    assert _injected(granted_rules) == {grant_sentinel(ACCOUNT)}
+    assert granted == {f"{CONNECTION_SECRET_PREFIX}{connection_id}"}
     assert granted_credential == (GIT, f"token-{ACCOUNT}", ACCOUNT)
-    assert _injected(removed_rules) == set()
+    assert removed == set()
     assert removed_credential is None

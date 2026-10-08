@@ -28,11 +28,12 @@ from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.harness.sandbox.session import RunTokenCodec
 from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.hub import Hub, InProcessHub, Terminal, TextDelta
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.surfaces.admission import Admission, MemberAdmission
@@ -75,7 +76,6 @@ async def live_runtime(
                 backend="local",
                 off_cluster=False,
                 image_ref=SANDBOX_IMAGE_REF,
-                proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
                 workspace_root=tmp_path / "workspaces",
             ),
             hub=hub,
@@ -99,6 +99,7 @@ async def live_runtime(
             index=None,
             embed=None,
             artifact_token_secret="",
+            rules=PerAgentRules(),
         )
     )
     yield hub, blob

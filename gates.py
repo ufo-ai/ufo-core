@@ -80,8 +80,12 @@ ADMISSION_FACTORY_NAME = "_admission"
 SPEND_THREADED_TYPES = frozenset({"SpendGates", "Ledger"})
 UNTHREADED_SPEND = frozenset({"NO_SPEND_GATES", "UNGATED_LEDGER"})
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
-# Read or written only by the image a deploy replaces; the revision after that release drops them.
-OUTGOING_IMAGE_COLUMNS = {("ledger", "debited_micro_usd")}
+# Read or written only by the image a deploy replaces; the revision after that release drops them,
+# and with `egress_rules_generation` the `bump_egress_rules_generation` triggers.
+OUTGOING_IMAGE_COLUMNS = {
+    ("ledger", "debited_micro_usd"),
+    ("workspace", "egress_rules_generation"),
+}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 SCHEDULING_MODULE = Path("extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py")
 AMBIENT_SCHEDULE_METHODS = frozenset({"create", "update", "cancel", "list", "inspect"})

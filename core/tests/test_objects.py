@@ -55,7 +55,6 @@ from ufo.harness.models.spec import ModelSpec, ReasoningSupport
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     ExecResult,
-    ProxyEndpoint,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
@@ -1839,8 +1838,6 @@ async def _workspace_context(
             conversation_id=turn.conversation_id,
             image_ref="ufo-sandbox:latest",
             workspace_host_path=str(workspace_dir),
-            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
-            run_token="run-token",
         )
     )
     ctx = ToolContext(

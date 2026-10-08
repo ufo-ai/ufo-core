@@ -26,14 +26,14 @@ from ufo.harness.sandbox.ingress_token import (
     IngressTokenKind,
     mint_ingress_token,
 )
-from ufo.harness.sandbox.session import RunToken
+from ufo.harness.sandbox.session import RunToken, RunTokenCodec
 from ufo.harness.sandbox.site_report import (
     SITE_REPORT_PATH,
     SITE_REPORT_TTL_SECONDS,
     SiteReports,
 )
 from ufo.runtime.access.egress_resolver import PerAgentRules
-from ufo.runtime.access.egress_rules import InternetRule, ServiceRule
+from ufo.runtime.access.egress_rules import RUN_HEADER, PolicyScope, Route, SessionPolicy
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import TurnInvoker
@@ -317,7 +317,7 @@ async def test_a_report_persists_a_turn_that_reaches_no_ambient_egress(
     async with workspace_tx() as connection:
         turns = (
             await connection.execute(
-                sa.select(tables.turn.c.id, tables.turn.c.runtime_config)
+                sa.select(tables.turn.c.id, tables.turn.c.member_id, tables.turn.c.runtime_config)
                 .where(tables.turn.c.conversation_id == conversation_id)
                 .order_by(tables.turn.c.seq)
             )
@@ -334,10 +334,21 @@ async def test_a_report_persists_a_turn_that_reaches_no_ambient_egress(
         await connection.execute(
             sa.update(tables.turn).where(tables.turn.c.id == turn.id).values(status="running")
         )
-    assert TurnRuntimeConfig.model_validate(turn.runtime_config) == TurnRuntimeConfig(
-        internet_access=False
+    runtime_config = TurnRuntimeConfig.model_validate(turn.runtime_config)
+    assert runtime_config == TurnRuntimeConfig(internet_access=False)
+    bridge = "https://serve.test/internal/egress/tool-bridge"
+    run_token = RunTokenCodec(SECRET.encode()).encode(RunToken(workspace_id, turn.id))
+    rules = PerAgentRules(grants=GrantStore(), internet=True, bridge_upstream=bridge)
+    with ws(workspace_id), agent(agent_id):
+        policy = await rules.session_policy(
+            PolicyScope(
+                workspace_id,
+                turn.member_id,
+                runtime_config.internet_access is None,
+                True,
+                run_token,
+            )
+        )
+    assert policy == SessionPolicy(
+        routes=(Route(host=TOOL_BRIDGE_HOST, upstream=bridge, headers={RUN_HEADER: run_token}),)
     )
-    rules = await PerAgentRules(base=(), grants=GrantStore(), internet=(InternetRule(),)).resolve(
-        RunToken(workspace_id, turn.id)
-    )
-    assert rules == (ServiceRule(host=TOOL_BRIDGE_HOST),)

@@ -36,8 +36,6 @@ from ufo.sdk.manifest import (
 NAME = "keyed_connectors"
 VERSION = "0.1.0"
 SECTION_NAME = "keyed_connectors"
-REQUEST_DIMENSION = "requests"
-SENTINEL_PREFIX = "UFO_SENTINEL_KEYED_"
 HOST_SLOT_SUFFIX = "api_host"
 SWAPPABLE_SCHEMES = frozenset({"API-Key", "Bearer", "Token"})
 
@@ -106,13 +104,7 @@ class KeyedProvider:
             CredentialSlot(
                 name=f"{self.provider}_{secret.key}",
                 description=secret.description,
-                injection=InjectionTarget(
-                    host=host,
-                    header=secret.header,
-                    sentinel=f"{SENTINEL_PREFIX}{self.provider}_{secret.key}".upper(),
-                    env=secret.env,
-                    dimension=REQUEST_DIMENSION,
-                ),
+                injection=InjectionTarget(host=host, header=secret.header, env=secret.env),
             )
             for secret in self.secrets
         )

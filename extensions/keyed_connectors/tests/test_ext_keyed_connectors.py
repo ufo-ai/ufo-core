@@ -1,6 +1,6 @@
 """The keyed-connector table is the whole declaration: what a row implies must be exactly what the
-egress proxy and the sandbox then act on, so these read the derived slots and the derived rules the
-real proxy derivation produces from them — a row, not new code, is what adding a provider costs."""
+proxy service and the sandbox then act on, so these read the derived slots and the binds the real
+session policy compiles from them — a row, not new code, is what adding a provider costs."""
 
 from pathlib import Path
 from typing import cast
@@ -15,12 +15,7 @@ from ufo.db import workspace_tx
 from ufo.host.ext.loader import core_object_kinds, injecting_slots
 from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
-from ufo.runtime.access.egress_rules import (
-    InjectionRule,
-    MeterRule,
-    ScopeRule,
-    derive_credential_rules,
-)
+from ufo.runtime.access.egress_rules import Bind, derive_credential_binds
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.tools.context import ToolContext
@@ -47,14 +42,12 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-def test_every_row_declares_a_distinct_slot_sentinel_and_env() -> None:
-    """A sentinel collision would draw another provider's secret and an env collision would
-    overwrite it in the sandbox, so both are unique across the whole table, as are slot names."""
+def test_every_row_declares_a_distinct_slot_and_env() -> None:
+    """An env collision would overwrite one provider's sentinel with another's in the sandbox, so
+    envs are unique across the whole table, as are slot names."""
     slots = manifest().credentials
-    sentinels = [slot.injection.sentinel for slot in slots if slot.injection]
-    envs = [slot.injection.env for slot in slots if slot.injection and slot.injection.env]
+    envs = [slot.injection.env for slot in slots if slot.injection]
     assert len(set(slot.name for slot in slots)) == len(slots)
-    assert len(set(sentinels)) == len(sentinels)
     assert len(set(envs)) == len(envs)
 
 
@@ -90,26 +83,25 @@ def test_a_scheme_the_proxy_cannot_swap_is_refused_at_declaration() -> None:
 
 
 async def test_posthog_is_connectable_end_to_end_through_workspace_credentials(db: None) -> None:
-    """From the filled slot to the wire: the stored key becomes one Authorization injection on the
-    workspace's chosen PostHog cloud, admitted and metered there and nowhere else."""
+    """From the filled slot to the wire: the stored key binds once, on the Authorization header of
+    the workspace's chosen PostHog cloud and nowhere else."""
     workspace_id = await _workspace()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     await store.put(workspace_id, "posthog_api_key", "phx-real")
     await store.put(workspace_id, "posthog_api_host", "eu.posthog.com")
 
-    rules = await derive_credential_rules(
+    binds = await derive_credential_binds(
         WorkspaceSlots(deploy=injecting_slots((manifest(),))), workspace_id, store
     )
 
-    assert [rule for rule in rules if isinstance(rule, ScopeRule)] == [
-        ScopeRule(allowed_hosts=frozenset({"eu.posthog.com"}))
-    ]
-    assert [rule for rule in rules if isinstance(rule, MeterRule)] == [
-        MeterRule(host="eu.posthog.com", dimension="requests")
-    ]
-    assert {
-        (rule.header, rule.sentinel, rule.real) for rule in rules if isinstance(rule, InjectionRule)
-    } == {("Authorization", "UFO_SENTINEL_KEYED_POSTHOG_API_KEY", "phx-real")}
+    assert binds == (
+        Bind(
+            host="eu.posthog.com",
+            header="Authorization",
+            secret="posthog_api_key",
+            env="POSTHOG_API_KEY",
+        ),
+    )
 
 
 async def test_datadog_is_connectable_end_to_end_through_workspace_credentials(
@@ -121,21 +113,18 @@ async def test_datadog_is_connectable_end_to_end_through_workspace_credentials(
     await store.put(workspace_id, "datadog_application_key", "dd-app-real")
     await store.put(workspace_id, "datadog_api_host", US5_HOST)
 
-    rules = await derive_credential_rules(
+    binds = await derive_credential_binds(
         WorkspaceSlots(deploy=injecting_slots((manifest(),))), workspace_id, store
     )
 
-    assert [rule for rule in rules if isinstance(rule, ScopeRule)] == [
-        ScopeRule(allowed_hosts=frozenset({US5_HOST}))
-    ]
-    assert [rule for rule in rules if isinstance(rule, MeterRule)] == [
-        MeterRule(host=US5_HOST, dimension="requests")
-    ]
-    assert {
-        (rule.header, rule.sentinel, rule.real) for rule in rules if isinstance(rule, InjectionRule)
-    } == {
-        ("DD-API-KEY", "UFO_SENTINEL_KEYED_DATADOG_API_KEY", "dd-api-real"),
-        ("DD-APPLICATION-KEY", "UFO_SENTINEL_KEYED_DATADOG_APPLICATION_KEY", "dd-app-real"),
+    assert set(binds) == {
+        Bind(host=US5_HOST, header="DD-API-KEY", secret="datadog_api_key", env="DD_API_KEY"),
+        Bind(
+            host=US5_HOST,
+            header="DD-APPLICATION-KEY",
+            secret="datadog_application_key",
+            env="DD_APP_KEY",
+        ),
     }
 
 
@@ -144,7 +133,7 @@ async def test_a_workspace_that_keyed_nothing_reaches_no_datadog_host(db: None) 
     filled it, so an unkeyed workspace's sandbox cannot reach Datadog at all."""
     empty: Manifest = manifest()
     assert (
-        await derive_credential_rules(
+        await derive_credential_binds(
             WorkspaceSlots(deploy=injecting_slots((empty,))), await _workspace(), _store()
         )
         == ()

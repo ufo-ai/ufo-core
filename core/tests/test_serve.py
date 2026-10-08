@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import base64
 import inspect
 import json
 import shutil
@@ -10,10 +11,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import sqlalchemy as sa
 import ufo_ext_sample.manifest as sample
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.engine import make_url
@@ -28,8 +32,10 @@ from ufo.config import (
     DEFAULT_BACKGROUND_JOBS_MODEL,
     BlobConfig,
     Config,
+    ConnectConfig,
     DatabaseConfig,
     DebuggerConfig,
+    ModelsConfig,
     OperatorConfig,
     PackConfig,
     SandboxConfig,
@@ -39,29 +45,44 @@ from ufo.config import (
 )
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.catalog import (
+    ANTHROPIC_KEY_ENV,
+    CORE_MODEL_SPECS,
+    CORE_PRICING,
+    OPENAI_KEY_ENV,
+)
 from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.sandbox.exec_env import sandbox_exported_env
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import EGRESS_CA_CERT_ENV, RunTokenCodec
+from ufo.harness.sandbox.session import RunTokenCodec
 from ufo.host.ext.loader import deploy_claims, load_manifests
-from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
+from ufo.proxy_serve import MODEL_KEY_ENVS, OWNER_DSN_ENV, model_bindings
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.access.egress_rules import InjectionRule, ScopeRule
+from ufo.runtime.access.egress_control import CACHE_CONTROL_TOKEN_ENV, PROXY_PUBLIC_KEY_ENV
+from ufo.runtime.access.egress_resolver import PerAgentRules
+from ufo.runtime.access.egress_rules import (
+    RUN_HEADER,
+    UFO_MODELS_SECRET,
+    Bind,
+    HostEntry,
+    PolicyScope,
+    Route,
+    SessionPolicy,
+    derive_artifact_store_hosts,
+)
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
-from ufo.runtime.billing.accounting import UNGATED_LEDGER
+from ufo.runtime.agent_scope import agent
 from ufo.runtime.billing.spend import GateDeploy
 from ufo.runtime.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget, Manifest
 from ufo.runtime.ext.operator import install_operator, installed_operator
 from ufo.runtime.ext.surface import SurfaceSpec
 from ufo.runtime.jobs import model_key_slots
 from ufo.runtime.sources.sync import FOLDER_BACKEND
-from ufo.runtime.workspace import SeveralWorkspaces
+from ufo.runtime.workspace import SeveralWorkspaces, ws
 from ufo.schema import tables
 
-CA_PEM = "-----BEGIN CERTIFICATE-----\nshared\n-----END CERTIFICATE-----\n"
 ANTHROPIC_KEY = "sk-ant-test"
-CONTROL_TOKEN = "serve-egress-control-secret"
 OWNER_LIBPQ_DSN = "postgresql://ufo_owner:pw@db.test/ufo"
 RUN_TOKENS = RunTokenCodec(b"serve-test-run-token-secret")
 
@@ -104,9 +125,7 @@ def _hosted_config() -> Config:
     return Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db"),
         blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
-        sandbox=SandboxConfig(
-            backend="local", proxy_port=9443, proxy_public_url="https://proxy.test"
-        ),
+        sandbox=SandboxConfig(backend="local", proxy_url="https://proxy.test"),
     )
 
 
@@ -114,12 +133,8 @@ def _local_config() -> Config:
     return Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db"),
         blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
-        sandbox=SandboxConfig(backend="local", proxy_port=0),
+        sandbox=SandboxConfig(backend="local"),
     )
-
-
-def _blob() -> FilesystemBlobStore:
-    return FilesystemBlobStore(root=Path("/tmp/blobs"))
 
 
 def test_runtime_identity_of_an_unpackaged_process_carries_no_image() -> None:
@@ -246,6 +261,7 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
         credentials=None,
         spend=object(),
         ledger=object(),
+        sessions=None,
     )
 
     def page_change_runner(**kwargs: object) -> object:
@@ -310,6 +326,7 @@ def test_launch_jobs_hands_both_runners_the_background_jobs_model(
         credentials=None,
         spend=object(),
         ledger=object(),
+        sessions=None,
     )
 
     class Runner:
@@ -348,17 +365,19 @@ async def test_serve_lifespan_waits_for_background_shutdown(
     speaker = ShutdownProbe()
     listener = ShutdownProbe()
     monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
-    monkeypatch.setattr(serve, "CancelReconciler", lambda client: reconciler)
-    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: stranded)
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client, sessions: reconciler)
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client, sessions: stranded)
     app = SimpleNamespace(
         state=SimpleNamespace(
             fleet=serve.WHOLE_FLEET,
             dbos=object(),
+            deploy_sessions=None,
             writeback_poller=poller,
             mid_turn_reply_poller=speaker,
             surface_listeners=(listener,),
             surface_boots=(),
             configured_sources=(),
+            http_clients=(),
         )
     )
     async with serve._serve_lifespan(app):
@@ -388,17 +407,19 @@ async def test_the_jobs_fleet_runs_the_reconcilers_and_none_of_the_surface_deliv
     speaker = ShutdownProbe()
     listener = ShutdownProbe()
     monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
-    monkeypatch.setattr(serve, "CancelReconciler", lambda client: reconciler)
-    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: stranded)
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client, sessions: reconciler)
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client, sessions: stranded)
     app = SimpleNamespace(
         state=SimpleNamespace(
             fleet=serve.JOBS_FLEET,
             dbos=object(),
+            deploy_sessions=None,
             writeback_poller=poller,
             mid_turn_reply_poller=speaker,
             surface_listeners=(listener,),
             surface_boots=(),
             configured_sources=(),
+            http_clients=(),
         )
     )
     async with serve._serve_lifespan(app):
@@ -417,8 +438,8 @@ async def test_a_surface_boot_starts_its_work_before_the_first_request(
     """The work a surface would otherwise start on its first page — the portal's asset publish —
     starts with the app loop instead, handed the fleet store it writes through."""
     monkeypatch.setattr(serve, "ExecutorRecovery", ShutdownProbe)
-    monkeypatch.setattr(serve, "CancelReconciler", lambda client: ShutdownProbe())
-    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: ShutdownProbe())
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client, sessions: ShutdownProbe())
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client, sessions: ShutdownProbe())
     backend = FilesystemBlobStore(root=tmp_path)
     booted: list[object] = []
 
@@ -427,12 +448,14 @@ async def test_a_surface_boot_starts_its_work_before_the_first_request(
             state=SimpleNamespace(
                 fleet=fleet,
                 dbos=object(),
+                deploy_sessions=None,
                 writeback_poller=None,
                 mid_turn_reply_poller=None,
                 surface_listeners=(),
                 surface_boots=(booted.append,),
                 blob=WorkspaceBlobStore(backend=backend),
                 configured_sources=(),
+                http_clients=(),
             )
         )
 
@@ -451,17 +474,19 @@ async def test_serve_lifespan_propagates_a_background_failure(
     reconciler = ShutdownProbe()
     stranded = ShutdownProbe()
     monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
-    monkeypatch.setattr(serve, "CancelReconciler", lambda client: reconciler)
-    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: stranded)
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client, sessions: reconciler)
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client, sessions: stranded)
     app = SimpleNamespace(
         state=SimpleNamespace(
             fleet=serve.WHOLE_FLEET,
             dbos=object(),
+            deploy_sessions=None,
             writeback_poller=None,
             mid_turn_reply_poller=None,
             surface_listeners=(),
             surface_boots=(),
             configured_sources=(),
+            http_clients=(),
         )
     )
     with pytest.raises(ExceptionGroup) as raised:
@@ -490,12 +515,13 @@ async def test_the_lifespan_registers_configured_sources_into_the_one_workspace(
     db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(serve, "ExecutorRecovery", ShutdownProbe)
-    monkeypatch.setattr(serve, "CancelReconciler", lambda client: ShutdownProbe())
-    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: ShutdownProbe())
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client, sessions: ShutdownProbe())
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client, sessions: ShutdownProbe())
     app = SimpleNamespace(
         state=SimpleNamespace(
             fleet=serve.JOBS_FLEET,
             dbos=object(),
+            deploy_sessions=None,
             writeback_poller=None,
             mid_turn_reply_poller=None,
             surface_listeners=(),
@@ -503,6 +529,7 @@ async def test_the_lifespan_registers_configured_sources_into_the_one_workspace(
             configured_sources=(
                 SourceEntry(backend=FOLDER_BACKEND, config=SourceConfig(root=str(tmp_path))),
             ),
+            http_clients=(),
         )
     )
     only = await _found_workspace()
@@ -588,105 +615,179 @@ def test_dbos_destroy_contract_for_the_executor_drain(tmp_path: Path) -> None:
     assert evidence["destroy_seconds"] < 30
 
 
-def test_model_rule_base_prefers_the_ufo_prefixed_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "sk-ant-ufo-scoped")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    injected = [r for r in model_rule_base(_hosted_config()) if isinstance(r, InjectionRule)]
-    assert [rule.real for rule in injected] == ["sk-ant-ufo-scoped"]
-
-    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "")
-    injected = [r for r in model_rule_base(_hosted_config()) if isinstance(r, InjectionRule)]
-    assert [rule.real for rule in injected] == [ANTHROPIC_KEY]
-
-
-def test_model_rule_base_boots_on_the_ufo_prefixed_key_alone(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_model_bindings_prefers_the_ufo_prefixed_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "sk-ant-ufo-scoped")
-    injected = [r for r in model_rule_base(_hosted_config()) if isinstance(r, InjectionRule)]
-    assert [rule.real for rule in injected] == ["sk-ant-ufo-scoped"]
-
-
-def test_proxy_endpoint_is_built_from_config_and_the_shared_ca(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    anthropic = Bind(
+        host="api.anthropic.com",
+        header="x-api-key",
+        secret=UFO_MODELS_SECRET,
+        env="ANTHROPIC_API_KEY",
+    )
+    assert model_bindings(_hosted_config()) == (
+        (HostEntry(host="api.anthropic.com"),),
+        (anthropic,),
+    )
+    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv(EGRESS_CA_CERT_ENV, CA_PEM)
-    monkeypatch.setenv(serve.EGRESS_CONTROL_TOKEN_ENV, CONTROL_TOKEN)
-    app = FastAPI()
-    endpoint = serve._proxy_endpoint(
-        app, _hosted_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob(), None, UNGATED_LEDGER
-    )
-    assert (endpoint.port, endpoint.ca_cert, endpoint.public_url) == (
-        9443,
-        CA_PEM,
-        "https://proxy.test",
-    )
-    mounted = TestClient(app).post("/internal/egress/resolve", json={"proxy_auth": ""})
-    assert mounted.status_code == 401
+    assert model_bindings(_hosted_config())[1] == (anthropic,)
 
-
-def test_proxy_endpoint_fails_loud_without_the_shared_ca(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv(EGRESS_CA_CERT_ENV, raising=False)
-    with pytest.raises(RuntimeError, match=EGRESS_CA_CERT_ENV):
-        serve._proxy_endpoint(
-            FastAPI(),
-            _hosted_config(),
-            (),
-            None,
-            CORE_PRICING,
-            RUN_TOKENS,
-            _blob(),
-            None,
-            UNGATED_LEDGER,
-        )
-
-
-def test_proxy_endpoint_fails_loud_without_the_control_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(EGRESS_CA_CERT_ENV, CA_PEM)
-    monkeypatch.delenv(serve.EGRESS_CONTROL_TOKEN_ENV, raising=False)
-    with pytest.raises(RuntimeError, match=serve.EGRESS_CONTROL_TOKEN_ENV):
-        serve._proxy_endpoint(
-            FastAPI(),
-            _hosted_config(),
-            (),
-            None,
-            CORE_PRICING,
-            RUN_TOKENS,
-            _blob(),
-            None,
-            UNGATED_LEDGER,
-        )
-
-
-def test_proxy_endpoint_fails_loud_when_the_cache_is_on_without_its_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(EGRESS_CA_CERT_ENV, CA_PEM)
-    monkeypatch.setenv(serve.EGRESS_CONTROL_TOKEN_ENV, CONTROL_TOKEN)
-    monkeypatch.delenv(serve.CACHE_CONTROL_TOKEN_ENV, raising=False)
-    config = Config(
-        database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db"),
-        blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
-        sandbox=SandboxConfig(
-            backend="local",
-            proxy_port=9443,
-            proxy_public_url="https://proxy.test",
-            cache_daemon="127.0.0.1:9110",
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    hosts, binds = model_bindings(_hosted_config())
+    assert hosts == (HostEntry(host="api.anthropic.com"), HostEntry(host="api.openai.com"))
+    assert binds == (
+        anthropic,
+        Bind(
+            host="api.openai.com",
+            header="authorization",
+            secret=UFO_MODELS_SECRET,
+            env="OPENAI_API_KEY",
         ),
     )
-    with pytest.raises(RuntimeError, match=serve.CACHE_CONTROL_TOKEN_ENV):
-        serve._proxy_endpoint(
-            FastAPI(), config, (), None, CORE_PRICING, RUN_TOKENS, _blob(), None, UNGATED_LEDGER
-        )
+
+
+def test_model_key_envs_name_each_provider_hosts_key_env() -> None:
+    assert MODEL_KEY_ENVS(_hosted_config()) == {
+        "api.anthropic.com": "ANTHROPIC_API_KEY",
+        "api.openai.com": "OPENAI_API_KEY",
+        "openrouter.ai": "OPENROUTER_API_KEY",
+    }
+    renamed = _hosted_config().model_copy(
+        update={
+            "models": ModelsConfig(
+                anthropic_api_key_env="DEPLOY_ANTHROPIC", openai_api_key_env="DEPLOY_OPENAI"
+            )
+        }
+    )
+    assert MODEL_KEY_ENVS(renamed)["api.anthropic.com"] == "DEPLOY_ANTHROPIC"
+    assert MODEL_KEY_ENVS(renamed)["api.openai.com"] == "DEPLOY_OPENAI"
+
+
+def test_model_bindings_export_the_sandbox_key_envs_when_the_deploy_renames_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEPLOY_ANTHROPIC", "sk-ant-deploy")
+    monkeypatch.setenv("DEPLOY_OPENAI", "sk-openai-deploy")
+    renamed = _hosted_config().model_copy(
+        update={
+            "models": ModelsConfig(
+                anthropic_api_key_env="DEPLOY_ANTHROPIC", openai_api_key_env="DEPLOY_OPENAI"
+            )
+        }
+    )
+
+    _, binds = model_bindings(renamed)
+
+    assert [(bind.host, bind.env) for bind in binds] == [
+        ("api.anthropic.com", ANTHROPIC_KEY_ENV),
+        ("api.openai.com", OPENAI_KEY_ENV),
+    ]
+    assert {bind.env for bind in binds} <= sandbox_exported_env({})
+
+
+def test_model_bindings_fails_loud_with_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "")
+    with pytest.raises(RuntimeError, match="no model provider key set"):
+        model_bindings(_hosted_config())
+
+
+def _proxied_config(public_base_url: str | None = "https://serve.test") -> Config:
+    return _hosted_config().model_copy(
+        update={
+            "sandbox": SandboxConfig(
+                backend="local",
+                proxy_url="https://proxy.test",
+                preview_service="ufo-preview.test:8930",
+            ),
+            "connect": ConnectConfig(public_base_url=public_base_url),
+        }
+    )
+
+
+def _proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(serve.PREVIEW_TOKEN_ENV, "preview-real")
+    monkeypatch.setenv(CACHE_CONTROL_TOKEN_ENV, "cache-control-secret")
+    monkeypatch.setenv(
+        PROXY_PUBLIC_KEY_ENV,
+        base64.b64encode(
+            Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        ).decode(),
+    )
+
+
+def test_proxy_control_mounts_the_stamp_routes_and_builds_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _proxy_env(monkeypatch)
+    app = FastAPI()
+
+    sessions = serve.deploy_proxy_sessions(_proxied_config(), ())
+    rules = serve.deploy_rules(_proxied_config(), (), None, ())
+    control = serve._proxy_control(app, _proxied_config(), rules, RUN_TOKENS, None, sessions)
+
+    client = TestClient(app)
+    assert control.resolver is rules
+    assert control.stamp_key is not None
+    assert control.preview is not None
+    assert (control.preview.service, control.preview.token) == (
+        ("ufo-preview.test", 8930),
+        "preview-real",
+    )
+    assert sessions is not None
+    assert app.state.http_clients == (control.preview.http, sessions.http)
+    assert sessions.base_url == "https://proxy.test"
+    assert sessions.credentials is None
+    assert control.cache_control_token == "cache-control-secret"
+    assert client.post("/internal/egress/tool-bridge/request", json={}).status_code == 403
+    assert client.post("/internal/egress/preview/render", content=b"x").status_code == 403
+    assert client.post("/internal/git-credential", json={}).status_code == 401
+    answered = client.post(
+        "/internal/git-credential",
+        json={},
+        headers={"authorization": "Bearer cache-control-secret"},
+    )
+    assert (answered.status_code, answered.json()) == (200, {"principal": "public"})
+
+
+def test_proxy_control_requires_the_proxy_public_key_when_a_proxy_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _proxy_env(monkeypatch)
+    for value in (None, "", "not-a-key"):
+        if value is None:
+            monkeypatch.delenv(PROXY_PUBLIC_KEY_ENV)
+        else:
+            monkeypatch.setenv(PROXY_PUBLIC_KEY_ENV, value)
+        with pytest.raises(RuntimeError, match=PROXY_PUBLIC_KEY_ENV):
+            serve._proxy_control(
+                FastAPI(),
+                _proxied_config(),
+                serve.deploy_rules(_proxied_config(), (), None, ()),
+                RUN_TOKENS,
+                None,
+                None,
+            )
+
+
+def test_proxy_control_requires_an_https_public_base_url_when_a_proxy_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _proxy_env(monkeypatch)
+    for base in (None, "http://serve.test"):
+        with pytest.raises(RuntimeError, match=r"\[connect\] public_base_url"):
+            serve._proxy_control(
+                FastAPI(),
+                _proxied_config(base),
+                serve.deploy_rules(_proxied_config(base), (), None, ()),
+                RUN_TOKENS,
+                None,
+                None,
+            )
 
 
 def test_preview_settings_pair_the_service_with_its_real_token(
@@ -697,7 +798,6 @@ def test_preview_settings_pair_the_service_with_its_real_token(
         blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
         sandbox=SandboxConfig(
             backend="local",
-            proxy_port=9443,
             preview_service="ufo-preview.ufo.svc.cluster.local:8930",
         ),
     )
@@ -714,23 +814,83 @@ def test_preview_settings_pair_the_service_with_its_real_token(
     )
 
 
-def test_proxy_endpoint_boots_a_local_serve_without_a_shared_ca(
+def test_proxy_control_boots_with_no_proxy_url_and_no_stamp_routes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A local boot (no `proxy_public_url`) runs no `ufo-egress` unless the dev rig starts one,
-    so `ufoctl serve` alone must come up — the documented zero-services default — not fail loud."""
+    """`ufoctl serve` alone comes up with no proxy service and no deploy secret beside it — the
+    documented zero-services default."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv(EGRESS_CA_CERT_ENV, raising=False)
-    monkeypatch.delenv(serve.EGRESS_CONTROL_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(CACHE_CONTROL_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(PROXY_PUBLIC_KEY_ENV, raising=False)
     app = FastAPI()
-    endpoint = serve._proxy_endpoint(
-        app, _local_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob(), None, UNGATED_LEDGER
+
+    sessions = serve.deploy_proxy_sessions(_local_config(), ())
+    control = serve._proxy_control(
+        app,
+        _local_config(),
+        serve.deploy_rules(_local_config(), (), None, ()),
+        RUN_TOKENS,
+        None,
+        sessions,
     )
-    assert endpoint.port == 0
-    assert "BEGIN CERTIFICATE" in endpoint.ca_cert
-    mounted = TestClient(app).post("/internal/egress/resolve", json={"proxy_auth": ""})
-    assert mounted.status_code == 401
+
+    client = TestClient(app)
+    assert sessions is None
+    assert control.stamp_key is None
+    assert control.preview is None
+    assert control.cache_control_token is None
+    assert app.state.http_clients == ()
+    assert client.post("/internal/egress/tool-bridge/request", json={}).status_code == 404
+    assert client.post("/internal/git-credential", json={}).status_code == 404
+
+
+def test_proxy_control_mounts_the_git_credential_route_only_behind_its_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    mounted = {}
+    for token in ("cache-control-secret", ""):
+        monkeypatch.setenv(CACHE_CONTROL_TOKEN_ENV, token)
+        app = FastAPI()
+        serve._proxy_control(
+            app,
+            _local_config(),
+            serve.deploy_rules(_local_config(), (), None, ()),
+            RUN_TOKENS,
+            None,
+            None,
+        )
+        mounted[token] = TestClient(app).post(
+            "/internal/git-credential",
+            json={},
+            headers={"authorization": f"Bearer {token}"},
+        )
+
+    assert mounted["cache-control-secret"].status_code == 200
+    assert mounted[""].status_code == 404
+
+
+async def test_serve_lifespan_closes_the_proxy_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(serve, "ExecutorRecovery", ShutdownProbe)
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client, sessions: ShutdownProbe())
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client, sessions: ShutdownProbe())
+    clients = (httpx.AsyncClient(), httpx.AsyncClient())
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            fleet=serve.JOBS_FLEET,
+            dbos=object(),
+            deploy_sessions=None,
+            configured_sources=(),
+            http_clients=clients,
+        )
+    )
+
+    async with serve._serve_lifespan(app):
+        assert not any(client.is_closed for client in clients)
+
+    assert all(client.is_closed for client in clients)
 
 
 def test_shared_owner_dsn_prefers_the_env_over_config(
@@ -749,7 +909,7 @@ def test_shared_owner_dsn_falls_back_to_config_owner_url(
     config = Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db", owner_url=OWNER_LIBPQ_DSN),
         blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
-        sandbox=SandboxConfig(backend="local", proxy_port=0),
+        sandbox=SandboxConfig(backend="local"),
     )
     assert serve._shared_owner_dsn(config) == OWNER_LIBPQ_DSN
 
@@ -760,45 +920,62 @@ def test_shared_owner_dsn_fails_loud_when_unset(monkeypatch: pytest.MonkeyPatch)
         serve._shared_owner_dsn(_local_config())
 
 
-def test_the_proxy_resolver_reads_keyed_slots_per_workspace(
-    monkeypatch: pytest.MonkeyPatch,
+async def _compiled(rules: PerAgentRules, workspace_id: UUID, agent_id: UUID) -> SessionPolicy:
+    with ws(workspace_id), agent(agent_id):
+        return await rules.session_policy(PolicyScope(workspace_id, None, True, True, "run-token"))
+
+
+async def test_the_proxy_resolver_reads_keyed_slots_per_workspace(
+    db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv(EGRESS_CA_CERT_ENV, CA_PEM)
-    monkeypatch.setenv(serve.EGRESS_CONTROL_TOKEN_ENV, CONTROL_TOKEN)
     slot = CredentialSlot(
         name="byok",
         description="a workspace key the proxy swaps onto the wire",
-        injection=InjectionTarget(host="api.inj.test", header="authorization", sentinel="S"),
+        injection=InjectionTarget(host="api.inj.test", header="authorization", env="BYOK_KEY"),
     )
     manifest = Manifest(name="inj", version="1", credentials=(slot,))
-    captured: dict[str, object] = {}
-
-    def rules(**kwargs: object) -> object:
-        captured.update(kwargs)
-        return SimpleNamespace(resolve=None, turn_live=None, rules_generation=None)
-
-    monkeypatch.setattr(serve, "PerAgentRules", rules)
     credentials = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    config = _local_config()
-    serve._proxy_endpoint(
-        FastAPI(),
-        config,
-        (manifest,),
-        credentials,
-        CORE_PRICING,
-        RUN_TOKENS,
-        _blob(),
-        None,
-        UNGATED_LEDGER,
-    )
-    assert captured["credentials"] is credentials
+    rules = serve.deploy_rules(_local_config(), (manifest,), credentials, ())
     claims = deploy_claims((manifest,))
-    assert captured["slots"] == WorkspaceSlots(
+    assert rules.slots == WorkspaceSlots(
         deploy=(slot,), claimed_slots=claims.slots, claimed_env=claims.env
     )
-    assert captured["base"] == model_rule_base(config)
+    keyed, unkeyed = await _workspace_agent(), await _workspace_agent()
+    with ws(keyed[0]):
+        await credentials.put(keyed[0], "byok", "byok-real-secret")
+
+    filled = await _compiled(rules, *keyed)
+    empty = await _compiled(rules, *unkeyed)
+
+    byok = Bind(host="api.inj.test", header="authorization", secret="byok", env="BYOK_KEY")
+    assert byok in filled.bind
+    assert byok not in empty.bind
+    assert filled.hosts == (HostEntry(host="api.anthropic.com"), HostEntry(host="api.inj.test"))
+    assert "byok-real-secret" not in filled.model_dump_json()
+
+
+async def _workspace_agent() -> tuple[UUID, UUID]:
+    workspace_id, agent_id = uuid4(), uuid4()
+    async with ufo.db.workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return workspace_id, agent_id
 
 
 def test_the_proxy_resolver_base_admits_the_s3_artifact_store_host(
@@ -809,22 +986,52 @@ def test_the_proxy_resolver_base_admits_the_s3_artifact_store_host(
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "serve-test")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "serve-test")
     monkeypatch.delenv("AWS_PROFILE", raising=False)
-    monkeypatch.setenv(EGRESS_CA_CERT_ENV, CA_PEM)
-    monkeypatch.setenv(serve.EGRESS_CONTROL_TOKEN_ENV, CONTROL_TOKEN)
-    captured: dict[str, object] = {}
-
-    def rules(**kwargs: object) -> object:
-        captured.update(kwargs)
-        return SimpleNamespace(resolve=None, turn_live=None, rules_generation=None)
-
-    monkeypatch.setattr(serve, "PerAgentRules", rules)
     store = S3BlobStore(bucket="ufo-blobs", region="us-east-1")
 
-    serve._proxy_endpoint(
-        FastAPI(), _local_config(), (), None, CORE_PRICING, RUN_TOKENS, store, None, UNGATED_LEDGER
+    rules = serve.deploy_rules(
+        _local_config(), (), None, asyncio.run(derive_artifact_store_hosts(store))
     )
 
-    assert ScopeRule(allowed_hosts=frozenset({"ufo-blobs.s3.amazonaws.com"})) in captured["base"]
+    policy = asyncio.run(_compiled(rules, uuid4(), uuid4()))
+    assert policy.hosts == (
+        HostEntry(host="api.anthropic.com"),
+        HostEntry(host="ufo-blobs.s3.amazonaws.com"),
+    )
+    assert [bind.host for bind in policy.bind] == ["api.anthropic.com"]
+
+
+def test_the_proxy_resolver_routes_the_bridge_and_preview_to_the_public_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.setenv(serve.PREVIEW_TOKEN_ENV, "preview-real")
+    previewing = SandboxConfig(backend="local", preview_service="ufo-preview.test:8930")
+    served = _local_config().model_copy(
+        update={
+            "sandbox": previewing,
+            "connect": ConnectConfig(public_base_url="https://serve.test/"),
+        }
+    )
+    unserved = served.model_copy(update={"connect": ConnectConfig()})
+
+    routed = serve.deploy_rules(served, (), None, ())
+    unrouted = serve.deploy_rules(unserved, (), None, ())
+
+    stamp = {RUN_HEADER: "run-token"}
+    assert asyncio.run(_compiled(routed, uuid4(), uuid4())).routes == (
+        Route(
+            host="preview.ufo.internal",
+            upstream="https://serve.test/internal/egress/preview",
+            headers=stamp,
+        ),
+        Route(
+            host="tools.ufo.internal",
+            upstream="https://serve.test/internal/egress/tool-bridge",
+            headers=stamp,
+        ),
+    )
+    assert (unrouted.bridge_upstream, unrouted.preview_upstream) == (None, None)
+    assert asyncio.run(_compiled(unrouted, uuid4(), uuid4())).routes == ()
 
 
 def _home_manifest(name: str, home: bool) -> Manifest:

@@ -22,9 +22,9 @@ import pytest
 from ufo.harness.document_renderer import DOCUMENT_INPUT_MAX_BYTES, DocumentRenderer
 from ufo.harness.sandbox import terminal
 from ufo.harness.sandbox.session import (
+    PROXY_SESSION_ENV_NAMES,
     TOOL_CALL_ID,
     WORKSPACE_DIR,
-    ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
     SandboxUnreachable,
@@ -67,14 +67,15 @@ def _tool_context(sandbox: SandboxSession) -> ToolContext:
     )
 
 
-def _spec(conversation_id: UUID, cwd: str, public_url: str | None = None) -> SandboxSpec:
+def _spec(
+    conversation_id: UUID, cwd: str, session_env: dict[str, str] | None = None, proxy_ca: str = ""
+) -> SandboxSpec:
     return SandboxSpec(
         conversation_id=conversation_id,
         image_ref="unused",
         workspace_host_path=cwd,
-        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem", public_url=public_url),
-        run_token="run-token",
-        env={"UFO_CONVERSATION_ID": str(conversation_id)},
+        env={"UFO_CONVERSATION_ID": str(conversation_id), **(session_env or {})},
+        proxy_ca=proxy_ca,
     )
 
 
@@ -262,28 +263,32 @@ async def test_create_refuses_without_a_binding_and_names_a_mismatch(
     assert "/Users/member/elsewhere" in str(refusal.value)
 
 
-async def _check_create_binds_the_directory_and_the_metered_proxy() -> None:
+async def _check_create_binds_the_directory_and_exports_the_session_env_and_ca() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
     terminals.connect(conversation_id, "/Users/member/proj", None)
-    handle = await carrier.create(
-        _spec(conversation_id, "/Users/member/proj", public_url="https://proxy.example.com")
+    proxy = "https://ufo-session-1:ufo@proxy.example.com"
+    spec = _spec(
+        conversation_id,
+        "/Users/member/proj",
+        session_env={"HTTPS_PROXY": proxy, "GH_TOKEN": "ufo-sentinel-gh"},
+        proxy_ca="ca-pem",
     )
+    handle = await carrier.create(spec)
     assert handle.container_id == "/Users/member/proj"
     assert handle.runtime_root == f"$UFO_HOME/runs/{conversation_id.hex}"
-    assert handle.egress_env["HTTPS_PROXY"] == "https://run-token:ufo@proxy.example.com"
-    assert handle.egress_env["UFO_EGRESS_CA_CERT"] == "ca-pem"
-    assert handle.egress_env["UFO_CONVERSATION_ID"] == str(conversation_id)
+    assert handle.egress_env == {**spec.env, "UFO_PROXY_CA_CERT": "ca-pem"}
 
 
-async def _check_create_without_a_public_proxy_fails_closed_on_loopback() -> None:
+async def _check_create_without_a_session_exports_no_proxy_and_no_ca() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
     terminals.connect(conversation_id, "/p", None)
     handle = await carrier.create(_spec(conversation_id, "/p"))
-    assert handle.egress_env["HTTP_PROXY"] == "http://run-token:ufo@127.0.0.1:8080"
+    assert handle.egress_env == {"UFO_CONVERSATION_ID": str(conversation_id)}
+    assert PROXY_SESSION_ENV_NAMES.isdisjoint(handle.egress_env)
 
 
 def _rendered_document(kind: str, page: int, text: str) -> bytes:
@@ -407,8 +412,6 @@ def _resuming(spec: SandboxSpec, resume_id: str) -> SandboxSpec:
         conversation_id=spec.conversation_id,
         image_ref=spec.image_ref,
         workspace_host_path=spec.workspace_host_path,
-        proxy=spec.proxy,
-        run_token=spec.run_token,
         resume_id=resume_id,
     )
 
@@ -418,7 +421,10 @@ async def _check_exec_names_its_program_with_rewritten_argv_and_decodes_the_repl
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
     terminals.connect(conversation_id, "/Users/member/proj", None)
-    handle = await carrier.create(_spec(conversation_id, "/Users/member/proj"))
+    proxy = "https://ufo-session-1:ufo@proxy.test"
+    handle = await carrier.create(
+        _spec(conversation_id, "/Users/member/proj", session_env={"HTTP_PROXY": proxy})
+    )
     reply = json.dumps(
         {"exit_code": 0, "stdout_b64": base64.b64encode(b"out\n").decode(), "stderr_b64": ""}
     ).encode()
@@ -430,7 +436,7 @@ async def _check_exec_names_its_program_with_rewritten_argv_and_decodes_the_repl
     params = _op_params(op)
     assert params["argv"] == ["cat", "/Users/member/proj/a.txt"]
     assert "safety_argv" not in params
-    assert params["env"]["HTTP_PROXY"].startswith("http://run-token:ufo@")
+    assert params["env"]["HTTP_PROXY"] == proxy
     assert result.exit_code == 0 and result.stdout == "out\n"
 
 

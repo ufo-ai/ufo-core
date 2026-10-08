@@ -6,15 +6,16 @@ before the turn runs, a job appending to a change log, an operator's file browse
 the conversation's sandbox and is the one writer of the durable `<backend>:<id>` handle its row
 carries, so a later process resumes the same sandbox instead of stranding it.
 
-Off a turn there is no run token to carry, so the sandbox opens under a name that is not one: it
-bears no signature this deployment made, the proxy refuses every CONNECT from it before rules are
-even resolved, and a file op that needs no egress is given none. And a read never opens a sandbox —
-a conversation whose row holds no handle has no workspace to browse, and answering a read by
-creating one would make a GET a side effect."""
+Egress is the opener's to grant: an open that lands on a carrier enforcing it — the member's
+terminal, or a carrier whose sandbox runs off the cluster — asks the caller's opener for a proxy
+session and carries its env and CA; an in-cluster carrier runs unenforced and asks nothing. An open
+off a turn passes no opener, so a file op that needs no egress is given none. And a read never opens
+a sandbox — a conversation whose row holds no handle has no workspace to browse, and answering a
+read by creating one would make a GET a side effect."""
 
 import asyncio
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -26,6 +27,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
 
 if TYPE_CHECKING:
+    from ufo.runtime.access.proxy_sessions import SessionCreated
     from ufo.runtime.ext.manifest import CarrierSpec
 
 from ufo.db import workspace_tx
@@ -37,7 +39,6 @@ from ufo.harness.sandbox.session import (
     SANDBOX_UID,
     WORKSPACE_DIR,
     Carrier,
-    ProxyEndpoint,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
@@ -55,11 +56,15 @@ from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 
 SANDBOX_IMAGE_REF = "ufo-sandbox:latest"
-UNSIGNED_RUN_TOKEN = "off-turn"
 WORKSPACE_WRITE_MAX_BYTES = 100 * 1024 * 1024
 OPEN_CLAIM_ATTEMPTS = 3
 WORKSPACE_ROOT_SETTING = "sandbox.workspace_root"
 WORKSPACE_LISTING_EXCLUDE_NAMES = (".git",)
+
+type SessionOpener = Callable[[], Awaitable[SessionCreated | None]]
+"""Opens the proxy session an enforced open egresses under, or answers None where no proxy service
+is configured. One open may ask it once per claim attempt, a terminal open before its terminal is
+confirmed, so asking again answers the session it opened."""
 
 
 class WorkspaceFile(BaseModel):
@@ -87,7 +92,6 @@ class ConversationSandbox:
     backend: str
     off_cluster: bool
     image_ref: str
-    proxy: ProxyEndpoint
     workspace_root: Path
     terminals: TerminalTransport = field(default_factory=Terminals)
     document_renderer: DocumentRenderer | None = None
@@ -113,10 +117,15 @@ class ConversationSandbox:
         self,
         conversation_id: UUID,
         turn_id: UUID | None,
-        run_token: str,
         env: Mapping[str, str],
+        proxied: SessionOpener | None = None,
     ) -> SandboxSession:
         """The conversation's sandbox, created or resumed, with its handle persisted.
+
+        `env` is what every command of the open runs under. `proxied` opens the proxy session the
+        sandbox egresses under, and is asked only when the open lands on a carrier that enforces
+        egress — the member's terminal or an off-cluster carrier — whose spec then carries the
+        session's env over `env` and its CA; an in-cluster carrier runs unenforced and never asks.
 
         `turn_id` is the turn this session serves, and None where no turn owns the open. It scopes
         the commands a carrier leaves running to the turn that launched them: one container serves
@@ -140,8 +149,8 @@ class ConversationSandbox:
         none exists there, and an e2b one idles into a paused, unbilled husk."""
         stored, size = await self._binding(conversation_id)
         for _ in range(OPEN_CLAIM_ATTEMPTS):
-            backend, carrier, handle = await self._opened(
-                conversation_id, turn_id, stored, run_token, env, size
+            backend, carrier, handle, enforced = await self._opened(
+                conversation_id, turn_id, stored, env, size, proxied
             )
             persisted = f"{backend}{SANDBOX_HANDLE_SEP}{handle.container_id}"
             if persisted == stored:
@@ -149,6 +158,7 @@ class ConversationSandbox:
                     carrier=carrier,
                     handle=handle,
                     system_skill_archive=self.system_skill_archive,
+                    enforced=enforced,
                 )
             winner = await self._claim(conversation_id, stored, persisted)
             if winner == persisted:
@@ -156,6 +166,7 @@ class ConversationSandbox:
                     carrier=carrier,
                     handle=handle,
                     system_skill_archive=self.system_skill_archive,
+                    enforced=enforced,
                 )
             stored = winner
         raise RuntimeError(
@@ -182,8 +193,6 @@ class ConversationSandbox:
                     conversation_id=conversation_id,
                     image_ref=self.image_ref,
                     workspace_host_path=bound_path,
-                    proxy=self.proxy,
-                    run_token=UNSIGNED_RUN_TOKEN,
                     resume_id=bound_path,
                 )
             )
@@ -194,6 +203,7 @@ class ConversationSandbox:
                     carrier=carrier,
                     handle=handle,
                     system_skill_archive=self.system_skill_archive,
+                    enforced=True,
                 )
             )
         routed, backend, off_cluster = self._route(stored)
@@ -212,8 +222,6 @@ class ConversationSandbox:
                 conversation_id=conversation_id,
                 image_ref=self.image_ref,
                 workspace_host_path=str(host_path),
-                proxy=self.proxy,
-                run_token=UNSIGNED_RUN_TOKEN,
                 resume_id=resume_id,
             )
         )
@@ -224,6 +232,7 @@ class ConversationSandbox:
                 carrier=routed,
                 handle=handle,
                 system_skill_archive=self.system_skill_archive,
+                enforced=off_cluster,
             )
         )
 
@@ -255,7 +264,7 @@ class ConversationSandbox:
                 f"{rel} is {len(content)} bytes, over the {WORKSPACE_WRITE_MAX_BYTES}-byte limit "
                 "for a workspace write"
             )
-        session = await self.open(conversation_id, None, UNSIGNED_RUN_TOKEN, {})
+        session = await self.open(conversation_id, None, {})
         await session.write_file(rel, content)
         return workspace_path(rel)
 
@@ -268,7 +277,7 @@ class ConversationSandbox:
                 f"{rel} is {len(content)} bytes, over the {WORKSPACE_WRITE_MAX_BYTES}-byte limit "
                 "for a runtime write"
             )
-        session = await self.open(conversation_id, None, UNSIGNED_RUN_TOKEN, {})
+        session = await self.open(conversation_id, None, {})
         relative = f"{category}/{rel}"
         await session.write_runtime_file(relative, content)
         return await session.runtime_display_path(relative)
@@ -358,10 +367,10 @@ class ConversationSandbox:
         conversation_id: UUID,
         turn_id: UUID | None,
         stored: str | None,
-        run_token: str,
         env: Mapping[str, str],
         size: str,
-    ) -> tuple[str, Carrier, SandboxHandle]:
+        proxied: SessionOpener | None,
+    ) -> tuple[str, Carrier, SandboxHandle, bool]:
         """The terminal carrier's `create` waits out a reconnect and raises `TerminalGone` when no
         terminal is connected at the bound directory."""
         bound_path = None if stored is None else sandbox_handle_id(CLIENT_BACKEND, stored)
@@ -372,39 +381,49 @@ class ConversationSandbox:
             carrier = TerminalCarrier(
                 terminals=self.terminals, document_renderer=self.document_renderer
             )
+            session_env, proxy_ca = await self._proxied(env, proxied)
             handle = await carrier.create(
                 SandboxSpec(
                     conversation_id=conversation_id,
                     image_ref=self.image_ref,
                     workspace_host_path=bound_path,
-                    proxy=self.proxy,
-                    run_token=run_token,
-                    env=env,
+                    env=session_env,
+                    proxy_ca=proxy_ca,
                     turn_id=turn_id,
                 )
             )
-            return CLIENT_BACKEND, carrier, handle
+            return CLIENT_BACKEND, carrier, handle, True
         routed, backend, off_cluster = self._route(stored)
         if off_cluster:
             host_path = (self.workspace_root / str(conversation_id)).resolve()
+            session_env, proxy_ca = await self._proxied(env, proxied)
         else:
             host_path = await asyncio.to_thread(self._provisioned_dir, conversation_id)
             if os.geteuid() == 0:
                 await asyncio.to_thread(os.chown, host_path, SANDBOX_UID, SANDBOX_GID)
+            session_env, proxy_ca = env, ""
         handle = await routed.create(
             SandboxSpec(
                 conversation_id=conversation_id,
                 image_ref=self.image_ref,
                 workspace_host_path=str(host_path),
-                proxy=self.proxy,
-                run_token=run_token,
                 resume_id=None if stored is None else sandbox_handle_id(backend, stored),
-                env=env,
+                env=session_env,
+                proxy_ca=proxy_ca,
                 size=size,
                 turn_id=turn_id,
             )
         )
-        return backend, routed, handle
+        return backend, routed, handle, off_cluster
+
+    @staticmethod
+    async def _proxied(
+        env: Mapping[str, str], proxied: SessionOpener | None
+    ) -> tuple[Mapping[str, str], str]:
+        session = None if proxied is None else await proxied()
+        if session is None:
+            return env, ""
+        return {**env, **session.env}, session.ca_pem
 
     def _provisioned_dir(self, conversation_id: UUID) -> Path:
         """A root linking to the conversations' volume is an ordinary compose or k8s layout, so it

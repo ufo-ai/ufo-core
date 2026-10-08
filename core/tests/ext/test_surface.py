@@ -59,7 +59,6 @@ from ufo.harness.sandbox.ingress_token import (
     verify_ingress_token,
 )
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import (
     CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS,
@@ -332,7 +331,6 @@ def _sandboxes(root: Path) -> ConversationSandbox:
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
         workspace_root=root,
     )
 

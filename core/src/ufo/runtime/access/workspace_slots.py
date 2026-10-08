@@ -5,12 +5,12 @@ A keyed provider an extension knows about arrives as a `CredentialSlot` in a man
 variable, the host the secret rides to, the header it rides in — and that declaration is the same
 for every workspace on the deploy. An extension that holds rows of its own answers the same shape
 per workspace instead, through `Manifest.workspace_credentials`. This module is where the two meet,
-so the proxy's rule derivation and the sandbox's environment read one source and neither knows which
+so the session policy's binds and the sandbox's environment read one source and neither knows which
 half a slot came from.
 
-A per-workspace host is written inside the workspace, so its provenance stays attached while rules
-are derived: an exact scope is otherwise the one path around the proxy's private-address check, and
-a host nobody on this deploy wrote must not open the tunnel to its own network."""
+A per-workspace host is written inside the workspace, not by this deploy's code; the proxy service
+resolves every host a session names and refuses one that answers a private address, so such a host
+opens no tunnel to its own network."""
 
 from dataclasses import dataclass, field
 from uuid import UUID
@@ -19,7 +19,6 @@ from ufo.runtime.access.credentials import DeclaredSlot, HostChoice
 from ufo.runtime.ext.context import ExtensionContext
 from ufo.runtime.ext.manifest import (
     CredentialSlot,
-    InjectionTarget,
     WorkspaceCredentials,
     declared_slot,
 )
@@ -38,16 +37,10 @@ class SlotProvider:
         return await self.provider.read(self.ctx, workspace_id)
 
 
-def _reachable_hosts(target: InjectionTarget) -> tuple[str, ...]:
-    return (target.host,) if isinstance(target.host, str) else target.host.hosts
-
-
 @dataclass(frozen=True)
 class _ResolvedClaims:
     names: set[str]
     deploy_env: set[str]
-    sentinels: dict[str, str]
-    dimensions: dict[str, tuple[str, str]]
     exported: dict[str, tuple[str, object]] = field(default_factory=dict)
 
     def add_name(self, extension: str, slot: CredentialSlot) -> None:
@@ -62,14 +55,7 @@ class _ResolvedClaims:
         target = slot.injection
         if target is None:
             return
-        owner = self.sentinels.setdefault(target.sentinel, slot.name)
-        if owner != slot.name:
-            raise RuntimeError(
-                f"credential slots {owner!r} and {slot.name!r} both declare sentinel "
-                f"{target.sentinel!r}"
-            )
-        if target.env is not None:
-            self._claim_env(extension, slot.name, target.env, target.sentinel)
+        self._claim_env(extension, slot.name, target.env, slot.name)
         if isinstance(target.host, HostChoice):
             if target.host.slot not in self.names:
                 raise RuntimeError(
@@ -78,9 +64,6 @@ class _ResolvedClaims:
                 )
             if target.host.env is not None:
                 self._claim_env(extension, slot.name, target.host.env, target.host)
-        if target.dimension is not None:
-            for host in _reachable_hosts(target):
-                self._meter(slot.name, host, target.dimension)
 
     def _claim_env(self, extension: str, slot: str, name: str, carries: object) -> None:
         if name in self.deploy_env:
@@ -93,14 +76,6 @@ class _ResolvedClaims:
             raise RuntimeError(
                 f"credential slots {holder!r} and {slot!r} export env {name!r} carrying "
                 "different values"
-            )
-
-    def _meter(self, slot: str, host: str, dimension: str) -> None:
-        metered = self.dimensions.setdefault(host, (slot, dimension))
-        if metered[1] != dimension:
-            raise RuntimeError(
-                f"credential slots {metered[0]!r} and {slot!r} can both reach {host!r} but "
-                f"meter it as {metered[1]!r} and {dimension!r}"
             )
 
 
@@ -125,8 +100,8 @@ class WorkspaceSlots:
         return tuple(slot for _extension, slot in await self._resolved(workspace_id))
 
     async def all(self, workspace_id: UUID) -> tuple[CredentialSlot, ...]:
-        """The deploy's slots and this workspace's own, as one set — what the proxy injects on and
-        what the sandbox exports a sentinel for."""
+        """The deploy's slots and this workspace's own, as one set — what a session binds and what
+        the sandbox exports a host for."""
         return (*self.deploy, *await self.workspace(workspace_id))
 
     async def declared(self, workspace_id: UUID) -> tuple[DeclaredSlot, ...]:
@@ -157,24 +132,7 @@ class WorkspaceSlots:
             target = slot.injection
             if target is None:
                 continue
-            if target.env is not None:
-                deploy_env.add(target.env)
+            deploy_env.add(target.env)
             if isinstance(target.host, HostChoice) and target.host.env is not None:
                 deploy_env.add(target.host.env)
-        sentinels = {
-            slot.injection.sentinel: slot.name for slot in self.deploy if slot.injection is not None
-        }
-        dimensions: dict[str, tuple[str, str]] = {}
-        for slot in self.deploy:
-            target = slot.injection
-            if target is None or target.dimension is None:
-                continue
-            dimensions.update(
-                (host, (slot.name, target.dimension)) for host in _reachable_hosts(target)
-            )
-        return _ResolvedClaims(
-            names=names,
-            deploy_env=deploy_env,
-            sentinels=sentinels,
-            dimensions=dimensions,
-        )
+        return _ResolvedClaims(names=names, deploy_env=deploy_env)

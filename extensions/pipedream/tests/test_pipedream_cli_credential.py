@@ -1,7 +1,7 @@
 """The sandbox-side GitHub credential the pipedream extension declares, end to end: the manifest
 attaches a `CliCredential` to the one connector whose token the sandbox rides, `account_token` is
 the read that hands this deploy the provider token — under the same ownership assertion every other
-account read makes — and `PipedreamGrantSecret` holds what it read so one turn's rule derivations
+account read makes — and `PipedreamGrantSecret` holds what it read so one turn's secret resolves
 share a read. Pipedream's account read is mocked with `httpx.MockTransport` — no live API, no
 credentials — so the real client and secret run against canned Connect responses."""
 

@@ -31,19 +31,15 @@ from ufo.harness.o11y import (
     turn_profile,
     turn_span,
 )
-from ufo.harness.sandbox.cache import cache_git_config
 from ufo.harness.sandbox.conversation import ConversationSandbox
 from ufo.harness.sandbox.exec_env import (
     CONVERSATION_ID_ENV,
-    GIT_IDENTITY_ENV,
     GIT_PROXY_AUTH_CONFIG,
     _git_config_env,
-    _grant_cli_env,
-    _keyed_provider_env,
     cli_git_config,
+    keyed_host_env,
 )
 from ufo.harness.sandbox.session import (
-    RunToken,
     RunTokenCodec,
     Sandbox,
     SandboxProviderUnavailable,
@@ -56,11 +52,19 @@ from ufo.runtime.access.credentials import (
     CredentialRequests,
     CredentialStore,
 )
+from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.access.member_authorization import (
     MEMBER_AUTHORIZATION_JOB,
     MEMBER_AUTHORIZATION_MODEL,
     MemberAuthorization,
+)
+from ufo.runtime.access.proxy_sessions import ProxySessions, SessionCreated
+from ufo.runtime.access.turn_sessions import (
+    DeploySessions,
+    IntentRenewal,
+    SandboxAuthorizer,
+    TurnSessions,
 )
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
@@ -673,12 +677,14 @@ class Runtime:
     index: IndexBackend
     embed: EmbedClient
     artifact_token_secret: str
+    rules: PerAgentRules
     site_previewer: SitePreviewer | None = None
     spend: SpendGates = NO_SPEND_GATES
     ledger: Ledger = UNGATED_LEDGER
     home_surface: str | None = None
     tailer: TurnTailer | None = None
     memory: MemorySearch | None = None
+    sessions: ProxySessions | None = None
 
 
 _runtime: Runtime | None = None
@@ -938,6 +944,11 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             registry=runtime.subagents,
             parent=turn,
             audience=audience,
+            sessions=(
+                None
+                if runtime.sessions is None
+                else DeploySessions(runtime.sessions, runtime.rules, runtime.run_tokens)
+            ),
             hub=runtime.hub,
             invoker=runtime.invoker_for(turn.workspace_id),
             spend=runtime.spend,
@@ -1056,20 +1067,24 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             connector_read_only = profile.connector_read_only
         grants = GrantStore() if runtime.credentials is not None else None
         clis = runtime.environment.clis()
+        sessions = TurnSessions(
+            proxy=runtime.sessions,
+            rules=runtime.rules,
+            run_tokens=runtime.run_tokens,
+            turn=turn,
+            agent_id=turn.agent_id,
+            internet_access_allowed=internet_access_allowed,
+        )
         sandbox = _LateSandbox(
             conversation_id=turn.sandbox_conversation_id or turn.conversation_id,
             turn_id=turn.id,
             open=lambda: _open_sandbox(
                 runtime.sandboxes,
-                runtime.run_tokens,
+                sessions,
                 turn,
                 clis,
                 runtime.credentials,
                 runtime.environment.slots(),
-                cache_rewrite=(
-                    runtime.config.sandbox.cache_daemon is not None
-                    and resolved.internet_access_allowed
-                ),
             ),
             existing=lambda: runtime.sandboxes.existing(
                 turn.sandbox_conversation_id or turn.conversation_id
@@ -1077,111 +1092,125 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         )
         sandbox_authorizer = SandboxAuthorizer(
             sandbox=sandbox,
-            run_tokens=runtime.run_tokens,
+            sessions=sessions,
             grants=grants,
             clis=clis,
             turn=turn,
         )
-        await _SandboxSetup(runtime.hub, runtime.blob, turn, attempt).run(
-            sandbox, preload, assembled.files
-        )
-        engine = TurnEngine(
-            turn=turn,
-            agent=resolved,
-            byok=byok,
-            system_prompt=system_prompt,
-            serving=serving,
-            activity_summarizer=ActivitySummarizer(
-                ModelAccess(
-                    replace(
-                        runtime.registry,
-                        auto_model=runtime.config.models.background_jobs_model,
-                    ),
-                    ACTIVITY_JOB,
-                    runtime.spend,
-                    runtime.ledger,
-                )
-            ),
-            transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
-            context=boundary.build(
-                BoundaryInputs(
-                    serving=serving,
-                    blob=runtime.blob,
-                    conversation_id=turn.conversation_id,
-                    hooks=hooks,
-                    turn=turn,
-                    agent=resolved,
-                    sandbox=sandbox,
-                )
-            ),
-            hub=runtime.hub,
-            lineage=lineage,
-            sandbox=sandbox,
-            sandbox_for=(
-                None if turn.admission_source == INTENT_ADMISSION else sandbox_authorizer.authorize
-            ),
-            cdp_provider=runtime.cdp_provider,
-            search_provider=runtime.search_provider,
-            memory=runtime.memory,
-            connectors=runtime.connectors,
-            connector_read_only=connector_read_only,
-            tools=tools,
-            tool_ext=tool_ext,
-            workspace_slots=runtime.environment.slots(),
-            requestable_credentials=(
-                None
-                if runtime.credentials is None
-                else CredentialRequests(
-                    fernet=runtime.credentials.fernet,
-                    declared=frozenset(
-                        slot.name for manifest in runtime.manifests for slot in manifest.credentials
-                    ),
-                )
-            ),
-            models=(AUTO_MODEL, *sorted(runtime.registry.specs)),
-            model_specs=runtime.registry.specs,
-            auto_model=runtime.registry.auto_model,
-            sign_in_path=runtime.config.serve.sign_in_path,
-            page_kit=runtime.config.sites.page_kit,
-            public_base_url=runtime.config.connect.public_base_url,
-            spend=runtime.spend,
-            ledger=runtime.ledger,
-            hooks=hooks,
-            blob=runtime.blob,
-            spawn=subagents.spawn,
-            subagents=subagents,
-            audience=audience,
-            artifact_token_secret=runtime.artifact_token_secret,
-            site_previewer=runtime.site_previewer,
-            grants=grants,
-            member_authorization=MemberAuthorization(
-                ModelAccess(
-                    replace(runtime.registry, auto_model=MEMBER_AUTHORIZATION_MODEL),
-                    MEMBER_AUTHORIZATION_JOB,
-                    runtime.spend,
-                    runtime.ledger,
+        try:
+            await _SandboxSetup(runtime.hub, runtime.blob, turn, attempt).run(
+                sandbox, preload, assembled.files
+            )
+            engine = TurnEngine(
+                turn=turn,
+                agent=resolved,
+                byok=byok,
+                system_prompt=system_prompt,
+                serving=serving,
+                activity_summarizer=ActivitySummarizer(
+                    ModelAccess(
+                        replace(
+                            runtime.registry,
+                            auto_model=runtime.config.models.background_jobs_model,
+                        ),
+                        ACTIVITY_JOB,
+                        runtime.spend,
+                        runtime.ledger,
+                    )
                 ),
-                runtime.run_tokens.secret,
-            ),
-            previous_turn_ended_at=previous_turn_ended_at,
-            pricing=billing.pricing(),
-            attempt=attempt,
-            max_rounds=max_rounds,
-            skills=assembled.skills,
-            member_skill_block=member_skill_block,
-            preload=preload,
-            output_model=output_model,
-            adoption=AdoptionReplay(
-                replaying=claim == ADOPTED_CLAIM
-                and not turn.spawned
-                and turn.admission_source != INTENT_ADMISSION
-            ),
-            verbs=verbs,
-            granted_actions=assembled.granted_actions,
-        )
-        run = engine.run_intent if turn.admission_source == INTENT_ADMISSION else engine.run
-        frame = await run()
-        return "superseded" if frame is None else frame.status
+                transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
+                context=boundary.build(
+                    BoundaryInputs(
+                        serving=serving,
+                        blob=runtime.blob,
+                        conversation_id=turn.conversation_id,
+                        hooks=hooks,
+                        turn=turn,
+                        agent=resolved,
+                        sandbox=sandbox,
+                    )
+                ),
+                hub=runtime.hub,
+                lineage=lineage,
+                sandbox=sandbox,
+                sandbox_for=(
+                    IntentRenewal(sandbox, sessions).authorize
+                    if turn.admission_source == INTENT_ADMISSION
+                    else sandbox_authorizer.authorize
+                ),
+                cdp_provider=runtime.cdp_provider,
+                search_provider=runtime.search_provider,
+                memory=runtime.memory,
+                connectors=runtime.connectors,
+                connector_read_only=connector_read_only,
+                tools=tools,
+                tool_ext=tool_ext,
+                workspace_slots=runtime.environment.slots(),
+                requestable_credentials=(
+                    None
+                    if runtime.credentials is None
+                    else CredentialRequests(
+                        fernet=runtime.credentials.fernet,
+                        declared=frozenset(
+                            slot.name
+                            for manifest in runtime.manifests
+                            for slot in manifest.credentials
+                        ),
+                    )
+                ),
+                models=(AUTO_MODEL, *sorted(runtime.registry.specs)),
+                model_specs=runtime.registry.specs,
+                auto_model=runtime.registry.auto_model,
+                sign_in_path=runtime.config.serve.sign_in_path,
+                page_kit=runtime.config.sites.page_kit,
+                public_base_url=runtime.config.connect.public_base_url,
+                spend=runtime.spend,
+                ledger=runtime.ledger,
+                hooks=hooks,
+                blob=runtime.blob,
+                spawn=subagents.spawn,
+                subagents=subagents,
+                audience=audience,
+                artifact_token_secret=runtime.artifact_token_secret,
+                site_previewer=runtime.site_previewer,
+                grants=grants,
+                member_authorization=MemberAuthorization(
+                    ModelAccess(
+                        replace(runtime.registry, auto_model=MEMBER_AUTHORIZATION_MODEL),
+                        MEMBER_AUTHORIZATION_JOB,
+                        runtime.spend,
+                        runtime.ledger,
+                    ),
+                    runtime.run_tokens.secret,
+                ),
+                previous_turn_ended_at=previous_turn_ended_at,
+                pricing=billing.pricing(),
+                attempt=attempt,
+                max_rounds=max_rounds,
+                skills=assembled.skills,
+                member_skill_block=member_skill_block,
+                preload=preload,
+                output_model=output_model,
+                adoption=AdoptionReplay(
+                    replaying=claim == ADOPTED_CLAIM
+                    and not turn.spawned
+                    and turn.admission_source != INTENT_ADMISSION
+                ),
+                verbs=verbs,
+                granted_actions=assembled.granted_actions,
+            )
+            run = engine.run_intent if turn.admission_source == INTENT_ADMISSION else engine.run
+            frame = await run()
+        except TurnParked:
+            return "parked"
+        except Exception as error:
+            await _commit_failed_terminal(runtime.hub, UUID(turn_id), attempt, error)
+            await sessions.close()
+            return "failed"
+        if frame is None:
+            return "superseded"
+        await sessions.close()
+        return frame.status
     except TurnParked:
         return "parked"
     except asyncio.CancelledError:
@@ -1487,53 +1516,31 @@ async def _frozen_byok(turn_id: UUID, decided: bool, attempt: str) -> bool:
 
 async def _open_sandbox(
     sandboxes: ConversationSandbox,
-    run_tokens: RunTokenCodec,
+    sessions: TurnSessions,
     turn: Turn,
     clis: Mapping[str, CliCredential],
     credentials: CredentialStore | None,
     slots: WorkspaceSlots,
-    cache_rewrite: bool = False,
 ) -> SandboxSession:
     """git's default `http.proxyAuthMethod=anyauth` waits for a `407` the proxy never sends;
     `GIT_PROXY_AUTH_CONFIG` presents the token on the first CONNECT."""
-    run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
-    cache_config = cache_git_config() if cache_rewrite else ()
+
+    async def proxied() -> SessionCreated | None:
+        session = await sessions.open()
+        if session is None:
+            return None
+        return session.model_copy(
+            update={"env": {**session.env, TOOL_BRIDGE_URL_ENV: TOOL_BRIDGE_URL}}
+        )
+
     with span("sandbox.open"):
         return await sandboxes.open(
             turn.sandbox_conversation_id or turn.conversation_id,
             turn.id,
-            run_tokens.encode(run),
             {
                 CONVERSATION_ID_ENV: str(turn.conversation_id),
-                TOOL_BRIDGE_URL_ENV: TOOL_BRIDGE_URL,
-                **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cache_config, *cli_git_config(clis))),
-                **await _keyed_provider_env(credentials, slots, turn.workspace_id),
+                **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cli_git_config(clis))),
+                **await keyed_host_env(credentials, slots, turn.workspace_id),
             },
-        )
-
-
-@dataclass(frozen=True)
-class SandboxAuthorizer:
-    sandbox: Sandbox
-    run_tokens: RunTokenCodec
-    grants: GrantStore | None
-    clis: Mapping[str, CliCredential]
-    turn: Turn
-
-    async def authorize(self, acting_member_id: UUID | None) -> Sandbox:
-        run = RunToken(
-            workspace_id=self.turn.workspace_id,
-            turn_id=self.turn.id,
-            acts_for=(
-                "turn"
-                if acting_member_id == self.turn.member_id
-                else "nobody"
-                if acting_member_id is None
-                else acting_member_id
-            ),
-        )
-        return self.sandbox.authorize(
-            self.run_tokens.encode(run),
-            frozenset(cli.env for cli in self.clis.values()) | GIT_IDENTITY_ENV,
-            await _grant_cli_env(self.grants, self.clis, self.turn.id, acting_member_id),
+            proxied=proxied,
         )
