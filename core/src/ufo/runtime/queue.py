@@ -61,7 +61,7 @@ from ufo.runtime.access.member_authorization import (
     MemberAuthorization,
 )
 from ufo.runtime.access.proxy_sessions import ProxySessions, SessionCreated
-from ufo.runtime.access.turn_sessions import SandboxAuthorizer, TurnSessions
+from ufo.runtime.access.turn_sessions import IntentRenewal, SandboxAuthorizer, TurnSessions
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger
@@ -1125,7 +1125,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 lineage=lineage,
                 sandbox=sandbox,
                 sandbox_for=(
-                    None
+                    IntentRenewal(sandbox, sessions).authorize
                     if turn.admission_source == INTENT_ADMISSION
                     else sandbox_authorizer.authorize
                 ),

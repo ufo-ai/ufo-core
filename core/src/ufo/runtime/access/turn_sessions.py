@@ -272,6 +272,23 @@ class SandboxAuthorizer:
 
 
 @dataclass(frozen=True)
+class IntentRenewal:
+    """The turn's sandbox for an intent dispatch, under the turn's own session and no acting
+    member's identity: a dispatch that reaches an enforced sandbox reconciles and renews that
+    session as any turn's dispatch does."""
+
+    sandbox: Sandbox
+    sessions: TurnSessions
+
+    async def authorize(self, acting_member_id: UUID | None) -> Sandbox:
+        async def egress() -> Mapping[str, str]:
+            session = await self.sessions.reconcile("turn")
+            return {} if session is None else session.env
+
+        return await self.sandbox.authorize(frozenset(), {}, egress)
+
+
+@dataclass(frozen=True)
 class ProbeSessions:
     """The session one off-turn probe exec egresses under: its policy compiled for a scope that is
     not running, so it binds no model key and no route, keyed by the probe so an open asked twice

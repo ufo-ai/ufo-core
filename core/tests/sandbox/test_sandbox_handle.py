@@ -59,7 +59,7 @@ from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import CONNECTION_SECRET_PREFIX, PolicyScope
 from ufo.runtime.access.grants import CommitIdentity, GrantStore
 from ufo.runtime.access.proxy_sessions import ProxySessions, SessionCreated
-from ufo.runtime.access.turn_sessions import SandboxAuthorizer, TurnSessions
+from ufo.runtime.access.turn_sessions import IntentRenewal, SandboxAuthorizer, TurnSessions
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget
@@ -1197,6 +1197,32 @@ async def test_a_dispatch_that_never_reaches_the_sandbox_opens_no_session(
 
     assert carrier.created == 0
     assert sessions.opened == {}
+
+
+async def test_an_intent_dispatch_runs_under_the_turns_own_session_renewed(
+    db: None, tmp_path: Path, proxy: ProxySessions
+) -> None:
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
+    turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
+    carrier = _UniqueIdCarrier()
+    sessions = _proxied(proxy, turn, {"hub": HUB_CLI})
+
+    with ws(workspace_id), agent(agent_id):
+        sandbox = _late(carrier, turn, tmp_path, sessions)
+        await sandbox.bash("true")
+        opened = sessions.opened["turn"].session
+        unreached = await IntentRenewal(sandbox, sessions).authorize(member_id)
+        assert sessions.opened["turn"].session == opened
+        await (await IntentRenewal(sandbox, sessions).authorize(member_id)).bash("true")
+
+    assert unreached is not None
+    renewed = sessions.opened["turn"].session
+    assert list(sessions.opened) == ["turn"]
+    assert renewed.id == opened.id
+    assert renewed.expires_at > opened.expires_at
+    assert carrier.envs[1]["HTTPS_PROXY"] == opened.env["HTTPS_PROXY"]
+    assert "HUB_TOKEN" not in carrier.envs[1]
 
 
 async def test_an_in_cluster_carrier_with_a_proxy_opens_no_session(
