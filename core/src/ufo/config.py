@@ -255,9 +255,10 @@ class SandboxConfig(BaseModel):
     a shipped app page there — its root at `/<slug>/`, every other path verbatim — in place of the
     published bundle: the local stack's edit loop. Unset, a shipped page is the bundle."""
     preview_service: str | None = None
-    """`host:port` of the preview service the proxy relays the preview host to. Set
-    admits that host for every sandbox, whatever its internet policy. Unset, the host is not
-    admitted, document reads are unavailable, and a share carries no rendered preview."""
+    """`host:port` of the preview service `/internal/egress/preview/render` relays to. Set with
+    `proxy_url`, a running turn's session routes the preview host to that relay, whatever its
+    internet policy. Unset, no session routes it, document reads are unavailable, and a share
+    carries no rendered preview."""
 
     @model_validator(mode="after")
     def _ingress_base_is_addressable(self) -> "SandboxConfig":

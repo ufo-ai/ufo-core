@@ -687,9 +687,9 @@ async def read_turn_cost(
     the true provider charge — and the cache share is the cached part of the whole prompt, computed
     from the split those same rows carry rather than from any in-memory account of the burn.
 
-    `dimension` names which of the turn's spends that is: ufo's own rounds bill `tokens` host-side,
-    while a loop that makes its model calls from inside the sandbox has them metered onto the same
-    turn by the egress proxy under `sandbox_tokens`."""
+    `dimension` names which of the turn's spends that is. `tokens` counts ufo's own rounds and the
+    model calls the proxy service meters from inside the sandbox, which its `turn` label binds to
+    the same turn."""
     row = (
         await connection.execute(
             sa.select(
@@ -755,7 +755,7 @@ async def mint_usage_exports(
     snapshot that recovery later advances, so any growth mints a further intent from the prior
     high-water mark. A `sandbox_tokens`, `images` or `videos` row accumulates until its turn is
     terminal, and `EXPORT_SETTLE_MARGIN_SECONDS` past `turn.updated_at` only bounds how often a late
-    egress-proxy write costs an extra top-up intent. No growth is lost to timing. A priced `proxy`
+    write to one costs an extra top-up intent. No growth is lost to timing. A priced `proxy`
     row is written once and never grows, so it mints at once; zero-priced counts, `egress` among
     them, never export. Usage settling before `floor` never mints — the consumer's backfill bound.
     Idempotent: an intent's `(consumer, ledger_id, from_amount)` key makes concurrent or replayed

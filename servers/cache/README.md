@@ -1,9 +1,9 @@
 # ufo-cache
 
-`ufo-cache` is the caching daemon in the sandbox egress path. When a sandbox clones a repository or
-installs packages, the request reaches this daemon instead of the public internet. The daemon keeps
-its own copy on disk, so the next request for the same repository or the same package is answered
-from that copy instead of an origin download.
+`ufo-cache` is the caching daemon the proxy service relays sandbox fetches to. When a sandbox
+clones a repository or installs packages, the request reaches this daemon instead of the public
+internet. The daemon keeps its own copy on disk, so the next request for the same repository or the
+same package is answered from that copy instead of an origin download.
 
 Two kinds of traffic go through it. Git traffic is mirrored per caller: the daemon holds no
 credential of its own, and for every git request it asks the control plane for the credential that
@@ -45,7 +45,7 @@ curl -s http://127.0.0.1:9110/_health
 Package requests need nothing else alive. Git requests do: each one asks the control plane for a
 credential, so `UFO_CACHE_CONTROL_URL` must point at a running core `serve` that holds the same
 value in `UFO_CACHE_CONTROL_TOKEN`. Without it a git request answers 502. Git requests also carry
-the workspace identity that the egress proxy stamps on them, so they are driven through the proxy.
+the workspace identity that the proxy service stamps on them, so they are driven through the proxy.
 
 | Variable | What it does |
 |---|---|
