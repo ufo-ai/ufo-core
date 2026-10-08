@@ -22,6 +22,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -98,6 +99,9 @@ STATUS_QUESTION = "question"
 RESULT_OPEN = '<spawn_result target="{target}" spawn_id="{spawn_id}" status="{status}">'
 RESULT_CLOSE = "</spawn_result>"
 RESULT_CLOSE_ESCAPE = "&lt;/spawn_result&gt;"
+RESULT_REPLY_GUIDANCE = (
+    (Path(__file__).parent / "prompts" / "background_results.md").read_text().strip()
+)
 RESULT_UNKNOWN_PROFILE = (
     "The spawn's profile is no longer registered, so its answer could not be checked "
     "against a schema and is withheld."
@@ -1375,6 +1379,7 @@ class SubagentResult:
             + f"\n{payload.replace(RESULT_CLOSE, RESULT_CLOSE_ESCAPE)}\n"
             + ("" if not guidance else f"{guidance}\n")
             + RESULT_CLOSE
+            + f"\n\n{RESULT_REPLY_GUIDANCE}"
         )
 
     def _payload(self, contract: Contract | None, terminal: TerminalFrame) -> tuple[str, str]:
