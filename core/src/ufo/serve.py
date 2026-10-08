@@ -4,7 +4,6 @@ import asyncio
 import hmac
 import json
 import os
-import secrets
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
@@ -102,6 +101,7 @@ from ufo.runtime.access.egress_control import (
     PREVIEW_RELAY_TIMEOUT_SECONDS,
     PROXY_PUBLIC_KEY_ENV,
     EgressControl,
+    PreviewRelay,
     load_proxy_public_key,
 )
 from ufo.runtime.access.egress_resolver import PerAgentRules
@@ -1484,25 +1484,29 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     if app.state.configured_sources:
         with ws(await sole_workspace()):
             await register_sources(app.state.configured_sources)
-    async with asyncio.TaskGroup() as group:
-        tasks = [
-            group.create_task(ExecutorRecovery().run()),
-            group.create_task(CancelReconciler(client=app.state.dbos).run()),
-            group.create_task(StrandedTurnReconciler(client=app.state.dbos).run()),
-        ]
-        if app.state.fleet.surfaces:
-            for boot in app.state.surface_boots:
-                boot(FleetBlobStore(backend=app.state.blob.backend))
-            for poller in (app.state.writeback_poller, app.state.mid_turn_reply_poller):
-                if poller is not None:
-                    tasks.append(group.create_task(poller.run()))
-            for listener in app.state.surface_listeners:
-                tasks.append(group.create_task(listener.run()))
-        try:
-            yield
-        finally:
-            for task in tasks:
-                task.cancel()
+    try:
+        async with asyncio.TaskGroup() as group:
+            tasks = [
+                group.create_task(ExecutorRecovery().run()),
+                group.create_task(CancelReconciler(client=app.state.dbos).run()),
+                group.create_task(StrandedTurnReconciler(client=app.state.dbos).run()),
+            ]
+            if app.state.fleet.surfaces:
+                for boot in app.state.surface_boots:
+                    boot(FleetBlobStore(backend=app.state.blob.backend))
+                for poller in (app.state.writeback_poller, app.state.mid_turn_reply_poller):
+                    if poller is not None:
+                        tasks.append(group.create_task(poller.run()))
+                for listener in app.state.surface_listeners:
+                    tasks.append(group.create_task(listener.run()))
+            try:
+                yield
+            finally:
+                for task in tasks:
+                    task.cancel()
+    finally:
+        for client in app.state.http_clients:
+            await client.aclose()
 
 
 def _preview_settings(config: Config) -> tuple[tuple[str, int], str] | None:
@@ -1545,33 +1549,42 @@ def _proxy_control(
         ),
     )
     proxy_url = config.sandbox.proxy_url
-    stamped = proxy_url is not None
-    control = EgressControl(
-        cache_control_token=os.environ.get(CACHE_CONTROL_TOKEN_ENV) or secrets.token_urlsafe(32),
-        resolver=resolver,
-        run_tokens=run_tokens,
-        bridge=bridge,
-        stamp_key=_proxy_public_key() if stamped else None,
-        preview=preview,
-        http=(
-            httpx.AsyncClient(timeout=PREVIEW_RELAY_TIMEOUT_SECONDS)
-            if stamped and preview is not None
-            else None
-        ),
-    )
-    app.include_router(control.git_credential_router())
-    if proxy_url is None:
-        return control, resolver, None
-    if public_base_url is None or not public_base_url.startswith("https://"):
+    if proxy_url is not None and (
+        public_base_url is None or not public_base_url.startswith("https://")
+    ):
         raise RuntimeError(
             "[connect] public_base_url must be this deploy's https:// URL when [sandbox] proxy_url "
             "is set, because the proxy service relays its routes only to a TLS upstream."
         )
-    app.include_router(control.router())
-    sessions = ProxySessions(
-        proxy_url.rstrip("/"),
-        proxy_credentials(manifests),
-        httpx.AsyncClient(timeout=PROXY_CALL_TIMEOUT_SECONDS),
+    stamp_key = None if proxy_url is None else _proxy_public_key()
+    control = EgressControl(
+        cache_control_token=os.environ.get(CACHE_CONTROL_TOKEN_ENV) or None,
+        resolver=resolver,
+        run_tokens=run_tokens,
+        bridge=bridge,
+        stamp_key=stamp_key,
+        preview=(
+            None
+            if stamp_key is None or preview is None
+            else PreviewRelay(*preview, httpx.AsyncClient(timeout=PREVIEW_RELAY_TIMEOUT_SECONDS))
+        ),
+    )
+    if control.cache_control_token is not None:
+        app.include_router(control.git_credential_router())
+    sessions = (
+        None
+        if proxy_url is None
+        else ProxySessions(
+            proxy_url.rstrip("/"),
+            proxy_credentials(manifests),
+            httpx.AsyncClient(timeout=PROXY_CALL_TIMEOUT_SECONDS),
+        )
+    )
+    if stamp_key is not None:
+        app.include_router(control.router())
+    app.state.http_clients = (
+        *(() if control.preview is None else (control.preview.http,)),
+        *(() if sessions is None else (sessions.http,)),
     )
     return control, resolver, sessions
 

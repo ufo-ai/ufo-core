@@ -29,6 +29,7 @@ from ufo.runtime.access.egress_control import (
     SESSION_STAMP_HEADER,
     SESSION_STAMP_MAX_AGE_SECONDS,
     EgressControl,
+    PreviewRelay,
     SessionStamp,
     StampInvalid,
     load_proxy_public_key,
@@ -157,11 +158,14 @@ def _control(
         run_tokens=RUN_TOKENS,
         bridge=bridge,
         stamp_key=KEY.public_key(),
-        preview=None if preview is None else (PREVIEW_ADDRESS, PREVIEW_TOKEN),
-        http=(
+        preview=(
             None
             if preview is None
-            else httpx.AsyncClient(transport=ASGITransport(app=preview.app()))
+            else PreviewRelay(
+                PREVIEW_ADDRESS,
+                PREVIEW_TOKEN,
+                httpx.AsyncClient(transport=ASGITransport(app=preview.app())),
+            )
         ),
     )
 
@@ -477,8 +481,11 @@ async def test_the_preview_relay_answers_502_when_the_preview_service_is_unreach
         resolver=PerAgentRules(),
         run_tokens=RUN_TOKENS,
         stamp_key=KEY.public_key(),
-        preview=(PREVIEW_ADDRESS, PREVIEW_TOKEN),
-        http=httpx.AsyncClient(transport=httpx.MockTransport(unreachable)),
+        preview=PreviewRelay(
+            PREVIEW_ADDRESS,
+            PREVIEW_TOKEN,
+            httpx.AsyncClient(transport=httpx.MockTransport(unreachable)),
+        ),
     )
     async with _client(control) as client:
         response = await client.post(

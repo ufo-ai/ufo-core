@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import sqlalchemy as sa
 import ufo_ext_sample.manifest as sample
@@ -378,6 +379,7 @@ async def test_serve_lifespan_waits_for_background_shutdown(
             surface_listeners=(listener,),
             surface_boots=(),
             configured_sources=(),
+            http_clients=(),
         )
     )
     async with serve._serve_lifespan(app):
@@ -418,6 +420,7 @@ async def test_the_jobs_fleet_runs_the_reconcilers_and_none_of_the_surface_deliv
             surface_listeners=(listener,),
             surface_boots=(),
             configured_sources=(),
+            http_clients=(),
         )
     )
     async with serve._serve_lifespan(app):
@@ -452,6 +455,7 @@ async def test_a_surface_boot_starts_its_work_before_the_first_request(
                 surface_boots=(booted.append,),
                 blob=WorkspaceBlobStore(backend=backend),
                 configured_sources=(),
+                http_clients=(),
             )
         )
 
@@ -481,6 +485,7 @@ async def test_serve_lifespan_propagates_a_background_failure(
             surface_listeners=(),
             surface_boots=(),
             configured_sources=(),
+            http_clients=(),
         )
     )
     with pytest.raises(ExceptionGroup) as raised:
@@ -522,6 +527,7 @@ async def test_the_lifespan_registers_configured_sources_into_the_one_workspace(
             configured_sources=(
                 SourceEntry(backend=FOLDER_BACKEND, config=SourceConfig(root=str(tmp_path))),
             ),
+            http_clients=(),
         )
     )
     only = await _found_workspace()
@@ -725,8 +731,13 @@ def test_proxy_control_mounts_the_stamp_routes_and_builds_the_client(
     client = TestClient(app)
     assert control.resolver is rules
     assert control.stamp_key is not None
-    assert control.preview == (("ufo-preview.test", 8930), "preview-real")
+    assert control.preview is not None
+    assert (control.preview.service, control.preview.token) == (
+        ("ufo-preview.test", 8930),
+        "preview-real",
+    )
     assert sessions is not None
+    assert app.state.http_clients == (control.preview.http, sessions.http)
     assert sessions.base_url == "https://proxy.test"
     assert sessions.credentials is None
     assert control.cache_control_token == "cache-control-secret"
@@ -807,9 +818,51 @@ def test_proxy_control_boots_with_no_proxy_url_and_no_stamp_routes(
     client = TestClient(app)
     assert sessions is None
     assert control.stamp_key is None
-    assert control.cache_control_token
+    assert control.preview is None
+    assert control.cache_control_token is None
+    assert app.state.http_clients == ()
     assert client.post("/internal/egress/tool-bridge/request", json={}).status_code == 404
-    assert client.post("/internal/git-credential", json={}).status_code == 401
+    assert client.post("/internal/git-credential", json={}).status_code == 404
+
+
+def test_proxy_control_mounts_the_git_credential_route_only_behind_its_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    mounted = {}
+    for token in ("cache-control-secret", ""):
+        monkeypatch.setenv(CACHE_CONTROL_TOKEN_ENV, token)
+        app = FastAPI()
+        serve._proxy_control(app, _local_config(), (), None, RUN_TOKENS, _blob(), None)
+        mounted[token] = TestClient(app).post(
+            "/internal/git-credential",
+            json={},
+            headers={"authorization": f"Bearer {token}"},
+        )
+
+    assert mounted["cache-control-secret"].status_code == 200
+    assert mounted[""].status_code == 404
+
+
+async def test_serve_lifespan_closes_the_proxy_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(serve, "ExecutorRecovery", ShutdownProbe)
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client: ShutdownProbe())
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: ShutdownProbe())
+    clients = (httpx.AsyncClient(), httpx.AsyncClient())
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            fleet=serve.JOBS_FLEET,
+            dbos=object(),
+            configured_sources=(),
+            http_clients=clients,
+        )
+    )
+
+    async with serve._serve_lifespan(app):
+        assert not any(client.is_closed for client in clients)
+
+    assert all(client.is_closed for client in clients)
 
 
 def test_shared_owner_dsn_prefers_the_env_over_config(

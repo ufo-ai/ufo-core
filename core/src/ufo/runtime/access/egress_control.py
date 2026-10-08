@@ -16,6 +16,7 @@ preview relay streams the body to the deploy's preview service under its real be
 reaches nothing else."""
 
 import base64
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated
@@ -102,38 +103,48 @@ class GitCredentialRequest(BaseModel):
 
 
 @dataclass(frozen=True)
+class PreviewRelay:
+    """The deploy's preview service: its address, its real bearer, and the client reaching it."""
+
+    service: tuple[str, int]
+    token: str
+    http: httpx.AsyncClient
+
+
+@dataclass(frozen=True)
 class EgressControl:
     """The internal egress routes, mounted on core `serve`. `resolver` is the real `PerAgentRules`,
     whose liveness check gates both stamp routes and whose grant read answers the git credential;
     `run_tokens` verifies the run token core placed on each route; `stamp_key` verifies the proxy
-    service's stamp. `bridge` dispatches the bounded JSON interface under a live run; `preview` is
-    the preview service's address and real bearer, reached through `http`.
+    service's stamp. `bridge` dispatches the bounded JSON interface under a live run; `preview`
+    relays a render to the preview service.
 
     `router` serves the stamp routes and `git_credential_router` the cache daemon's route behind
     `cache_control_token`, so each credential reaches exactly one surface."""
 
-    cache_control_token: str
+    cache_control_token: str | None
     resolver: PerAgentRules
     run_tokens: RunTokenCodec
     bridge: ToolBridgeRequester | None = None
     stamp_key: Ed25519PublicKey | None = None
-    preview: tuple[tuple[str, int], str] | None = None
-    http: httpx.AsyncClient | None = None
+    preview: PreviewRelay | None = None
 
     def router(self) -> APIRouter:
         if self.stamp_key is None:
             raise RuntimeError("The stamp routes need the proxy service's public key.")
-        if self.preview is not None and self.http is None:
-            raise RuntimeError("The preview relay needs an HTTP client.")
         router = APIRouter(prefix="/internal/egress")
         router.add_api_route("/tool-bridge/request", self._tool_bridge, methods=["POST"])
         if self.preview is not None:
-            router.add_api_route("/preview/render", self._preview_render, methods=["POST"])
+            router.add_api_route(
+                "/preview/render", self._preview_render(self.preview), methods=["POST"]
+            )
         return router
 
     def git_credential_router(self) -> APIRouter:
         """The cache daemon's git-credential callback, on its own route behind its own token so the
         cache credential reaches nothing but this endpoint."""
+        if self.cache_control_token is None:
+            raise RuntimeError("The git-credential route needs the cache control token.")
         router = APIRouter(prefix="/internal", dependencies=[Depends(self._cache_guard)])
         router.add_api_route("/git-credential", self._git_credential, methods=["POST"])
         return router
@@ -149,41 +160,44 @@ class EgressControl:
         with ws(live.workspace_id):
             return await self.bridge.request(live, body)
 
-    async def _preview_render(self, request: Request) -> StreamingResponse:
-        await self._route_principal(request)
-        length = request.headers.get("content-length", "")
-        if not length.isdigit() or int(length) > DOCUMENT_INPUT_MAX_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"A preview body must state its length and be at most "
-                f"{DOCUMENT_INPUT_MAX_BYTES} bytes.",
+    def _preview_render(
+        self, relay: PreviewRelay
+    ) -> Callable[[Request], Awaitable[StreamingResponse]]:
+        async def render(request: Request) -> StreamingResponse:
+            await self._route_principal(request)
+            length = request.headers.get("content-length", "")
+            if not length.isdigit() or int(length) > DOCUMENT_INPUT_MAX_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"A preview body must state its length and be at most "
+                    f"{DOCUMENT_INPUT_MAX_BYTES} bytes.",
+                )
+            host, port = relay.service
+            headers = {"authorization": f"Bearer {relay.token}", "content-length": length}
+            if "content-type" in request.headers:
+                headers["content-type"] = request.headers["content-type"]
+            try:
+                upstream = await relay.http.send(
+                    relay.http.build_request(
+                        "POST",
+                        f"http://{host}:{port}/render",
+                        headers=headers,
+                        content=request.stream(),
+                    ),
+                    stream=True,
+                )
+            except httpx.TransportError as error:
+                raise HTTPException(
+                    status_code=502, detail="The preview service did not answer."
+                ) from error
+            return StreamingResponse(
+                upstream.aiter_raw(),
+                status_code=upstream.status_code,
+                media_type=upstream.headers.get("content-type"),
+                background=BackgroundTask(upstream.aclose),
             )
-        if self.preview is None or self.http is None:
-            raise HTTPException(status_code=404)
-        (host, port), token = self.preview
-        headers = {"authorization": f"Bearer {token}", "content-length": length}
-        if "content-type" in request.headers:
-            headers["content-type"] = request.headers["content-type"]
-        try:
-            upstream = await self.http.send(
-                self.http.build_request(
-                    "POST",
-                    f"http://{host}:{port}/render",
-                    headers=headers,
-                    content=request.stream(),
-                ),
-                stream=True,
-            )
-        except httpx.TransportError as error:
-            raise HTTPException(
-                status_code=502, detail="The preview service did not answer."
-            ) from error
-        return StreamingResponse(
-            upstream.aiter_raw(),
-            status_code=upstream.status_code,
-            media_type=upstream.headers.get("content-type"),
-            background=BackgroundTask(upstream.aclose),
-        )
+
+        return render
 
     async def _route_principal(self, request: Request) -> ToolBridgePrincipal:
         stamp_header = request.headers.get(SESSION_STAMP_HEADER)

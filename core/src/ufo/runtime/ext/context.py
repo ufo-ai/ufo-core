@@ -16,6 +16,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, 
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -672,9 +673,7 @@ class ConversationProbes:
         sessions = self._sessions
         opened: set[UUID] = set()
 
-        async def proxied() -> "SessionCreated | None":
-            if sessions is None:
-                return None
+        async def proxied(sessions: "ProbeSessions") -> "SessionCreated":
             session = await sessions.open(
                 probe_id,
                 conversation_id,
@@ -692,7 +691,7 @@ class ConversationProbes:
                     conversation_id,
                     None,
                     await self._env(conversation_id, probe_id, acting_member_id),
-                    proxied=None if sessions is None else proxied,
+                    proxied=None if sessions is None else partial(proxied, sessions),
                 )
                 return await session.bash(command, timeout_s=timeout_s)
             finally:
