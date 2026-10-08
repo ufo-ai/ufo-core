@@ -18,11 +18,10 @@ use command_safety::dangerous_command_match;
 
 use crate::cmd::run;
 use crate::config::Home;
+use crate::trust::{godebug, trust_bundle, CA_CERT_CONSUMERS};
 
-const CA_CERT_ENV: &str = "UFO_EGRESS_CA_CERT";
+const CA_CERT_ENV: &str = "UFO_PROXY_CA_CERT";
 const TRUST_BUNDLE_FILE: &str = "trust-bundle.pem";
-const PEM_LINE_BYTES: usize = 64;
-const X509_OVERRIDE: &str = "x509sslcertoverrideplatform";
 const GH_BASH_ENV: &str = "gh-bash-env";
 const GH_PATH_ENV: &str = "UFO_GH";
 const GH_ORIGINAL_BASH_ENV: &str = "UFO_GH_ORIGINAL_BASH_ENV";
@@ -36,16 +35,6 @@ const GH_FILE: &str = "gh";
 const GH_ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gh.gz"));
 const GH_LICENSE: &str = include_str!("../../licenses/github-cli.txt");
 const GH_LICENSE_FILE: &str = "gh-LICENSE";
-// libcurl tools (git, cargo) ignore CURL_CA_BUNDLE when they set their own CAINFO, so each needs its
-// own override or a MITM'd host fails with unable to get local issuer certificate.
-const CA_CERT_CONSUMERS: [&str; 6] = [
-    "SSL_CERT_FILE",
-    "REQUESTS_CA_BUNDLE",
-    "CURL_CA_BUNDLE",
-    "NODE_EXTRA_CA_CERTS",
-    "GIT_SSL_CAINFO",
-    "CARGO_HTTP_CAINFO",
-];
 const SPAWN_FAILED_CODE: i32 = 127;
 const EXIT_POLL: Duration = Duration::from_millis(20);
 
@@ -193,46 +182,6 @@ pub fn run_at_home(
     let out = fs::read(&out_path).unwrap_or_default();
     let err = fs::read(&err_path).unwrap_or_default();
     Ok(reply(code, timed_out, &out, &err))
-}
-
-fn trust_bundle(ca_cert: &str) -> Result<String, String> {
-    let roots = rustls_native_certs::load_native_certs()
-        .map_err(|error| format!("could not read this machine's trust store: {error}"))?;
-    if roots.is_empty() {
-        return Err("this machine's trust store holds no certificates".into());
-    }
-    let mut bundle: String = roots.iter().map(|root| pem(root.as_ref())).collect();
-    bundle.push_str(ca_cert);
-    if !bundle.ends_with('\n') {
-        bundle.push('\n');
-    }
-    Ok(bundle)
-}
-
-fn pem(certificate: &[u8]) -> String {
-    let encoded = STANDARD.encode(certificate);
-    let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
-    for line in encoded.as_bytes().chunks(PEM_LINE_BYTES) {
-        out.push_str(std::str::from_utf8(line).expect("base64 is ascii"));
-        out.push('\n');
-    }
-    out.push_str("-----END CERTIFICATE-----\n");
-    out
-}
-
-fn godebug(current: Option<&str>) -> String {
-    current
-        .into_iter()
-        .flat_map(|value| value.split(','))
-        .filter(|setting| {
-            !setting.is_empty()
-                && setting
-                    .split_once('=')
-                    .is_none_or(|(name, _)| name != X509_OVERRIDE)
-        })
-        .chain(std::iter::once("x509sslcertoverrideplatform=1"))
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn materialize_gh(workdir: &Path) -> Result<PathBuf, String> {
@@ -556,24 +505,6 @@ mod tests {
     }
 
     #[test]
-    fn trust_bundle_carries_this_machine_and_the_egress_ca() {
-        let bundle =
-            trust_bundle("-----BEGIN CERTIFICATE-----\nEGRESSCA\n-----END CERTIFICATE-----\n")
-                .unwrap();
-        assert!(bundle.matches("BEGIN CERTIFICATE").count() > 1);
-        assert!(bundle.ends_with("EGRESSCA\n-----END CERTIFICATE-----\n"));
-    }
-
-    #[test]
-    fn go_uses_the_operation_bundle_without_dropping_other_debug_settings() {
-        assert_eq!(
-            godebug(Some("http2debug=1,x509sslcertoverrideplatform=0")),
-            "http2debug=1,x509sslcertoverrideplatform=1"
-        );
-        assert_eq!(godebug(None), "x509sslcertoverrideplatform=1");
-    }
-
-    #[test]
     fn finds_gh_in_the_terminal_shell_command() {
         let argv = vec![
             "/bin/bash".to_string(),
@@ -651,7 +582,7 @@ mod tests {
             "env": {
                 "BASH_ENV": original_bash_env,
                 "GODEBUG": "http2debug=1",
-                "UFO_EGRESS_CA_CERT": "-----BEGIN CERTIFICATE-----\nEGRESSCA\n-----END CERTIFICATE-----\n"
+                "UFO_PROXY_CA_CERT": "-----BEGIN CERTIFICATE-----\nPROXYCA\n-----END CERTIFICATE-----\n"
             }
         })
         .to_string();
@@ -703,28 +634,12 @@ mod tests {
         assert!(stdout.contains("gh version 2.99.0"));
     }
 
-    #[test]
-    fn every_root_encodes_as_a_readable_certificate() {
-        let roots = rustls_native_certs::load_native_certs().unwrap();
-        for root in &roots {
-            let encoded = pem(root.as_ref());
-            let body: String = encoded
-                .lines()
-                .filter(|line| !line.starts_with("-----"))
-                .collect();
-            assert!(encoded
-                .lines()
-                .all(|line| line.len() <= PEM_LINE_BYTES || line.starts_with("-----")));
-            assert_eq!(STANDARD.decode(body).unwrap(), root.as_ref());
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn materializes_the_trust_bundle() {
         let dir = scratch("ca");
         let reply = run(
-            r#"{"argv":["/bin/sh","-c","test \"$GIT_SSL_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$CARGO_HTTP_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$GODEBUG\" = \"http2debug=1,x509sslcertoverrideplatform=1\" && cat \"$SSL_CERT_FILE\"; printf %s \"${UFO_EGRESS_CA_CERT:-unset}\""],"env":{"GODEBUG":"http2debug=1,x509sslcertoverrideplatform=0","UFO_EGRESS_CA_CERT":"-----BEGIN CERTIFICATE-----\nEGRESSCA\n-----END CERTIFICATE-----\n"}}"#,
+            r#"{"argv":["/bin/sh","-c","test \"$GIT_SSL_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$CARGO_HTTP_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$GODEBUG\" = \"http2debug=1,x509sslcertoverrideplatform=1\" && cat \"$SSL_CERT_FILE\"; printf %s \"${UFO_PROXY_CA_CERT:-unset}\""],"env":{"GODEBUG":"http2debug=1,x509sslcertoverrideplatform=0","UFO_PROXY_CA_CERT":"-----BEGIN CERTIFICATE-----\nPROXYCA\n-----END CERTIFICATE-----\n"}}"#,
             &dir,
             Path::new("/tmp"),
             30,
@@ -732,6 +647,6 @@ mod tests {
         .unwrap();
         let stdout = String::from_utf8(decoded(&parsed(&reply), "stdout_b64")).unwrap();
         assert!(stdout.matches("BEGIN CERTIFICATE").count() > 1);
-        assert!(stdout.ends_with("EGRESSCA\n-----END CERTIFICATE-----\nunset"));
+        assert!(stdout.ends_with("PROXYCA\n-----END CERTIFICATE-----\nunset"));
     }
 }

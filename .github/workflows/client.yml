@@ -78,9 +78,10 @@ jobs:
           name: client-junit
           path: client/target/nextest/ci/junit.xml
           retention-days: 14
-      - name: The tests pass with a default gateway compiled in
+      - name: The tests pass with build defaults compiled in
         env:
           UFO_GATEWAY_URL_DEFAULT: http://127.0.0.1:9
+          UFO_PROXY_URL_DEFAULT: https://127.0.0.1:9
         run: cargo nextest run
 
   # Without a CodSpeed token that is the whole gate — a bench that stopped compiling fails here —
