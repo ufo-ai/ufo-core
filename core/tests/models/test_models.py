@@ -1690,6 +1690,24 @@ def test_catalog_registers_sonnet_5_5_at_sonnet_pricing(tmp_path: Path) -> None:
     assert spec.reasoning.default_on
 
 
+def test_catalog_registers_haiku_5_5_at_its_lower_tier_rates(tmp_path: Path) -> None:
+    """Haiku 5.5 bills a prompt over 100,000 tokens at 5x every rate, so the row carries the
+    lower tier's prices and the window they are true at."""
+    registry = model_registry(_config(tmp_path), ())
+    spec = registry.spec("claude-haiku-5-5")
+    assert spec.provider == "anthropic"
+    assert spec.context_window == 100_000
+    assert spec.knowledge_cutoff == "2026-06"
+    assert spec.price.input == 100_000
+    assert spec.price.output == 500_000
+    assert spec.price.cache_read == 10_000
+    assert spec.price.cache_write_5m == 125_000
+    assert spec.price.cache_write_1h == 200_000
+    assert spec.reasoning.default_on
+    assert spec.reasoning.can_disable
+    assert spec.forced_tool_choice
+
+
 def test_catalog_registers_gpt_5_6_sol_on_the_responses_surface(tmp_path: Path) -> None:
     """Sol shares the family's refusal of `tools` beside `reasoning_effort` on
     `/v1/chat/completions` (#568), so it is called on Responses."""
