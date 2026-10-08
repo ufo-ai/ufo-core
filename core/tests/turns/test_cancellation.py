@@ -96,7 +96,7 @@ async def test_cancel_one_turn_cancels_the_workflow_then_commits_the_terminal(db
     workspace_id, agent_id = await _workspace_agent()
     turn_id = await _turn(workspace_id, agent_id, "running")
     client = _RecordingClient()
-    assert await cancel_one_turn(client, turn_id) is not None
+    assert await cancel_one_turn(client, None, turn_id) is not None
     assert client.cancelled == [str(turn_id)]
     assert await _status(turn_id) == "cancelled"
     async with workspace_tx() as connection:
@@ -120,7 +120,7 @@ async def test_cancel_one_turn_targets_the_live_redispatch_attempt(db: None) -> 
         )
     client = _RecordingClient()
 
-    assert await cancel_one_turn(client, turn_id) is not None
+    assert await cancel_one_turn(client, None, turn_id) is not None
 
     assert client.cancelled == [attempt]
     assert await _status(turn_id) == "cancelled"
@@ -148,7 +148,7 @@ async def test_cancel_one_turn_follows_a_claim_that_races_the_cancel(db: None) -
 
     client = _ClaimingClient()
 
-    assert await cancel_one_turn(client, turn_id) is not None
+    assert await cancel_one_turn(client, None, turn_id) is not None
 
     assert client.cancelled == [str(turn_id), claimed_attempt]
     assert await _status(turn_id) == "cancelled"
@@ -165,7 +165,7 @@ async def test_cancel_one_turn_names_what_the_turn_already_created(db: None) -> 
                 .values(created_refs=[made.model_dump(mode="json")])
                 .where(tables.turn.c.id == turn_id)
             )
-        frame = await cancel_one_turn(_RecordingClient(), turn_id)
+        frame = await cancel_one_turn(_RecordingClient(), None, turn_id)
         assert frame is not None
         assert frame.created == (made,)
         async with workspace_tx() as connection:
@@ -193,7 +193,7 @@ async def test_cancel_one_turn_names_work_committed_while_the_workflow_stops(db:
                 )
 
     with ws(workspace_id):
-        frame = await cancel_one_turn(_StoppingClient(), turn_id)
+        frame = await cancel_one_turn(_StoppingClient(), None, turn_id)
 
     assert frame is not None
     assert frame.created == (made,)
@@ -204,7 +204,7 @@ async def test_cancel_one_turn_cancels_a_queued_turn_with_no_live_workflow(db: N
     is still committed cancelled, so nothing downstream re-dispatches it."""
     workspace_id, agent_id = await _workspace_agent()
     turn_id = await _turn(workspace_id, agent_id, "queued")
-    assert await cancel_one_turn(_RecordingClient(), turn_id) is not None
+    assert await cancel_one_turn(_RecordingClient(), None, turn_id) is not None
     assert await _status(turn_id) == "cancelled"
 
 
@@ -214,7 +214,7 @@ async def test_cancel_one_turn_leaves_a_terminal_turn_untouched(db: None) -> Non
     workspace_id, agent_id = await _workspace_agent()
     done = await _turn(workspace_id, agent_id, "done")
     client = _RecordingClient()
-    assert await cancel_one_turn(client, done) is None
+    assert await cancel_one_turn(client, None, done) is None
     assert client.cancelled == []
     assert await _status(done) == "done"
 
@@ -224,7 +224,7 @@ async def test_cancel_one_turn_reports_nothing_cancelled_for_a_turn_that_does_no
 ) -> None:
     await _workspace_agent()
     client = _RecordingClient()
-    assert await cancel_one_turn(client, uuid4()) is None
+    assert await cancel_one_turn(client, None, uuid4()) is None
     assert client.cancelled == []
 
 
@@ -240,7 +240,7 @@ async def test_cancel_one_turn_leaves_the_row_live_when_the_workflow_cancel_faul
             raise sa.exc.SQLAlchemyError("cancel failed")
 
     with pytest.raises(sa.exc.SQLAlchemyError):
-        await cancel_one_turn(_FaultyClient(), turn_id)
+        await cancel_one_turn(_FaultyClient(), None, turn_id)
     assert await _status(turn_id) == "running"
 
 
@@ -280,8 +280,8 @@ async def test_the_cancelled_terminal_is_counted_once_by_the_call_that_wrote_it(
     reader = _metric_reader(monkeypatch)
     workspace_id, agent_id = await _workspace_agent()
     turn_id = await _turn(workspace_id, agent_id, "queued", "coding")
-    assert await cancel_one_turn(_RecordingClient(), turn_id) is not None
-    assert await cancel_one_turn(_RecordingClient(), turn_id) is None
+    assert await cancel_one_turn(_RecordingClient(), None, turn_id) is not None
+    assert await cancel_one_turn(_RecordingClient(), None, turn_id) is None
     assert _terminal_counts(reader) == [(1, "cancelled", "", "coding")]
 
 
@@ -308,7 +308,7 @@ async def test_a_cancel_that_transitioned_nothing_counts_no_terminal(
                     .where(tables.turn.c.id == turn_id)
                 )
 
-    assert await cancel_one_turn(_RacingClient(), turn_id) is None
+    assert await cancel_one_turn(_RacingClient(), None, turn_id) is None
     assert await _status(turn_id) == "done"
     assert _terminal_counts(reader) == []
 
@@ -331,7 +331,7 @@ async def test_the_operator_verb_cancels_a_wedged_turn_in_its_own_workspace(db: 
     assert found == workspace_id
 
     with ws(found):
-        assert await cancel_one_turn(client, wedged) is not None
+        assert await cancel_one_turn(client, None, wedged) is not None
     assert client.cancelled == [str(wedged)]
 
     async with workspace_tx() as connection:

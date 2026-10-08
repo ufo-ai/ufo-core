@@ -1045,6 +1045,7 @@ async def test_spawn_unknown_target_is_an_error_naming_the_valid_targets(
         registry=SubagentRegistry((_spawn_profile("research"), _spawn_profile("coding"))),
         parent=parent,
         audience=conversation_audience(None),
+        sessions=None,
     )
     ctx = make_context(FakeSandbox(), tmp_path, spawn=subagents.spawn)
     result = await run(
@@ -1080,6 +1081,7 @@ async def test_spawn_wrong_payload_is_an_error_naming_the_targets_keys(
         registry=SubagentRegistry((_spawn_profile("coding"),)),
         parent=parent,
         audience=conversation_audience(None),
+        sessions=None,
     )
     ctx = make_context(FakeSandbox(), tmp_path, spawn=subagents.spawn)
 

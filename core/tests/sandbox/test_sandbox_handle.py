@@ -1429,6 +1429,7 @@ async def _admitted_child(workspace_id: UUID, parent: Turn) -> UUID | None:
         registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
         audience=SHARED_AUDIENCE,
+        sessions=None,
     )
     conversation_id, turn_id = uuid4(), uuid4()
     with ws(workspace_id):

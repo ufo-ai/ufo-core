@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo.db import workspace_tx
 from ufo.harness.o11y import current_traceparent, log
 from ufo.harness.untrusted import wall
+from ufo.runtime.access.proxy_sessions import ProxySessions
 from ufo.runtime.billing.spend import NO_SPEND_GATES, PARK, REJECT, SPAWN_MOMENT, SpendGates
 from ufo.runtime.engine import TurnParked
 from ufo.runtime.ext.context import TurnInvoker
@@ -235,6 +236,7 @@ class Subagents:
     registry: SubagentRegistry
     parent: Turn
     audience: Audience
+    sessions: ProxySessions | None
     hub: Hub | None = None
     invoker: TurnInvoker | None = None
     spend: SpendGates = NO_SPEND_GATES
@@ -422,7 +424,7 @@ class Subagents:
             else:
                 terminal = await self._await_terminal(turn_id)
         except Exception:
-            await cancel_one_turn(self.client, turn_id)
+            await cancel_one_turn(self.client, self.sessions, turn_id)
             raise
         if terminal.status != "done":
             diagnostic = ": ".join(
@@ -526,7 +528,7 @@ class Subagents:
         cancelled by the reconciler once this child's cancelled terminal lands. Refuses a turn id
         not a child of this parent."""
         await self._require_child(turn_id)
-        await cancel_one_turn(self.client, turn_id)
+        await cancel_one_turn(self.client, self.sessions, turn_id)
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -1233,7 +1235,7 @@ class Subagents:
         if row.terminal is not None:
             return TerminalFrame.model_validate(row.terminal)
         if row.status == PARKED:
-            await cancel_one_turn(self.client, turn_id)
+            await cancel_one_turn(self.client, self.sessions, turn_id)
             raise SubagentParked(
                 "subagent stopped before it finished and was cancelled; it held on a spend limit"
             )

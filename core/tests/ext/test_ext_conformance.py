@@ -1738,6 +1738,7 @@ async def test_a_surface_route_is_handed_the_model_the_deploy_wired(
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
         surface_model=lambda name: _NamedModel(f"model-for-{name}"),
+        proxy_sessions=None,
     )
     bare = FastAPI()
     _mount_shared_surfaces(
@@ -1755,6 +1756,7 @@ async def test_a_surface_route_is_handed_the_model_the_deploy_wired(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        proxy_sessions=None,
     )
     path = f"/surface/{SURFACE_NAME}/{SURFACE_MODEL_PATH}"
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
@@ -1794,6 +1796,7 @@ async def test_sample_surface_admits_links_streams_and_delivers(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        proxy_sessions=None,
     )
     body = json.dumps(
         {
@@ -1933,6 +1936,7 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        proxy_sessions=None,
     )
     body = json.dumps({"external_id": "ext-live-1", "message": "hello"})
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:

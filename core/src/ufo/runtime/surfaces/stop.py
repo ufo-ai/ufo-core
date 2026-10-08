@@ -10,6 +10,7 @@ import sqlalchemy as sa
 from dbos import DBOSClient
 
 from ufo.db import workspace_tx
+from ufo.runtime.access.proxy_sessions import ProxySessions
 from ufo.runtime.ext.surface import Stopped
 from ufo.runtime.hub import Hub, Terminal
 from ufo.runtime.surfaces.admission import Admission
@@ -31,6 +32,7 @@ class MemberStop:
     client: DBOSClient
     hub: Hub
     admission: Admission
+    sessions: ProxySessions | None
 
     async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> Stopped:
         async with workspace_tx() as connection:
@@ -44,7 +46,7 @@ class MemberStop:
             ).scalar_one_or_none()
         if owner != conversation_id:
             raise ValueError(f"turn {turn_id} is not a turn of conversation {conversation_id}")
-        frame = await cancel_one_turn(self.client, turn_id)
+        frame = await cancel_one_turn(self.client, self.sessions, turn_id)
         if frame is None:
             return Stopped(ended=False, founded_turn_id=None)
         founded = await self.admission.redispatch(workspace_id, conversation_id, turn_id)

@@ -269,6 +269,7 @@ async def test_subagent_conversation_inherits_the_parents_agent(db: None) -> Non
         registry=SubagentRegistry((profile,)),
         parent=parent,
         audience=conversation_audience(None),
+        sessions=None,
     )
     with ws(workspace_id):
         spawned = await subagents.spawn("research", {"task": "acme"}, background=True)

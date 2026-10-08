@@ -424,16 +424,18 @@ def run(fleet: Fleet) -> None:
 
     app = FastAPI(lifespan=_serve_lifespan)
     tailer = HubTailer(hub=hub, spend=spend)
+    proxy_sessions = deploy_proxy_sessions(config, manifests)
     tool_bridge = ToolBridge(
         dbos=dbos_client,
         tailer=tailer,
         tools=bridge_tools(manifests),
         subagents=subagents,
         subagent_grants=subagent_grants,
+        sessions=proxy_sessions,
         actions=deploy_actions,
     )
-    _, rules, proxy_sessions = _proxy_control(
-        app, config, manifests, credentials, run_tokens, blob_backend, tool_bridge
+    _, rules = _proxy_control(
+        app, config, manifests, credentials, run_tokens, blob_backend, tool_bridge, proxy_sessions
     )
     sandboxes = ConversationSandbox(
         carrier=carrier,
@@ -541,6 +543,7 @@ def run(fleet: Fleet) -> None:
     app.state.fleet = fleet
     app.state.hub = hub
     app.state.dbos = dbos_client
+    app.state.proxy_sessions = proxy_sessions
     app.state.instance_id = instance_id
     app.state.durable_surfaces = durable_surfaces(manifests)
     app.state.writeback_poller = None
@@ -606,6 +609,7 @@ def run(fleet: Fleet) -> None:
         config.connect.public_base_url,
         config.sandbox.ingress_public_url,
         (AUTO_MODEL, *sorted(registry.specs)),
+        proxy_sessions=proxy_sessions,
         probes=probes,
         runtime_identity=runtime_identity,
         connectors=connectors,
@@ -1296,6 +1300,7 @@ def _mount_shared_surfaces(
     ingress_public_url: str | None,
     models: tuple[str, ...],
     *,
+    proxy_sessions: ProxySessions | None,
     probes: ConversationProbes | None = None,
     runtime_identity: RuntimeIdentity | None = None,
     connectors: ConnectorRegistry | None = None,
@@ -1320,7 +1325,7 @@ def _mount_shared_surfaces(
         )
     admission = _admission(dbos_client, manifests, hub, spend)
     tailer = HubTailer(hub=hub, spend=spend)
-    stopper = MemberStop(client=dbos_client, hub=hub, admission=admission)
+    stopper = MemberStop(client=dbos_client, hub=hub, admission=admission, sessions=proxy_sessions)
     turn_steps = DurableTurnSteps(client=dbos_client)
     system_skill_bundle = SystemSkillBundle.from_skills(skills.bundled_skills())
     registered: dict[str, SurfaceSpec] = {}
@@ -1488,8 +1493,14 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with asyncio.TaskGroup() as group:
             tasks = [
                 group.create_task(ExecutorRecovery().run()),
-                group.create_task(CancelReconciler(client=app.state.dbos).run()),
-                group.create_task(StrandedTurnReconciler(client=app.state.dbos).run()),
+                group.create_task(
+                    CancelReconciler(client=app.state.dbos, sessions=app.state.proxy_sessions).run()
+                ),
+                group.create_task(
+                    StrandedTurnReconciler(
+                        client=app.state.dbos, sessions=app.state.proxy_sessions
+                    ).run()
+                ),
             ]
             if app.state.fleet.surfaces:
                 for boot in app.state.surface_boots:
@@ -1529,7 +1540,8 @@ def _proxy_control(
     run_tokens: RunTokenCodec,
     blob: FilesystemBlobStore | S3BlobStore,
     bridge: ToolBridge | None,
-) -> tuple[EgressControl, PerAgentRules, ProxySessions | None]:
+    sessions: ProxySessions | None,
+) -> tuple[EgressControl, PerAgentRules]:
     preview = _preview_settings(config)
     model_hosts, model_binds = model_bindings(config)
     public_base_url = config.connect.public_base_url
@@ -1571,22 +1583,26 @@ def _proxy_control(
     )
     if control.cache_control_token is not None:
         app.include_router(control.git_credential_router())
-    sessions = (
-        None
-        if proxy_url is None
-        else ProxySessions(
-            proxy_url.rstrip("/"),
-            proxy_credentials(manifests),
-            httpx.AsyncClient(timeout=PROXY_CALL_TIMEOUT_SECONDS),
-        )
-    )
     if stamp_key is not None:
         app.include_router(control.router())
     app.state.http_clients = (
         *(() if control.preview is None else (control.preview.http,)),
         *(() if sessions is None else (sessions.http,)),
     )
-    return control, resolver, sessions
+    return control, resolver
+
+
+def deploy_proxy_sessions(config: Config, manifests: tuple[Manifest, ...]) -> ProxySessions | None:
+    """The client of the proxy service's session API under `[sandbox] proxy_url`, or None when
+    the deploy runs no proxy service."""
+    proxy_url = config.sandbox.proxy_url
+    if proxy_url is None:
+        return None
+    return ProxySessions(
+        proxy_url.rstrip("/"),
+        proxy_credentials(manifests),
+        httpx.AsyncClient(timeout=PROXY_CALL_TIMEOUT_SECONDS),
+    )
 
 
 def _proxy_public_key() -> Ed25519PublicKey:

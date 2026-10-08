@@ -8,13 +8,16 @@ driver, the `cancel_spawn` tool, and the reconciler — and it talks to the dura
 the DBOS store directly, the shared substrate both roles hold, never across a role's queue/blob/hub
 seam."""
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 import sqlalchemy as sa
 from dbos import DBOSClient
 
 from ufo.db import workspace_tx
-from ufo.harness.o11y import emit_metric, turn_profile
+from ufo.harness.o11y import emit_metric, log, turn_profile, warn
+from ufo.runtime.access.proxy_sessions import ProxySessions
+from ufo.runtime.billing.accounting import TURN_LABEL
 from ufo.runtime.object_name import ObjectRef
 from ufo.runtime.turns.changes import turn_conversation_changed
 from ufo.runtime.turns.dispatch import dispatch_next_turn
@@ -22,7 +25,9 @@ from ufo.schema import tables
 from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES, TerminalFrame
 
 
-async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | None:
+async def cancel_one_turn(
+    client: DBOSClient, sessions: ProxySessions | None, turn_id: UUID
+) -> TerminalFrame | None:
     """Cancel a single turn: cancel its live workflow, then commit its cancelled terminal.
     Returns the committed frame iff this call transitioned the turn to cancelled — carrying
     the objects the row already says the turn created, so a member who stopped a turn is
@@ -40,7 +45,10 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | 
     `cancel_workflow_async` silently no-ops on an absent or complete workflow, so a queued turn
     never enqueued needs no special case. This is where a cancelled turn is counted: the turn's own
     execution never writes the row, and a turn cancelled before one started has no execution at
-    all."""
+    all. It is also where a cancelled turn's proxy sessions end: once `cancelled` is committed,
+    every session under the turn's label is revoked, unless a detached command of the turn is still
+    followed, whose settling revokes them instead. A revoke fault is logged, since each session's
+    deadline bounds it."""
     while True:
         async with workspace_tx() as connection:
             row = (
@@ -64,6 +72,8 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | 
                         tables.turn.c.conversation_id,
                         tables.turn.c.running_attempt,
                         tables.turn.c.created_refs,
+                        tables.turn.c.workspace_id,
+                        tables.turn.c.detached_until,
                     )
                     .where(tables.turn.c.id == turn_id)
                     .with_for_update()
@@ -102,4 +112,18 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | 
         profile=turn_profile(row.subagent_profile, spawned=row.parent_turn_id is not None),
     )
     await dispatch_next_turn(client, row.conversation_id)
+    until = row.detached_until
+    if until is not None and until.tzinfo is None:
+        until = until.replace(tzinfo=UTC)
+    if sessions is not None and (until is None or until <= datetime.now(UTC)):
+        try:
+            revoked = await sessions.revoke_labelled(row.workspace_id, TURN_LABEL, str(turn_id))
+        except Exception as error:
+            warn(
+                "turn.sessions.close_failed",
+                turn_id=str(turn_id),
+                error_class=type(error).__name__,
+            )
+        else:
+            log("turn.sessions.revoked", turn_id=str(turn_id), count=revoked)
     return frame

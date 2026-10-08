@@ -284,6 +284,7 @@ def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) 
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        proxy_sessions=None,
     )
     mounted = {route.path for route in app.routes}
     for spec in manifest.surfaces:

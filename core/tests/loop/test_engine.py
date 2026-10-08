@@ -9629,6 +9629,7 @@ async def test_a_spawn_a_gate_parks_parks_the_parent_turn(db: None, tmp_path: Pa
         parent=turn,
         audience=conversation_audience(None),
         spend=SAMPLE_SPEND,
+        sessions=None,
     )
     engine = replace(_engine(turn, SpawningModel(), tmp_path), spawn=subagents.spawn)
     with pytest.raises(TurnParked, match="allowance is spent at spawn"):

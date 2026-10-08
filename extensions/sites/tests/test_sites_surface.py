@@ -100,6 +100,7 @@ def _mounted(
         member_skill_listing=no_member_skills,
         sign_in_path=sign_in_path,
         sites=sites,
+        proxy_sessions=None,
     )
     return AsyncClient(transport=ASGITransport(app=app), base_url=PUBLIC_BASE_URL)
 

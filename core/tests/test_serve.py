@@ -368,12 +368,13 @@ async def test_serve_lifespan_waits_for_background_shutdown(
     speaker = ShutdownProbe()
     listener = ShutdownProbe()
     monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
-    monkeypatch.setattr(serve, "CancelReconciler", lambda client: reconciler)
-    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: stranded)
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client, sessions: reconciler)
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client, sessions: stranded)
     app = SimpleNamespace(
         state=SimpleNamespace(
             fleet=serve.WHOLE_FLEET,
             dbos=object(),
+            proxy_sessions=None,
             writeback_poller=poller,
             mid_turn_reply_poller=speaker,
             surface_listeners=(listener,),
@@ -409,12 +410,13 @@ async def test_the_jobs_fleet_runs_the_reconcilers_and_none_of_the_surface_deliv
     speaker = ShutdownProbe()
     listener = ShutdownProbe()
     monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
-    monkeypatch.setattr(serve, "CancelReconciler", lambda client: reconciler)
-    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: stranded)
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client, sessions: reconciler)
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client, sessions: stranded)
     app = SimpleNamespace(
         state=SimpleNamespace(
             fleet=serve.JOBS_FLEET,
             dbos=object(),
+            proxy_sessions=None,
             writeback_poller=poller,
             mid_turn_reply_poller=speaker,
             surface_listeners=(listener,),
@@ -439,8 +441,8 @@ async def test_a_surface_boot_starts_its_work_before_the_first_request(
     """The work a surface would otherwise start on its first page — the portal's asset publish —
     starts with the app loop instead, handed the fleet store it writes through."""
     monkeypatch.setattr(serve, "ExecutorRecovery", ShutdownProbe)
-    monkeypatch.setattr(serve, "CancelReconciler", lambda client: ShutdownProbe())
-    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: ShutdownProbe())
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client, sessions: ShutdownProbe())
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client, sessions: ShutdownProbe())
     backend = FilesystemBlobStore(root=tmp_path)
     booted: list[object] = []
 
@@ -449,6 +451,7 @@ async def test_a_surface_boot_starts_its_work_before_the_first_request(
             state=SimpleNamespace(
                 fleet=fleet,
                 dbos=object(),
+                proxy_sessions=None,
                 writeback_poller=None,
                 mid_turn_reply_poller=None,
                 surface_listeners=(),
@@ -474,12 +477,13 @@ async def test_serve_lifespan_propagates_a_background_failure(
     reconciler = ShutdownProbe()
     stranded = ShutdownProbe()
     monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
-    monkeypatch.setattr(serve, "CancelReconciler", lambda client: reconciler)
-    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: stranded)
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client, sessions: reconciler)
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client, sessions: stranded)
     app = SimpleNamespace(
         state=SimpleNamespace(
             fleet=serve.WHOLE_FLEET,
             dbos=object(),
+            proxy_sessions=None,
             writeback_poller=None,
             mid_turn_reply_poller=None,
             surface_listeners=(),
@@ -514,12 +518,13 @@ async def test_the_lifespan_registers_configured_sources_into_the_one_workspace(
     db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(serve, "ExecutorRecovery", ShutdownProbe)
-    monkeypatch.setattr(serve, "CancelReconciler", lambda client: ShutdownProbe())
-    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: ShutdownProbe())
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client, sessions: ShutdownProbe())
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client, sessions: ShutdownProbe())
     app = SimpleNamespace(
         state=SimpleNamespace(
             fleet=serve.JOBS_FLEET,
             dbos=object(),
+            proxy_sessions=None,
             writeback_poller=None,
             mid_turn_reply_poller=None,
             surface_listeners=(),
@@ -724,8 +729,9 @@ def test_proxy_control_mounts_the_stamp_routes_and_builds_the_client(
     _proxy_env(monkeypatch)
     app = FastAPI()
 
-    control, rules, sessions = serve._proxy_control(
-        app, _proxied_config(), (), None, RUN_TOKENS, _blob(), None
+    sessions = serve.deploy_proxy_sessions(_proxied_config(), ())
+    control, rules = serve._proxy_control(
+        app, _proxied_config(), (), None, RUN_TOKENS, _blob(), None, sessions
     )
 
     client = TestClient(app)
@@ -762,7 +768,9 @@ def test_proxy_control_requires_the_proxy_public_key_when_a_proxy_is_set(
         else:
             monkeypatch.setenv(PROXY_PUBLIC_KEY_ENV, value)
         with pytest.raises(RuntimeError, match=PROXY_PUBLIC_KEY_ENV):
-            serve._proxy_control(FastAPI(), _proxied_config(), (), None, RUN_TOKENS, _blob(), None)
+            serve._proxy_control(
+                FastAPI(), _proxied_config(), (), None, RUN_TOKENS, _blob(), None, None
+            )
 
 
 def test_proxy_control_requires_an_https_public_base_url_when_a_proxy_is_set(
@@ -772,7 +780,7 @@ def test_proxy_control_requires_an_https_public_base_url_when_a_proxy_is_set(
     for base in (None, "http://serve.test"):
         with pytest.raises(RuntimeError, match=r"\[connect\] public_base_url"):
             serve._proxy_control(
-                FastAPI(), _proxied_config(base), (), None, RUN_TOKENS, _blob(), None
+                FastAPI(), _proxied_config(base), (), None, RUN_TOKENS, _blob(), None, None
             )
 
 
@@ -811,8 +819,9 @@ def test_proxy_control_boots_with_no_proxy_url_and_no_stamp_routes(
     monkeypatch.delenv(PROXY_PUBLIC_KEY_ENV, raising=False)
     app = FastAPI()
 
-    control, _, sessions = serve._proxy_control(
-        app, _local_config(), (), None, RUN_TOKENS, _blob(), None
+    sessions = serve.deploy_proxy_sessions(_local_config(), ())
+    control, _ = serve._proxy_control(
+        app, _local_config(), (), None, RUN_TOKENS, _blob(), None, sessions
     )
 
     client = TestClient(app)
@@ -834,7 +843,7 @@ def test_proxy_control_mounts_the_git_credential_route_only_behind_its_token(
     for token in ("cache-control-secret", ""):
         monkeypatch.setenv(CACHE_CONTROL_TOKEN_ENV, token)
         app = FastAPI()
-        serve._proxy_control(app, _local_config(), (), None, RUN_TOKENS, _blob(), None)
+        serve._proxy_control(app, _local_config(), (), None, RUN_TOKENS, _blob(), None, None)
         mounted[token] = TestClient(app).post(
             "/internal/git-credential",
             json={},
@@ -847,13 +856,14 @@ def test_proxy_control_mounts_the_git_credential_route_only_behind_its_token(
 
 async def test_serve_lifespan_closes_the_proxy_clients(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(serve, "ExecutorRecovery", ShutdownProbe)
-    monkeypatch.setattr(serve, "CancelReconciler", lambda client: ShutdownProbe())
-    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: ShutdownProbe())
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client, sessions: ShutdownProbe())
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client, sessions: ShutdownProbe())
     clients = (httpx.AsyncClient(), httpx.AsyncClient())
     app = SimpleNamespace(
         state=SimpleNamespace(
             fleet=serve.JOBS_FLEET,
             dbos=object(),
+            proxy_sessions=None,
             configured_sources=(),
             http_clients=clients,
         )
@@ -930,6 +940,7 @@ async def test_the_proxy_resolver_reads_keyed_slots_per_workspace(
         RUN_TOKENS,
         _blob(),
         None,
+        None,
     )
     (rules,) = built
     claims = deploy_claims((manifest,))
@@ -983,7 +994,7 @@ def test_the_proxy_resolver_base_admits_the_s3_artifact_store_host(
     built = _captured_rules(monkeypatch)
     store = S3BlobStore(bucket="ufo-blobs", region="us-east-1")
 
-    serve._proxy_control(FastAPI(), _local_config(), (), None, RUN_TOKENS, store, None)
+    serve._proxy_control(FastAPI(), _local_config(), (), None, RUN_TOKENS, store, None, None)
 
     (rules,) = built
     policy = asyncio.run(_compiled(rules, uuid4(), uuid4()))
@@ -1009,8 +1020,8 @@ def test_the_proxy_resolver_routes_the_bridge_and_preview_to_the_public_base_url
     )
     unserved = served.model_copy(update={"connect": ConnectConfig()})
 
-    serve._proxy_control(FastAPI(), served, (), None, RUN_TOKENS, _blob(), None)
-    serve._proxy_control(FastAPI(), unserved, (), None, RUN_TOKENS, _blob(), None)
+    serve._proxy_control(FastAPI(), served, (), None, RUN_TOKENS, _blob(), None, None)
+    serve._proxy_control(FastAPI(), unserved, (), None, RUN_TOKENS, _blob(), None, None)
 
     routed, unrouted = built
     stamp = {RUN_HEADER: "run-token"}

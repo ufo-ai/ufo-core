@@ -107,10 +107,10 @@ class TurnSessions:
         """End the turn's authority once its terminal is committed: a turn that left detached
         commands keeps every live session under its label, an earlier run's included, narrowed to
         a policy that binds no model key and no route, until the last command's follow ends; any
-        other has every session under its label revoked. A turn whose row is not terminal yet, as
-        when a cancel has stopped the workflow but not committed `cancelled`, keeps its sessions
-        until their deadline. A fault is logged and never raised, since each session's deadline
-        bounds what it leaves behind."""
+        other has every session under its label revoked. A turn whose row is not terminal, as
+        when a later attempt has claimed it, keeps its sessions. A cancelled turn's are revoked
+        by the cancel that commits `cancelled`. A fault is logged and never raised, since each
+        session's deadline bounds what it leaves behind."""
         if self.proxy is None:
             return
         try:

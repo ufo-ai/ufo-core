@@ -1,7 +1,7 @@
 import json
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -33,6 +33,7 @@ from ufo.runtime.agent_scope import agent
 from ufo.runtime.background_tasks import mark_detached
 from ufo.runtime.billing.accounting import AGENT_LABEL, CONVERSATION_LABEL, MEMBER_LABEL, TURN_LABEL
 from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget
+from ufo.runtime.turns.cancellation import cancel_one_turn
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import NON_TERMINAL_STATUSES, Turn
@@ -501,8 +502,57 @@ async def test_close_leaves_the_sessions_of_a_turn_whose_terminal_is_not_committ
         await _commit(seeded, status)
         await sessions.close()
     left = fake.state.calls[sent:]
-    await _commit(seeded, "cancelled")
+    await _commit(seeded, "failed")
     await sessions.close()
 
     assert left == []
     assert fake.state.sessions[opened.id]["revoked_at"] is not None
+
+
+@dataclass
+class _CancelWitness:
+    fake: Starlette
+    seen: list[tuple[str, bool]] = field(default_factory=list)
+
+    async def cancel_workflow_async(self, workflow_id: str) -> None:
+        async with workspace_tx() as connection:
+            status = (
+                await connection.execute(
+                    sa.select(tables.turn.c.status).where(tables.turn.c.id == UUID(workflow_id))
+                )
+            ).scalar_one()
+        revoked = any(held["revoked_at"] is not None for held in self.fake.state.sessions.values())
+        self.seen.append((status, revoked))
+
+
+async def test_a_cancel_revokes_the_turns_sessions_once_cancelled_is_committed(
+    fake: Starlette, proxy: ProxySessions, seeded: _Seeded
+) -> None:
+    sessions = _sessions(seeded, proxy)
+    base = await sessions.reconcile("turn")
+    acting = await sessions.reconcile(seeded.member_b)
+    assert base is not None and acting is not None
+    witness = _CancelWitness(fake)
+
+    with ws(seeded.turn.workspace_id):
+        frame = await cancel_one_turn(witness, proxy, seeded.turn.id)
+
+    assert frame is not None and frame.status == "cancelled"
+    assert witness.seen == [("running", False)]
+    assert {
+        session_id: held["revoked_at"] is not None
+        for session_id, held in fake.state.sessions.items()
+    } == {base.id: True, acting.id: True}
+
+
+async def test_a_cancel_leaves_the_sessions_of_a_turn_with_a_followed_detached_command(
+    fake: Starlette, proxy: ProxySessions, seeded: _Seeded
+) -> None:
+    base = await _sessions(seeded, proxy).reconcile("turn")
+    assert base is not None
+    with ws(seeded.turn.workspace_id):
+        await mark_detached(seeded.turn, "build", "/home/user/.ufo/runs/build")
+        frame = await cancel_one_turn(_CancelWitness(fake), proxy, seeded.turn.id)
+
+    assert frame is not None
+    assert fake.state.sessions[base.id]["revoked_at"] is None

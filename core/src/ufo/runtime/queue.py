@@ -12,7 +12,6 @@ from uuid import UUID
 
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient
-from dbos._error import DBOSWorkflowCancelledError
 from pydantic import BaseModel
 
 from ufo.blob import WorkspaceBlobStore
@@ -940,6 +939,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             registry=runtime.subagents,
             parent=turn,
             audience=audience,
+            sessions=runtime.sessions,
             hub=runtime.hub,
             invoker=runtime.invoker_for(turn.workspace_id),
             spend=runtime.spend,
@@ -1194,9 +1194,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             frame = await run()
         except TurnParked:
             return "parked"
-        except DBOSWorkflowCancelledError:
-            await sessions.close()
-            raise
         except Exception as error:
             await _commit_failed_terminal(runtime.hub, UUID(turn_id), attempt, error)
             await sessions.close()

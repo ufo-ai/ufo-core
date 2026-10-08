@@ -15,6 +15,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import ToolSchema
 from ufo.harness.o11y import current_traceparent, log
+from ufo.runtime.access.proxy_sessions import ProxySessions
 from ufo.runtime.ext.surface import TurnTailer
 from ufo.runtime.hub import Parked, Terminal
 from ufo.runtime.objects import BoundAction
@@ -62,6 +63,7 @@ class ToolBridge:
     tools: tuple[ToolDef, ...]
     subagents: SubagentRegistry
     subagent_grants: dict[str, frozenset[str]]
+    sessions: ProxySessions | None
     actions: Mapping[str, Mapping[str, BoundAction]] = field(default_factory=dict)
 
     async def request(
@@ -317,7 +319,7 @@ class ToolBridge:
                     case Terminal(frame=terminal):
                         return self._response(terminal)
                     case Parked(message=message):
-                        await cancel_one_turn(self.dbos, turn_id)
+                        await cancel_one_turn(self.dbos, self.sessions, turn_id)
                         return ToolBridgeFailure(error=message)
         raise RuntimeError("tool bridge tail ended without a terminal")
 

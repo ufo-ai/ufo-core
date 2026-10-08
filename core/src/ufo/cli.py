@@ -85,7 +85,14 @@ from ufo.schema.records import (
     DEFAULT_AGENT_NAME,
     ReasoningEffort,
 )
-from ufo.serve import FLEETS, WHOLE_FLEET, declared_flags, deploy_spend, home_surface
+from ufo.serve import (
+    FLEETS,
+    WHOLE_FLEET,
+    declared_flags,
+    deploy_proxy_sessions,
+    deploy_spend,
+    home_surface,
+)
 from ufo.serve import run as serve_run
 
 UFOCTL_DIR_ENV = "UFOCTL_DIR"
@@ -1220,7 +1227,12 @@ async def _cancel_turn(config: Config, turn_id: UUID, named_workspace: str) -> b
                 if found is None:
                     raise click.ClickException(f"no turn {turn_id} in workspace {workspace_id}")
             client = replay_safe_client(config.database.system_url)
-            return await cancel_one_turn(client, turn_id) is not None
+            sessions = deploy_proxy_sessions(config, load_manifests(config.pack.name))
+            try:
+                return await cancel_one_turn(client, sessions, turn_id) is not None
+            finally:
+                if sessions is not None:
+                    await sessions.http.aclose()
     finally:
         await dispose_db()
 

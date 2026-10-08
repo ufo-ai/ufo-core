@@ -1271,6 +1271,7 @@ async def test_a_background_child_wakes_its_parent_with_its_own_result(
         registry=runtime.subagents,
         parent=parent,
         audience=conversation_audience(None),
+        sessions=None,
     )
     (finished,) = await subagents.wait((child_id,))
     assert finished.status == "done"
@@ -2009,6 +2010,7 @@ async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
         parent=parent,
         audience=conversation_audience(None),
         invoker=runtime.invoker_for(parent.workspace_id),
+        sessions=None,
     )
     queued = await subagents.message(
         child_id, FOLLOWUP_INBOUND, dedup_key="turn-1/message_spawn/call-1"
@@ -2087,6 +2089,7 @@ async def test_a_followup_left_pending_by_an_ended_child_runs_as_its_next_turn(
         registry=runtime.subagents,
         parent=parent,
         audience=conversation_audience(None),
+        sessions=None,
     )
     (followup,) = await subagents.wait((followup_id,))
     assert followup.status == "done"

@@ -109,6 +109,7 @@ def _site_link_app(tmp_path: Path, ingress_public_url: str | None) -> FastAPI:
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        proxy_sessions=None,
     )
     return app
 
@@ -144,6 +145,7 @@ def _app(tmp_path: Path) -> FastAPI:
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        proxy_sessions=None,
     )
     return app
 
@@ -176,6 +178,7 @@ def _challenge_app(tmp_path: Path) -> FastAPI:
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        proxy_sessions=None,
     )
     return app
 
@@ -227,6 +230,7 @@ async def test_the_mounted_surface_admits_through_the_process_gate(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        proxy_sessions=None,
     )
     baseline = current_workspace.set(None)
     try:
