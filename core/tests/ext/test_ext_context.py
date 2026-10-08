@@ -52,7 +52,15 @@ from ufo.harness.sandbox.session import (
 from ufo.harness.sandbox.terminal import TerminalGone
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
-from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger, OffTurnSpendRefused
+from ufo.runtime.billing.accounting import (
+    UNGATED_LEDGER,
+    Ledger,
+    OffTurnSpendRefused,
+    ServiceTotal,
+    SpendRollup,
+    SpendTotals,
+    record_probe_egress_request,
+)
 from ufo.runtime.billing.spend import NO_SPEND_GATES, PARK, GateDeploy, SpendDecision, SpendGates
 from ufo.runtime.ext.context import (
     CORE_EXTENSION,
@@ -1359,3 +1367,39 @@ async def test_a_context_wired_with_no_spend_refuses_to_read_or_meter_it(db: Non
             model_job=JOB,
             ledger=UNGATED_LEDGER,
         )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_spend_rollup_reads_the_bound_workspaces_totals_naming_no_member_or_agent(
+    db: None,
+) -> None:
+    workspace_id, neighbor = await _workspace(), await _workspace()
+    member_id = await _member(workspace_id)
+    turn_id = await _seed_turn(workspace_id, await _conversation(workspace_id), 1, "done", DONE)
+    context = context_for("core", frozenset(), ledger=UNGATED_LEDGER)
+    price = ModelPrice(42_000, 0, 0, 0, 0)
+    with ws(neighbor):
+        await context.meter_tokens(uuid4(), MODEL, Usage(input_tokens=1_000), price, byok=False)
+    with ws(workspace_id):
+        await context.meter_tokens(uuid4(), MODEL, Usage(input_tokens=2_000), price, byok=False)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .where(tables.turn.c.id == turn_id)
+                .values(speaker_member_id=member_id)
+            )
+            await UNGATED_LEDGER.record_turn_usage(
+                connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1_000)
+            )
+            await record_probe_egress_request(connection, workspace_id)
+        totals = await context.spend_rollup(None)
+        async with workspace_tx() as connection:
+            report = await SpendRollup(workspace_id).read(connection, None)
+    named = {total.subject_id for total in (*report.by_member, *report.by_agent)} - {None}
+    assert member_id in named
+    assert len(named) == 2
+    assert not any(str(subject) in repr(totals) for subject in named)
+    assert totals == SpendTotals(
+        None, report.total_micro_usd, report.by_dimension, report.by_service, report.usage
+    )
+    assert totals.by_service == (ServiceTotal("models", 5_084), ServiceTotal("proxy", 0))
