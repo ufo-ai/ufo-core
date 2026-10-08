@@ -491,8 +491,9 @@ class MemoryApi:
         return await self.cloud.send("POST", MEMORIES_PATH, body=write, partial=True, answer=Memory)
 
     async def search(self, search: Search) -> tuple[Memory, ...]:
-        """The matches of `search` in rank order. Each query is cut to `QUERY_MAX_CHARS` at a word
-        and a query left empty is dropped; with none left nothing is sent."""
+        """The matches of `search` in rank order. Each query is cut to `QUERY_MAX_CHARS` at its last
+        whitespace within the bound, or at the bound when it has none there, and a query blank after
+        stripping is dropped; with none left nothing is sent."""
         if search.limit > SEARCH_LIMIT_MAX:
             raise ValueError(f"A memory search answers at most {SEARCH_LIMIT_MAX} matches.")
         if len(search.queries) > QUERIES_MAX:
@@ -670,7 +671,7 @@ def _query_at_a_word(query: str) -> str:
     if len(query) <= QUERY_MAX_CHARS:
         return query
     match = QUERY_AT_A_WORD.match(query)
-    return "" if match is None else match.group(1).rstrip()
+    return query[:QUERY_MAX_CHARS] if match is None else match.group(1).rstrip()
 
 
 def _subjects(subjects: Collection[str]) -> tuple[tuple[str, str], ...]:

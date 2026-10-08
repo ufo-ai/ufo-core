@@ -333,10 +333,25 @@ async def test_a_query_past_the_bound_is_cut_at_a_word() -> None:
     assert short == "What does Alice drink?"
 
 
+async def test_a_query_without_whitespace_in_the_bound_is_cut_at_the_bound() -> None:
+    stand_in, api = _client()
+    unbroken = "茶" * (QUERY_MAX_CHARS + 1)
+    search = Search(
+        queries=[unbroken, "   "],
+        subjects=["shared"],
+        limit=8,
+        reach=Reach(agent_id=AGENT, member_id=MEMBER),
+    )
+
+    await api.search(search)
+
+    assert _sent(stand_in, "memory.search").body["queries"] == [unbroken[:QUERY_MAX_CHARS]]
+
+
 async def test_an_empty_query_sends_no_search() -> None:
     stand_in, api = _client()
     search = Search(
-        queries=["   ", "x" * (QUERY_MAX_CHARS + 1)],
+        queries=["   ", "\t\n"],
         subjects=["shared"],
         limit=8,
         reach=Reach(agent_id=AGENT, member_id=None),
