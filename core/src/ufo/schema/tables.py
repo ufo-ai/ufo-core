@@ -209,6 +209,7 @@ conversation = sa.Table(
     ),
     sa.Column("sandbox_conversation_id", sa.Uuid, nullable=True),
     sa.Column("sandbox_handle", sa.Text, nullable=True),
+    sa.Column("detached_sandbox_handle", sa.Text, nullable=True),
     sa.Column("archived_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
