@@ -1518,16 +1518,17 @@ class ExtensionContext:
             self.artifact_token_secret, self.public_base_url, self.workspace_id, artifact
         )
 
-    async def resolve_secret(self, name: str, host: str) -> "SecretValue":
+    async def resolve_secret(self, name: str, host: str, member_id: UUID | None) -> "SecretValue":
         """The value the secret `name` takes on the wire to `host` for the bound workspace: a
         credential slot, `connection:<id>`, or `ufo/models`, each released only on a host its
-        declaration admits and otherwise `SecretUnbound`. Only a manifest declaring `vault_read`
-        asks, and the deploy's vault answers."""
+        declaration admits and otherwise `SecretUnbound`. `member_id` is the member the asking
+        session was created for: a connection that is not shared answers only its owner. Only a
+        manifest declaring `vault_read` asks, and the deploy's vault answers."""
         if not self.vault_read_allowed:
             raise PermissionError("This extension cannot resolve secrets.")
         if self.vault is None:
             raise RuntimeError("resolve_secret requires the deploy's vault; none is wired.")
-        return await self.vault.resolve(self.workspace_id, name, host)
+        return await self.vault.resolve(self.workspace_id, name, host, member_id)
 
     async def scheduled_runs(
         self,

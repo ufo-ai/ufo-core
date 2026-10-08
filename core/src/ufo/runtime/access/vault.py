@@ -4,7 +4,8 @@ A session policy binds each secret by name and carries no value (`egress_rules`)
 credential slot by its own name, a connection as `connection:<id>`, the deploy's model key as
 `ufo/models`. This resolves such a name to its value, and each name answers only for the hosts its
 declaration names — an injecting slot's host, a connection's own host and its CLI's git host, a
-model provider's API host — so a policy binding a name on any other host is handed nothing. It is
+model provider's API host — so a policy binding a name on any other host is handed nothing. A
+member's private connection answers only a session created for that member. It is
 core's because the values sit where only core reaches: the encrypted credential store, the
 connection rows, each connector's broker read, and the deploy's environment."""
 
@@ -51,19 +52,22 @@ class VaultReads:
     clis: Mapping[str, CliCredential]
     model_key_envs: Mapping[str, str]
 
-    async def resolve(self, workspace_id: UUID, name: str, host: str) -> SecretValue:
+    async def resolve(
+        self, workspace_id: UUID, name: str, host: str, member_id: UUID | None
+    ) -> SecretValue:
         """The value `name` takes on the wire to `host` for the workspace, or `SecretUnbound` when
         no declaration binds it there or nothing is stored. `ufo/models` is the deploy's key for a
         model provider's host, `connection:<id>` the token its connector's broker holds for that
-        connection's own account, and any other name a workspace credential slot, read only on
-        the host its injection resolves to. No value here carries an expiry, and a broker's fault
+        connection's own account, released only when the connection is shared or `member_id` owns
+        it, and any other name a workspace credential slot, read only on the host its injection
+        resolves to whoever asks. No value here carries an expiry, and a broker's fault
         propagates."""
         with ws(workspace_id):
             if name == UFO_MODELS_SECRET:
                 env = self.model_key_envs.get(host)
                 value = None if env is None else deploy_env(env)
             elif name.startswith(CONNECTION_SECRET_PREFIX):
-                value = await self._connection_token(workspace_id, name, host)
+                value = await self._connection_token(workspace_id, name, host, member_id)
             else:
                 value = await self._slot_value(workspace_id, name, host)
         if value is None:
@@ -72,7 +76,9 @@ class VaultReads:
             )
         return SecretValue(value=value, expires_at=None)
 
-    async def _connection_token(self, workspace_id: UUID, name: str, host: str) -> str | None:
+    async def _connection_token(
+        self, workspace_id: UUID, name: str, host: str, member_id: UUID | None
+    ) -> str | None:
         try:
             connection_id = UUID(name.removeprefix(CONNECTION_SECRET_PREFIX))
         except ValueError:
@@ -84,13 +90,15 @@ class VaultReads:
                         tables.connection.c.provider,
                         tables.connection.c.account_id,
                         tables.connection.c.host,
+                        tables.connection.c.shared,
+                        tables.connection.c.owner_member_id,
                     ).where(
                         tables.connection.c.workspace_id == workspace_id,
                         tables.connection.c.id == connection_id,
                     )
                 )
             ).one_or_none()
-        if row is None:
+        if row is None or not (row.shared or row.owner_member_id == member_id):
             return None
         cli = self.clis.get(row.provider)
         git_host = None if cli is None or cli.git is None else cli.git.host

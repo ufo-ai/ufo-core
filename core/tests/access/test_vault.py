@@ -131,7 +131,9 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-async def _connection(workspace_id: UUID, provider: str, account_id: str, host: str) -> str:
+async def _connection(
+    workspace_id: UUID, provider: str, account_id: str, host: str, owner: UUID | None = None
+) -> str:
     connection_id = uuid4()
     with ws(workspace_id):
         async with workspace_tx() as connection:
@@ -142,7 +144,8 @@ async def _connection(workspace_id: UUID, provider: str, account_id: str, host: 
                     provider=provider,
                     account_id=account_id,
                     host=host,
-                    shared=True,
+                    owner_member_id=owner,
+                    shared=owner is None,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -156,9 +159,11 @@ async def _fill(store: CredentialStore, workspace_id: UUID, values: dict[str, st
             await store.put(workspace_id, slot, value)
 
 
-async def _unbound(vault: VaultReads, workspace_id: UUID, name: str, host: str) -> None:
+async def _unbound(
+    vault: VaultReads, workspace_id: UUID, name: str, host: str, member_id: UUID | None = None
+) -> None:
     with pytest.raises(SecretUnbound):
-        await vault.resolve(workspace_id, name, host)
+        await vault.resolve(workspace_id, name, host, member_id)
 
 
 def _model_keys(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -177,10 +182,10 @@ async def test_a_keyed_slot_resolves_on_its_own_host_once_filled(db: None) -> No
     vault = _vault(store, _Broker())
     await _fill(store, filled, {ACME_SLOT.name: ACME_SECRET, DECLARED_SLOT.name: DECLARED_SECRET})
 
-    assert await vault.resolve(filled, ACME_SLOT.name, ACME_HOST) == SecretValue(
+    assert await vault.resolve(filled, ACME_SLOT.name, ACME_HOST, None) == SecretValue(
         value=ACME_SECRET, expires_at=None
     )
-    assert await vault.resolve(filled, DECLARED_SLOT.name, DECLARED_HOST) == SecretValue(
+    assert await vault.resolve(filled, DECLARED_SLOT.name, DECLARED_HOST, None) == SecretValue(
         value=DECLARED_SECRET, expires_at=None
     )
     await _unbound(vault, filled, ACME_SLOT.name, OTHER_HOST)
@@ -194,7 +199,7 @@ async def test_a_refusal_survives_the_pickle_a_durable_step_records_it_in(db: No
     vault, workspace_id = _vault(_store(), _Broker()), await _workspace()
 
     with pytest.raises(SecretUnbound) as unbound:
-        await vault.resolve(workspace_id, ACME_SLOT.name, OTHER_HOST)
+        await vault.resolve(workspace_id, ACME_SLOT.name, OTHER_HOST, None)
 
     assert pickle.loads(pickle.dumps(unbound.value)).args == unbound.value.args
 
@@ -204,7 +209,7 @@ async def test_a_host_choice_slot_resolves_on_the_selected_host_only(db: None) -
     vault = _vault(store, _Broker())
     await _fill(store, workspace_id, {REGIONAL_SLOT.name: REGIONAL_SECRET, SITE_SLOT.name: EU_HOST})
 
-    assert await vault.resolve(workspace_id, REGIONAL_SLOT.name, EU_HOST) == SecretValue(
+    assert await vault.resolve(workspace_id, REGIONAL_SLOT.name, EU_HOST, None) == SecretValue(
         value=REGIONAL_SECRET, expires_at=None
     )
     await _unbound(vault, workspace_id, REGIONAL_SLOT.name, US_HOST)
@@ -229,7 +234,7 @@ async def test_a_connection_resolves_to_its_own_accounts_token_on_its_hosts(db: 
     elsewhere = await _connection(other, GITHUB, "acct-elsewhere", GITHUB_HOST)
 
     for host in (GITHUB_HOST, GIT.host):
-        assert await vault.resolve(workspace_id, github, host) == SecretValue(
+        assert await vault.resolve(workspace_id, github, host, None) == SecretValue(
             value="token-acct-gh", expires_at=None
         )
     await _unbound(vault, workspace_id, github, "example.com")
@@ -240,6 +245,44 @@ async def test_a_connection_resolves_to_its_own_accounts_token_on_its_hosts(db: 
     assert broker.asked == [(workspace_id, "acct-gh"), (workspace_id, "acct-gh")]
 
 
+async def _member(workspace_id: UUID) -> UUID:
+    member_id = uuid4()
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.member).values(
+                    id=member_id,
+                    workspace_id=workspace_id,
+                    email=f"{member_id}@example.test",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    return member_id
+
+
+async def test_a_private_connection_resolves_only_for_its_owner(db: None) -> None:
+    store, workspace_id = _store(), await _workspace()
+    vault = _vault(store, _Broker())
+    owner, other = await _member(workspace_id), await _member(workspace_id)
+    private = await _connection(workspace_id, GITHUB, "acct-owner", GITHUB_HOST, owner)
+    shared = await _connection(workspace_id, GITHUB, "acct-shared", GITHUB_HOST)
+    await _fill(store, workspace_id, {ACME_SLOT.name: ACME_SECRET})
+
+    assert await vault.resolve(workspace_id, private, GITHUB_HOST, owner) == SecretValue(
+        value="token-acct-owner", expires_at=None
+    )
+    await _unbound(vault, workspace_id, private, GITHUB_HOST, other)
+    await _unbound(vault, workspace_id, private, GITHUB_HOST, None)
+    for member_id in (owner, other, None):
+        assert await vault.resolve(workspace_id, shared, GITHUB_HOST, member_id) == SecretValue(
+            value="token-acct-shared", expires_at=None
+        )
+        assert await vault.resolve(
+            workspace_id, ACME_SLOT.name, ACME_HOST, member_id
+        ) == SecretValue(value=ACME_SECRET, expires_at=None)
+
+
 async def test_the_model_key_resolves_on_each_provider_host_from_the_env_the_config_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -247,7 +290,7 @@ async def test_the_model_key_resolves_on_each_provider_host_from_the_env_the_con
     vault, workspace_id = _vault(_store(), _Broker()), uuid4()
 
     resolved = {
-        host: await vault.resolve(workspace_id, UFO_MODELS_SECRET, host)
+        host: await vault.resolve(workspace_id, UFO_MODELS_SECRET, host, None)
         for host in ("api.anthropic.com", "api.openai.com", "openrouter.ai")
     }
 
@@ -263,7 +306,9 @@ async def test_the_model_key_resolves_on_each_provider_host_from_the_env_the_con
 
 
 async def _resolve_route(ctx: ExtensionContext, request: Request) -> Response:
-    resolved = await ctx.resolve_secret(request.query_params["name"], request.query_params["host"])
+    resolved = await ctx.resolve_secret(
+        request.query_params["name"], request.query_params["host"], None
+    )
     return PlainTextResponse(resolved.value)
 
 
@@ -328,7 +373,7 @@ async def test_no_resolve_puts_a_value_in_a_log_record(
     caplog.set_level(logging.DEBUG)
 
     resolved = [
-        await vault.resolve(workspace_id, name, host)
+        await vault.resolve(workspace_id, name, host, None)
         for name, host in (
             (ACME_SLOT.name, ACME_HOST),
             (REGIONAL_SLOT.name, EU_HOST),

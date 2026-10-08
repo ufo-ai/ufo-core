@@ -75,7 +75,7 @@ from ufo.runtime.access.proxy_sessions import (
     ProxySessions,
 )
 from ufo.runtime.access.turn_sessions import PROBE_SESSION_MARGIN_SECONDS, ProbeSessions
-from ufo.runtime.access.vault import SecretValue, VaultReads
+from ufo.runtime.access.vault import SecretUnbound, SecretValue, VaultReads
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.billing.accounting import (
@@ -1579,6 +1579,11 @@ async def test_a_context_wired_with_no_spend_refuses_to_read_or_meter_it(db: Non
         )
 
 
+class _AccountToken:
+    async def secret(self, workspace_id: UUID, account_id: str) -> str:
+        return f"token-{account_id}"
+
+
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_only_a_vault_read_context_wired_with_the_vault_resolves_a_secret(
     db: None,
@@ -1595,22 +1600,47 @@ async def test_only_a_vault_read_context_wired_with_the_vault_resolves_a_secret(
         ),
     )
     await store.put(workspace_id, slot.name, "sk-acme")
-    vault = VaultReads(store, WorkspaceSlots(deploy=(slot,)), {}, {})
+    vault = VaultReads(
+        store,
+        WorkspaceSlots(deploy=(slot,)),
+        {"hub": CliCredential(env="HUB_TOKEN", header="authorization", secret=_AccountToken())},
+        {},
+    )
+    connection_id = uuid4()
+    with ws(workspace_id):
+        owner, other = await _member(workspace_id), await _member(workspace_id)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.connection).values(
+                    id=connection_id,
+                    workspace_id=workspace_id,
+                    provider="hub",
+                    account_id="acct-owner",
+                    host="api.hub.test",
+                    owner_member_id=owner,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    private = f"{CONNECTION_SECRET_PREFIX}{connection_id}"
+    reader = context_for("core", frozenset(), vault_read=True, vault=vault)
 
     with ws(workspace_id):
-        resolved = await context_for(
-            "core", frozenset(), vault_read=True, vault=vault
-        ).resolve_secret(slot.name, "api.acmekeys.com")
+        resolved = await reader.resolve_secret(slot.name, "api.acmekeys.com", None)
+        owned = await reader.resolve_secret(private, "api.hub.test", owner)
+        with pytest.raises(SecretUnbound):
+            await reader.resolve_secret(private, "api.hub.test", other)
         with pytest.raises(PermissionError, match="cannot resolve secrets"):
             await context_for("core", frozenset(), vault=vault).resolve_secret(
-                slot.name, "api.acmekeys.com"
+                slot.name, "api.acmekeys.com", None
             )
         with pytest.raises(RuntimeError, match="vault; none is wired"):
             await context_for("core", frozenset(), vault_read=True).resolve_secret(
-                slot.name, "api.acmekeys.com"
+                slot.name, "api.acmekeys.com", None
             )
 
     assert resolved == SecretValue(value="sk-acme", expires_at=None)
+    assert owned == SecretValue(value="token-acct-owner", expires_at=None)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
