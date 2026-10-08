@@ -22,6 +22,7 @@ from ufo.runtime.access.proxy_sessions import (
     AGENT_LABEL,
     CONVERSATION_LABEL,
     IDEMPOTENCY_HEADER,
+    INVALID_REQUEST_CODE,
     MEMBER_LABEL,
     PROXY_CALL_TIMEOUT_SECONDS,
     PROXY_SESSION_TTL_SECONDS,
@@ -408,6 +409,23 @@ async def test_a_fault_is_a_provider_outage_and_a_refusal_is_refused(
     async with httpx.AsyncClient(transport=httpx.MockTransport(unreachable)) as http:
         with pytest.raises(SandboxProviderUnavailable, match="ConnectError"):
             await replace(sessions, http=http).renew(workspace_id, uuid4(), 60)
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [(413, b"<html>Request Entity Too Large</html>"), (400, b'{"detail": "bad"}')],
+)
+async def test_a_4xx_without_the_error_envelope_is_refused_as_an_invalid_request(
+    sessions: ProxySessions, workspace_id: UUID, status: int, body: bytes
+) -> None:
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, content=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as http:
+        with pytest.raises(ProxyRefused) as refused:
+            await replace(sessions, http=http).renew(workspace_id, uuid4(), 60)
+
+    assert (refused.value.status, refused.value.error.code) == (status, INVALID_REQUEST_CODE)
 
 
 async def test_nothing_secret_reaches_a_log_record(

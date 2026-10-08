@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import httpx
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 
 from ufo.harness.sandbox.session import SandboxProviderUnavailable
 from ufo.runtime.access.egress_rules import SessionPolicy
@@ -30,6 +30,7 @@ IDEMPOTENCY_HEADER = "Idempotency-Key"
 SESSIONS_PATH = "/v1/sessions"
 SESSION_REVOKED_CODE = "session_revoked"
 SESSION_EXPIRED_CODE = "conflict"
+INVALID_REQUEST_CODE = "invalid_request"
 CONVERSATION_LABEL = "conversation"
 AGENT_LABEL = "agent"
 MEMBER_LABEL = "member"
@@ -123,10 +124,16 @@ class ProxyError(BaseModel):
     ceiling: str | None = None
 
 
+class _ErrorEnvelope(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore")
+    error: ProxyError
+
+
 class ProxyRefused(RuntimeError):
-    """A 4xx from the proxy service: `status` and the envelope's `error`. A replayed create that
-    answers a revoked session raises the `409 session_revoked` a patch or a renew of that session
-    answers; the create itself answers 200, as a revoke of it does."""
+    """A 4xx from the proxy service: `status` and the envelope's `error`, or `invalid_request` when
+    the body carries no envelope. A replayed create that answers a revoked session raises the
+    `409 session_revoked` a patch or a renew of that session answers; the create itself answers
+    200, as a revoke of it does."""
 
     def __init__(self, status: int, error: ProxyError, summary: str | None = None) -> None:
         super().__init__(
@@ -281,6 +288,12 @@ class ProxySessions:
         if response.is_server_error:
             raise SandboxProviderUnavailable(f"the proxy service answered {response.status_code}")
         if response.is_client_error:
-            refusal = ProxyError.model_validate(response.json()["error"])
+            try:
+                refusal = _ErrorEnvelope.model_validate_json(response.content).error
+            except ValidationError:
+                refusal = ProxyError(
+                    code=INVALID_REQUEST_CODE,
+                    message="The proxy service answered without its error envelope.",
+                )
             raise ProxyRefused(response.status_code, refusal)
         return response
