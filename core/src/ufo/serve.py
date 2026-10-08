@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 import httpx
 import uvicorn
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from dbos import DBOS, DBOSClient
 from fastapi import FastAPI, WebSocket
 from openfeature.provider import FeatureProvider
@@ -96,7 +97,13 @@ from ufo.runtime.access.credentials import (
     CredentialStore,
     deploy_env,
 )
-from ufo.runtime.access.egress_control import CACHE_CONTROL_TOKEN_ENV, EgressControl
+from ufo.runtime.access.egress_control import (
+    CACHE_CONTROL_TOKEN_ENV,
+    PREVIEW_RELAY_TIMEOUT_SECONDS,
+    PROXY_PUBLIC_KEY_ENV,
+    EgressControl,
+    load_proxy_public_key,
+)
 from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import (
     connector_transfer_hosts,
@@ -1532,26 +1539,46 @@ def _proxy_control(
             None if served is None or preview is None else f"{served}/internal/egress/preview"
         ),
     )
+    proxy_url = config.sandbox.proxy_url
+    stamped = proxy_url is not None
     control = EgressControl(
-        control_token=secrets.token_urlsafe(32),
         cache_control_token=os.environ.get(CACHE_CONTROL_TOKEN_ENV) or secrets.token_urlsafe(32),
         resolver=resolver,
         run_tokens=run_tokens,
         bridge=bridge,
+        stamp_key=_proxy_public_key() if stamped else None,
+        preview=preview,
+        http=(
+            httpx.AsyncClient(timeout=PREVIEW_RELAY_TIMEOUT_SECONDS)
+            if stamped and preview is not None
+            else None
+        ),
     )
-    app.include_router(control.router())
     app.include_router(control.git_credential_router())
-    proxy_url = config.sandbox.proxy_url
-    sessions = (
-        None
-        if proxy_url is None
-        else ProxySessions(
-            proxy_url.rstrip("/"),
-            proxy_credentials(manifests),
-            httpx.AsyncClient(timeout=PROXY_CALL_TIMEOUT_SECONDS),
+    if proxy_url is None:
+        return control, resolver, None
+    if public_base_url is None or not public_base_url.startswith("https://"):
+        raise RuntimeError(
+            "[connect] public_base_url must be this deploy's https:// URL when [sandbox] proxy_url "
+            "is set, because the proxy service relays its routes only to a TLS upstream."
         )
+    app.include_router(control.router())
+    sessions = ProxySessions(
+        proxy_url.rstrip("/"),
+        proxy_credentials(manifests),
+        httpx.AsyncClient(timeout=PROXY_CALL_TIMEOUT_SECONDS),
     )
     return control, resolver, sessions
+
+
+def _proxy_public_key() -> Ed25519PublicKey:
+    raw = os.environ.get(PROXY_PUBLIC_KEY_ENV)
+    if not raw:
+        raise RuntimeError(
+            f"{PROXY_PUBLIC_KEY_ENV} must hold the proxy service's Ed25519 public key so the "
+            "routes it relays can be verified."
+        )
+    return load_proxy_public_key(raw)
 
 
 WILDCARD_BINDS = frozenset({"0.0.0.0", "::"})

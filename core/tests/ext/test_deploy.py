@@ -226,7 +226,9 @@ def test_serve_refuses_a_deploy_route_it_cannot_guard(
     else:
         monkeypatch.delenv(sample.DEPLOY_TOKEN_ENV, raising=False)
     app = FastAPI()
-    app.add_route("/internal/egress/tool-bridge", lambda request: Response(), methods=["POST"])
+    app.add_route(
+        "/internal/egress/tool-bridge/request", lambda request: Response(), methods=["POST"]
+    )
     with pytest.raises(RuntimeError, match=refusal):
         _mount_deploy_routes(
             app, (replace(_sample(), **changes),), _blob(tmp_path), Provisioning(founded=()), None

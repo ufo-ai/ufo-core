@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import base64
 import inspect
 import json
 import shutil
@@ -14,6 +15,8 @@ import pytest
 import sqlalchemy as sa
 import ufo_ext_sample.manifest as sample
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.engine import make_url
@@ -49,7 +52,7 @@ from ufo.host.ext.loader import deploy_claims, load_manifests
 from ufo.proxy_serve import MODEL_KEY_ENVS, OWNER_DSN_ENV, model_bindings
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.access.egress_control import CACHE_CONTROL_TOKEN_ENV
+from ufo.runtime.access.egress_control import CACHE_CONTROL_TOKEN_ENV, PROXY_PUBLIC_KEY_ENV
 from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import (
     RUN_HEADER,
@@ -655,22 +658,52 @@ def test_model_bindings_fails_loud_with_no_key(monkeypatch: pytest.MonkeyPatch) 
         model_bindings(_hosted_config())
 
 
-def test_proxy_control_mounts_the_git_credential_route(monkeypatch: pytest.MonkeyPatch) -> None:
+def _proxied_config(public_base_url: str | None = "https://serve.test") -> Config:
+    return _hosted_config().model_copy(
+        update={
+            "sandbox": SandboxConfig(
+                backend="local",
+                proxy_url="https://proxy.test",
+                preview_service="ufo-preview.test:8930",
+            ),
+            "connect": ConnectConfig(public_base_url=public_base_url),
+        }
+    )
+
+
+def _proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(serve.PREVIEW_TOKEN_ENV, "preview-real")
     monkeypatch.setenv(CACHE_CONTROL_TOKEN_ENV, "cache-control-secret")
+    monkeypatch.setenv(
+        PROXY_PUBLIC_KEY_ENV,
+        base64.b64encode(
+            Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        ).decode(),
+    )
+
+
+def test_proxy_control_mounts_the_stamp_routes_and_builds_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _proxy_env(monkeypatch)
     app = FastAPI()
 
     control, rules, sessions = serve._proxy_control(
-        app, _hosted_config(), (), None, RUN_TOKENS, _blob(), None
+        app, _proxied_config(), (), None, RUN_TOKENS, _blob(), None
     )
 
     client = TestClient(app)
     assert control.resolver is rules
+    assert control.stamp_key is not None
+    assert control.preview == (("ufo-preview.test", 8930), "preview-real")
     assert sessions is not None
-    assert sessions.base_url == _hosted_config().sandbox.proxy_url.rstrip("/")
+    assert sessions.base_url == "https://proxy.test"
     assert sessions.credentials is None
     assert control.cache_control_token == "cache-control-secret"
+    assert client.post("/internal/egress/tool-bridge/request", json={}).status_code == 403
+    assert client.post("/internal/egress/preview/render", content=b"x").status_code == 403
     assert client.post("/internal/git-credential", json={}).status_code == 401
     answered = client.post(
         "/internal/git-credential",
@@ -678,6 +711,30 @@ def test_proxy_control_mounts_the_git_credential_route(monkeypatch: pytest.Monke
         headers={"authorization": "Bearer cache-control-secret"},
     )
     assert (answered.status_code, answered.json()) == (200, {"principal": "public"})
+
+
+def test_proxy_control_requires_the_proxy_public_key_when_a_proxy_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _proxy_env(monkeypatch)
+    for value in (None, "", "not-a-key"):
+        if value is None:
+            monkeypatch.delenv(PROXY_PUBLIC_KEY_ENV)
+        else:
+            monkeypatch.setenv(PROXY_PUBLIC_KEY_ENV, value)
+        with pytest.raises(RuntimeError, match=PROXY_PUBLIC_KEY_ENV):
+            serve._proxy_control(FastAPI(), _proxied_config(), (), None, RUN_TOKENS, _blob(), None)
+
+
+def test_proxy_control_requires_an_https_public_base_url_when_a_proxy_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _proxy_env(monkeypatch)
+    for base in (None, "http://serve.test"):
+        with pytest.raises(RuntimeError, match=r"\[connect\] public_base_url"):
+            serve._proxy_control(
+                FastAPI(), _proxied_config(base), (), None, RUN_TOKENS, _blob(), None
+            )
 
 
 def test_preview_settings_pair_the_service_with_its_real_token(
@@ -704,7 +761,7 @@ def test_preview_settings_pair_the_service_with_its_real_token(
     )
 
 
-def test_proxy_control_boots_a_local_serve_with_no_proxy_url(
+def test_proxy_control_boots_with_no_proxy_url_and_no_stamp_routes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`ufoctl serve` alone comes up with no proxy service and no deploy secret beside it — the
@@ -712,15 +769,19 @@ def test_proxy_control_boots_a_local_serve_with_no_proxy_url(
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv(CACHE_CONTROL_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(PROXY_PUBLIC_KEY_ENV, raising=False)
     app = FastAPI()
 
     control, _, sessions = serve._proxy_control(
         app, _local_config(), (), None, RUN_TOKENS, _blob(), None
     )
 
+    client = TestClient(app)
     assert sessions is None
+    assert control.stamp_key is None
     assert control.cache_control_token
-    assert TestClient(app).post("/internal/git-credential", json={}).status_code == 401
+    assert client.post("/internal/egress/tool-bridge/request", json={}).status_code == 404
+    assert client.post("/internal/git-credential", json={}).status_code == 401
 
 
 def test_shared_owner_dsn_prefers_the_env_over_config(

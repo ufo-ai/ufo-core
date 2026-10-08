@@ -68,25 +68,21 @@ def _check_shell_path_expands_only_the_runtime_home_prefix() -> None:
     assert shell_path("/workspace/run file.mjs") == "'/workspace/run file.mjs'"
 
 
-def _basic(username: str) -> str:
-    return "Basic " + base64.b64encode(f"{username}:ufo".encode()).decode()
-
-
-def _check_run_token_round_trips_encode_then_proxy_auth() -> None:
+def _check_run_token_round_trips_encode_then_decode() -> None:
     token = RunToken(workspace_id=uuid4(), turn_id=uuid4(), acts_for=uuid4())
-    assert RUN_TOKENS.from_proxy_auth(_basic(RUN_TOKENS.encode(token))) == token
+    assert RUN_TOKENS.decode(RUN_TOKENS.encode(token)) == token
 
 
 def _check_run_token_wire_carries_a_member_the_turn_or_nobody() -> None:
     workspace_id, turn_id, member_id = uuid4(), uuid4(), uuid4()
     for actor, expected in ((str(member_id), member_id), ("-", "turn"), ("~", "nobody")):
         payload = f"ufo-run/{workspace_id}/{turn_id}/{actor}".encode()
-        decoded = RUN_TOKENS.from_proxy_auth(_basic(sign_token(RUN_TOKENS.secret, payload)))
+        decoded = RUN_TOKENS.decode(sign_token(RUN_TOKENS.secret, payload))
         assert decoded == RunToken(workspace_id, turn_id, acts_for=expected)
         assert RUN_TOKENS.encode(decoded) == sign_token(RUN_TOKENS.secret, payload)
-    with pytest.raises(ValueError):
-        RUN_TOKENS.from_proxy_auth(
-            _basic(sign_token(RUN_TOKENS.secret, f"ufo-run/{workspace_id}/{turn_id}".encode()))
+    with pytest.raises(ValueError, match="signed"):
+        RUN_TOKENS.decode(
+            sign_token(RUN_TOKENS.secret, f"ufo-run/{workspace_id}/{turn_id}".encode())
         )
 
 
@@ -95,31 +91,28 @@ def _check_run_token_member_is_keyword_only() -> None:
         RunToken(uuid4(), uuid4(), uuid4())
 
 
-def _check_encoded_token_is_url_safe_userinfo() -> None:
+def _check_encoded_token_is_a_header_value() -> None:
     encoded = RUN_TOKENS.encode(RunToken(workspace_id=uuid4(), turn_id=uuid4()))
     assert all(char.isalnum() or char in "-_." for char in encoded)
 
 
-def _check_from_proxy_auth_rejects_non_basic_scheme() -> None:
-    with pytest.raises(ValueError, match="basic"):
-        RUN_TOKENS.from_proxy_auth("Bearer " + RUN_TOKENS.encode(RunToken(uuid4(), uuid4())))
+def _check_decode_rejects_a_malformed_run_token() -> None:
+    for token in ("", "not-a-run-token", "Basic " + RUN_TOKENS.encode(RunToken(uuid4(), uuid4()))):
+        with pytest.raises(ValueError, match="signed"):
+            RUN_TOKENS.decode(token)
 
 
-def _check_from_proxy_auth_rejects_missing_header() -> None:
-    with pytest.raises(ValueError, match="basic"):
-        RUN_TOKENS.from_proxy_auth("")
-
-
-def _check_from_proxy_auth_rejects_a_malformed_run_token() -> None:
-    with pytest.raises(ValueError):
-        RUN_TOKENS.from_proxy_auth(_basic("not-a-run-token"))
+def _check_decode_rejects_another_domain() -> None:
+    payload = f"ufo-session/{uuid4()}/{uuid4()}/-".encode()
+    with pytest.raises(ValueError, match="signed"):
+        RUN_TOKENS.decode(sign_token(RUN_TOKENS.secret, payload))
 
 
 def _check_run_token_rejects_a_valid_shape_signed_by_another_deployment() -> None:
     run = RunToken(uuid4(), uuid4())
     forged = RunTokenCodec(b"other-deployment").encode(run)
     with pytest.raises(ValueError, match="signed"):
-        RUN_TOKENS.from_proxy_auth(_basic(forged))
+        RUN_TOKENS.decode(forged)
 
 
 async def _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base() -> (
@@ -1353,13 +1346,12 @@ async def test_a_command_that_failed_on_its_own_records_no_timeout(
 def test_sandbox_session_sync_contract() -> None:
     for check in (
         _check_shell_path_expands_only_the_runtime_home_prefix,
-        _check_run_token_round_trips_encode_then_proxy_auth,
+        _check_run_token_round_trips_encode_then_decode,
         _check_run_token_wire_carries_a_member_the_turn_or_nobody,
         _check_run_token_member_is_keyword_only,
-        _check_encoded_token_is_url_safe_userinfo,
-        _check_from_proxy_auth_rejects_non_basic_scheme,
-        _check_from_proxy_auth_rejects_missing_header,
-        _check_from_proxy_auth_rejects_a_malformed_run_token,
+        _check_encoded_token_is_a_header_value,
+        _check_decode_rejects_a_malformed_run_token,
+        _check_decode_rejects_another_domain,
         _check_run_token_rejects_a_valid_shape_signed_by_another_deployment,
         _check_host_argv_names_a_logical_path_under_the_host_root,
         _check_host_argv_leaves_the_substring_that_is_not_this_workspace,

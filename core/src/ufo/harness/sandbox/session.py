@@ -10,7 +10,6 @@ A caller holds a sandbox either way round: `SandboxSession` over one that exists
 over one the first operation creates — the same operations, so no tool knows which it was handed."""
 
 import asyncio
-import base64
 import hashlib
 import json
 import os
@@ -329,15 +328,6 @@ command's env instead — and that difference is the point, because a shell that
 itself moves only its own descendants, leaving every other exec on the tmpfs."""
 
 
-def _basic_username(header: str) -> str:
-    """The username inside a `Proxy-Authorization: Basic` header, where every token class rides: a
-    sandbox client is handed a proxy URL and nothing else, so userinfo is the only channel."""
-    scheme, _, encoded = header.partition(" ")
-    if scheme.lower() != "basic" or not encoded:
-        raise ValueError("proxy authorization is not basic auth")
-    return base64.b64decode(encoded, validate=True).decode("utf-8").split(":", 1)[0]
-
-
 RunActor = UUID | Literal["turn", "nobody"]
 
 
@@ -360,7 +350,8 @@ class RunToken:
 
 @dataclass(frozen=True, slots=True)
 class RunTokenCodec:
-    """Sign the per-turn proxy username and recover only tokens minted by this deployment."""
+    """Sign a run token for the routes core compiles into a turn's session, and recover only tokens
+    minted by this deployment."""
 
     secret: bytes
 
@@ -375,10 +366,9 @@ class RunTokenCodec:
         payload = f"ufo-run/{run.workspace_id}/{run.turn_id}/{actor_wire(run.acts_for)}".encode()
         return sign_token(self.secret, payload)
 
-    def from_proxy_auth(self, header: str) -> RunToken:
-        username = _basic_username(header)
+    def decode(self, token: str) -> RunToken:
         try:
-            fields = verify_token(username, self.secret).decode().split("/")
+            fields = verify_token(token, self.secret).decode().split("/")
             kind, workspace, turn, actor = fields
             if kind != "ufo-run":
                 raise ValueError("invalid run token domain")
