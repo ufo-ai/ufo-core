@@ -40,6 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufo_ext_sources.pages import PAGE_KIND
 
 from ufo.sdk.accounting import MEMORY_SERVICE
+from ufo.sdk.cloud import CloudRefused
 from ufo.sdk.context import ExtensionContext, PageState, SourceReader
 from ufo.sdk.index import TextChunker
 from ufo.sdk.jobs import PAGE_CHANGE_CURSOR_KEY, JobSpec, owner_candidates, stored_key_workspaces
@@ -77,11 +78,13 @@ from ufo.sdk.tools import (
 )
 from ufo_ext_memory.client import (
     ConversationSource,
+    Correct,
     Memory,
     MemoryApi,
     PageSource,
     Reach,
     Search,
+    Write,
 )
 from ufo_ext_memory.condenser import (
     DEDUP_MIN_AGE,
@@ -162,6 +165,7 @@ CORRECTION_SOURCE_PREFIX = "corrects memory/"
 RECORD_FIRST_RUN_ACTION = "record_first_run"
 RECORD_FIRST_RUN_LABEL = "Continue"
 FIRST_RUN_SOURCE_REF = "first run"
+INVALID_REQUEST = "invalid_request"
 RECALL_LIMIT = MAX_RECALLED_MEMORY_IDS
 INTERNAL_ADMISSION = "internal"
 RECALL_SKIP_INTERNAL = "internal_admission"
@@ -777,6 +781,29 @@ async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> To
     if ctx.ext is None:
         raise RuntimeError("memory_update dispatched without its ExtensionContext")
     subject = str(ctx.effective_audience)
+    if ctx.ext.cloud_selects(MEMORY_SERVICE):
+        write: dict[str, object] = {
+            "subject": subject,
+            "body": args.body,
+            "kind": args.memory_kind,
+            "item_class": args.item_class,
+            "confidence": args.confidence,
+            "conversation_id": ctx.turn.conversation_id,
+        }
+        if args.source_ref is not None:
+            write["source_ref"] = args.source_ref
+        if args.deprecates:
+            write["deprecates"] = list(args.deprecates)
+        try:
+            written = await MemoryApi(cloud=ctx.ext.cloud_api()).write(Write.model_validate(write))
+        except CloudRefused as refusal:
+            if refusal.code != INVALID_REQUEST:
+                raise
+            raise ValueError(refusal.message) from refusal
+        return ToolResult(
+            content=(TextContent(text=f"Remembered ({subject})."),),
+            created=(ObjectRef(kind=MEMORY_KIND, name=str(written.id)),),
+        )
     store = store_for(ctx.ext)
     if args.deprecates:
         await admit(store, subject, args.body, args.deprecates)
@@ -806,6 +833,15 @@ async def record_correction_handler(ctx: ToolContext, args: RecordCorrectionInpu
     if ctx.ext is None:
         raise RuntimeError("record_correction dispatched without its ExtensionContext")
     subject = str(ctx.effective_audience)
+    if ctx.ext.cloud_selects(MEMORY_SERVICE):
+        correction = await MemoryApi(cloud=ctx.ext.cloud_api()).correct(
+            args.corrects,
+            Correct(body=args.body, subject=subject, conversation_id=ctx.turn.conversation_id),
+        )
+        return ToolResult(
+            content=(TextContent(text=f"Remembered ({subject})."),),
+            created=(ObjectRef(kind=MEMORY_KIND, name=str(correction.id)),),
+        )
     store = store_for(ctx.ext)
     landed = await store.commit(
         MemoryWrite(
@@ -828,6 +864,19 @@ async def record_first_run_handler(ctx: ToolContext, args: RecordFirstRunInput) 
     if ctx.ext is None:
         raise RuntimeError("record_first_run dispatched without its ExtensionContext")
     subject = str(ctx.effective_audience)
+    if ctx.ext.cloud_selects(MEMORY_SERVICE):
+        await MemoryApi(cloud=ctx.ext.cloud_api()).write(
+            Write(
+                subject=subject,
+                body=args.body,
+                kind=KIND_FACT,
+                item_class=FACT,
+                confidence=DEFAULT_CONFIDENCE,
+                source_ref=FIRST_RUN_SOURCE_REF,
+                conversation_id=ctx.turn.conversation_id,
+            )
+        )
+        return ToolResult(content=(TextContent(text=f"Remembered ({subject})."),))
     await store_for(ctx.ext).commit(
         MemoryWrite(
             subject=subject,

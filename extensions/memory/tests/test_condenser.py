@@ -47,7 +47,6 @@ from ufo_ext_memory.condenser import (
     admitted_curation,
     memory_profile,
 )
-from ufo_ext_memory.manifest import RebuildPageFactsInput
 from ufo_ext_memory.objects import (
     MEMORY_OBJECT,
     MemoryObjects,
@@ -110,8 +109,8 @@ from ufo.runtime.jobs import PageChangeRunner
 from ufo.runtime.objects import ObjectListQuery
 from ufo.runtime.pages import PageChange
 from ufo.runtime.sources.sync import CorePageFeed, feed_handle_for
-from ufo.runtime.tools.context import SpeakerRequired, ToolContext
-from ufo.runtime.turns.audience import conversation_audience, foreign_room_audience
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.turns.audience import foreign_room_audience
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import (
     PLATFORM_FUNDED,
@@ -133,7 +132,6 @@ pytestmark = [
 WHEN = datetime.now(UTC) - timedelta(days=1)
 AUTO_MODEL = "claude-opus-4-8"
 CONSOLIDATE_MODEL_JOB = f"memory:{memory_manifest.CONSOLIDATE_JOB}"
-REBUILD_TOOL = "rebuild_page_facts"
 DERIVE_MODEL_JOB = "core:page_change:memory:derive_facts"
 PAGE_BODY = "The acquisition codename is polaris and the deal closes in the third quarter."
 EDITED_PAGE_BODY = "The acquisition codename is meridian and the deal closes in the third quarter."
@@ -1845,57 +1843,6 @@ async def test_an_unindexed_pages_facts_are_retired_when_the_pass_reaches_it_aga
             )
             == ()
         )
-
-
-async def test_only_an_admin_can_ask_for_the_page_facts_to_be_written_again(db: None) -> None:
-    """The tool is the whole act the portal button submits, so its gate is the button's gate: the
-    cursor stands where it was and the pass reads nothing twice."""
-    workspace_id = await _workspace()
-    scoped = ScopedStore(extension=memory_manifest.NAME)
-    (tool,) = (one for one in memory_manifest.manifest().tools if one.name == REBUILD_TOOL)
-    with ws(workspace_id):
-        await scoped.put(memory_manifest.DERIVE_CURSOR_KEY, "a-cursor")
-        member_id = await _seed_admin(workspace_id, admin=False)
-        with pytest.raises(ValueError, match=memory_manifest.REBUILD_ADMIN_ONLY):
-            await tool.handler(_rebuild_ctx(workspace_id, member_id), RebuildPageFactsInput())
-        assert await scoped.get(memory_manifest.DERIVE_CURSOR_KEY) == "a-cursor"
-
-
-async def test_a_rebuild_asked_for_by_nobody_is_refused_for_want_of_a_speaker(db: None) -> None:
-    """A turn nobody is speaking on holds no admin either, so an admin gate read alone answers a
-    call that merely omitted `requested_by` with an authority the model cannot obtain."""
-    workspace_id = await _workspace()
-    scoped = ScopedStore(extension=memory_manifest.NAME)
-    (tool,) = (one for one in memory_manifest.manifest().tools if one.name == REBUILD_TOOL)
-    with ws(workspace_id):
-        await scoped.put(memory_manifest.DERIVE_CURSOR_KEY, "a-cursor")
-        await _seed_admin(workspace_id)
-        with pytest.raises(SpeakerRequired, match="requested_by"):
-            await tool.handler(_rebuild_ctx(workspace_id, None), RebuildPageFactsInput())
-        assert await scoped.get(memory_manifest.DERIVE_CURSOR_KEY) == "a-cursor"
-
-
-def _rebuild_ctx(workspace_id: UUID, member_id: UUID | None) -> ToolContext:
-    return ToolContext(
-        sandbox=None,  # type: ignore[arg-type]
-        blob=None,  # type: ignore[arg-type]
-        turn=Turn(
-            id=uuid4(),
-            workspace_id=workspace_id,
-            conversation_id=uuid4(),
-            agent_id=uuid4(),
-            seq=1,
-            status="running",
-            inbound="rebuild",
-            created_at=datetime.now(UTC),
-        ),
-        agent=Agent(prompt="p", model="auto"),
-        spawn=None,  # type: ignore[arg-type]
-        speaker_member_id=member_id,
-        audience=conversation_audience(member_id),
-        artifact_token_secret="",
-        ext=context_for(memory_manifest.NAME, frozenset()),
-    )
 
 
 SECTION_MODEL_JOB = f"memory:{memory_manifest.SECTION_JOB}"

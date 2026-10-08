@@ -21,6 +21,7 @@ import ufo_ext_memory.manifest as memory
 from pydantic import ValidationError
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
+from ufo_ext_memory.manifest import RebuildPageFactsInput
 from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT, MemoryObjects
 from ufo_ext_memory.store import (
     MEMORY_BODY_MAX_CHARS,
@@ -40,13 +41,13 @@ from ufo_testsupport.index import default_index
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.runtime.ext.context import ExtensionContext, context_for
+from ufo.runtime.ext.context import ExtensionContext, ScopedStore, context_for
 from ufo.runtime.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
 from ufo.runtime.objects import (
     ObjectListQuery,
 )
 from ufo.runtime.sources.sync import feed_handle_for
-from ufo.runtime.tools.context import SpawnResult, ToolContext, ToolResult
+from ufo.runtime.tools.context import SpawnResult, SpeakerRequired, ToolContext, ToolResult
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
@@ -69,6 +70,7 @@ pytestmark = [
 ]
 
 TOOL_NARRATION = "remembering what they told me"
+REBUILD_TOOL = "rebuild_page_facts"
 MEMORY_TOOLS = {tool.name: tool for tool in memory.manifest().tools}
 MEMORY_ACTION_IDS = frozenset(
     {
@@ -1374,3 +1376,72 @@ async def test_a_paragraph_names_only_the_band_sources_its_reader_may_read(
     )
     assert owned_rows["the runway is teal"].source == ObjectRef(kind="page", name=str(page_id))
     assert sealed_rows["the runway is teal"].source is None
+
+
+async def test_only_an_admin_can_ask_for_the_page_facts_to_be_written_again(db: None) -> None:
+    """The tool is the whole act the portal button submits, so its gate is the button's gate: the
+    cursor stands where it was and the pass reads nothing twice."""
+    workspace_id = await _workspace()
+    scoped = ScopedStore(extension=memory.NAME)
+    (tool,) = (one for one in memory.manifest().tools if one.name == REBUILD_TOOL)
+    with ws(workspace_id):
+        await scoped.put(memory.DERIVE_CURSOR_KEY, "a-cursor")
+        member_id = await _seed_admin(workspace_id, admin=False)
+        with pytest.raises(ValueError, match=memory.REBUILD_ADMIN_ONLY):
+            await tool.handler(_rebuild_ctx(workspace_id, member_id), RebuildPageFactsInput())
+        assert await scoped.get(memory.DERIVE_CURSOR_KEY) == "a-cursor"
+
+
+async def test_a_rebuild_asked_for_by_nobody_is_refused_for_want_of_a_speaker(db: None) -> None:
+    """A turn nobody is speaking on holds no admin either, so an admin gate read alone answers a
+    call that merely omitted `requested_by` with an authority the model cannot obtain."""
+    workspace_id = await _workspace()
+    scoped = ScopedStore(extension=memory.NAME)
+    (tool,) = (one for one in memory.manifest().tools if one.name == REBUILD_TOOL)
+    with ws(workspace_id):
+        await scoped.put(memory.DERIVE_CURSOR_KEY, "a-cursor")
+        await _seed_admin(workspace_id)
+        with pytest.raises(SpeakerRequired, match="requested_by"):
+            await tool.handler(_rebuild_ctx(workspace_id, None), RebuildPageFactsInput())
+        assert await scoped.get(memory.DERIVE_CURSOR_KEY) == "a-cursor"
+
+
+def _rebuild_ctx(workspace_id: UUID, member_id: UUID | None) -> ToolContext:
+    return ToolContext(
+        sandbox=None,  # type: ignore[arg-type]
+        blob=None,  # type: ignore[arg-type]
+        turn=Turn(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            conversation_id=uuid4(),
+            agent_id=uuid4(),
+            seq=1,
+            status="running",
+            inbound="rebuild",
+            created_at=datetime.now(UTC),
+        ),
+        agent=Agent(prompt="p", model="auto"),
+        spawn=None,  # type: ignore[arg-type]
+        speaker_member_id=member_id,
+        audience=conversation_audience(member_id),
+        artifact_token_secret="",
+        ext=context_for(memory.NAME, frozenset()),
+    )
+
+
+async def _seed_admin(workspace_id: UUID, admin: bool = True) -> UUID:
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=f"{member_id}@example.com",
+                timezone="UTC",
+                is_admin=admin,
+                seated_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return member_id
