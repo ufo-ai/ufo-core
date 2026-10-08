@@ -76,7 +76,7 @@ from ufo_ext_sample.objects import (
     WIDGET_KIND,
 )
 from ufo_ext_sample.onboarding import ONBOARDING_KEY, ONBOARDING_NAME
-from ufo_ext_sample.routes import ROUTE_KEY, ROUTE_PATH
+from ufo_ext_sample.routes import ROUTE_KEY, ROUTE_PATH, UNBOUND_PATH, UNBOUND_REPLY
 from ufo_ext_sample.search import (
     SAMPLE_FETCH_TEXT,
     SAMPLE_SEARCH_ANSWER,
@@ -394,8 +394,8 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
         BESEECH_ACTION,
     }
     assert {job.name for job in manifest.jobs} == {JOB_NAME}
-    assert {route.path for route in manifest.routes} == {ROUTE_PATH}
-    assert {slot.name for slot in manifest.credentials} == {sample.API_SLOT}
+    assert {route.path for route in manifest.routes} == {ROUTE_PATH, UNBOUND_PATH}
+    assert {slot.name for slot in manifest.credentials} == {sample.API_SLOT, sample.MINTED_SLOT}
     assert {step.name for step in manifest.onboarding_steps} == {ONBOARDING_NAME}
     assert {connector.oauth.provider for connector in manifest.connectors} == {CONNECTOR_PROVIDER}
     assert {tool.name for connector in manifest.connectors for tool in connector.tools} == {
@@ -1164,15 +1164,19 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
         assert {name for name in dir(context.credentials) if not name.startswith("_")} == {
             "clear",
             "get",
+            "put",
             "rotate",
             "stored",
             "stored_slots",
             "workspace_id",
             "declared",
+            "minted",
             "resolved",
         }
         with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
             await context.credentials.get(sample.UNDECLARED_SLOT)
+        with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
+            await context.credentials.put(sample.UNDECLARED_SLOT, "value")
         with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
             await context.credentials.rotate(sample.UNDECLARED_SLOT, "old", "new")
         with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
@@ -1279,7 +1283,37 @@ async def test_route_reaches_its_scoped_context(db: None, monkeypatch: pytest.Mo
     assert forged.status_code == 401
     with ws(workspace_id):
         scoped = ScopedStore(extension=sample.NAME)
-        assert await scoped.get(ROUTE_KEY) == {"body": "ping", "home_url": None, "spend": "allow"}
+        assert await scoped.get(ROUTE_KEY) == {
+            "body": "ping",
+            "home_url": None,
+            "spend": "allow",
+            "minted": [sample.MINTED_SLOT],
+        }
+
+
+async def test_an_identify_less_route_runs_unbound(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
+    workspace_id = await _workspace()
+    app = FastAPI()
+    _mount_ext_routes(
+        app,
+        (_sample_manifest(),),
+        _credential_store(),
+        None,
+        None,
+        None,
+        NO_SPEND_GATES,
+        UNGATED_LEDGER,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://serve") as client:
+        anonymous = await client.get(f"/ext/{sample.NAME}/{UNBOUND_PATH}")
+        claimed = await client.get(
+            f"/ext/{sample.NAME}/{UNBOUND_PATH}", headers=_bearer(workspace_id)
+        )
+    assert (anonymous.status_code, anonymous.text) == (200, UNBOUND_REPLY)
+    assert (claimed.status_code, claimed.text) == (200, UNBOUND_REPLY)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1322,6 +1356,7 @@ async def test_a_route_is_handed_the_deploy_base_and_the_browser_home(
         "body": "ping",
         "home_url": f"https://ufo.test/surface/{manifest.surfaces[0].name}",
         "spend": "reject",
+        "minted": [sample.MINTED_SLOT],
     }
 
 
@@ -1375,6 +1410,7 @@ async def test_a_job_is_handed_the_deploy_base_and_the_browser_home(db: None) ->
     assert stored == {
         "ran": True,
         "home_url": "https://ufo.test/surface/portal",
+        "minted": [sample.MINTED_SLOT],
     }
 
 

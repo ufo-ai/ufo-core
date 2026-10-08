@@ -587,7 +587,19 @@ ledger = sa.Table(
     sa.Column("id", sa.Uuid, primary_key=True),
     sa.Column("workspace_id", sa.Uuid, nullable=False),
     sa.Column("turn_id", sa.Uuid, sa.ForeignKey("turn.id"), nullable=True),
+    sa.Column("service", sa.Text, nullable=True),
     sa.Column("dimension", sa.Text, nullable=False),
+    sa.Column("backend", sa.Text, nullable=True),
+    sa.Column("token_id", sa.Uuid, nullable=True),
+    sa.Column("session_id", sa.Uuid, nullable=True),
+    sa.Column(
+        "labels",
+        sa.JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+        server_default=sa.text("'{}'"),
+    ),
+    sa.Column("resource_id", sa.Text, nullable=True),
+    sa.Column("attempt", sa.Text, nullable=True),
     sa.Column("amount", sa.BigInteger, nullable=False),
     sa.Column("prompt_tokens", sa.BigInteger, nullable=False, server_default=sa.text("0")),
     sa.Column("input_tokens", sa.BigInteger, nullable=False, server_default=sa.text("0")),
@@ -605,8 +617,15 @@ ledger = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint(
-        "dimension in ('tokens', 'egress', 'sandbox_tokens', 'images', 'videos')",
+        "dimension in ('tokens', 'egress', 'sandbox_tokens', 'images', 'videos', 'requests', "
+        "'gib')",
         name="ledger_dimension",
+    ),
+    sa.CheckConstraint(
+        "service is null or (service = 'models' and dimension in ('tokens', 'sandbox_tokens', "
+        "'images', 'videos')) or (service = 'proxy' and dimension in ('egress', 'requests', "
+        "'gib'))",
+        name="ledger_service_dimension",
     ),
     sa.CheckConstraint("amount > 0", name="ledger_amount"),
     sa.CheckConstraint("priced_micro_usd >= 0", name="ledger_priced"),
@@ -630,9 +649,32 @@ ledger = sa.Table(
         "+ cache_write_1h_tokens",
         name="ledger_prompt_classes_total",
     ),
-    sa.CheckConstraint("not byok or dimension = 'tokens'", name="ledger_byok_dimension"),
+    sa.CheckConstraint(
+        "not byok or dimension in ('tokens', 'requests', 'gib')", name="ledger_byok_dimension"
+    ),
     sa.Index("ledger_turn", "turn_id"),
     sa.Index("ledger_workspace_created", "workspace_id", "created_at"),
+    sa.Index(
+        "ledger_workspace_token",
+        "workspace_id",
+        "token_id",
+        "created_at",
+        postgresql_where=sa.text("token_id is not null"),
+        sqlite_where=sa.text("token_id is not null"),
+    ),
+    sa.Index(
+        "ledger_workspace_session",
+        "workspace_id",
+        "session_id",
+        postgresql_where=sa.text("session_id is not null"),
+        sqlite_where=sa.text("session_id is not null"),
+    ),
+    sa.Index(
+        "ledger_unserviced",
+        "workspace_id",
+        postgresql_where=sa.text("service is null"),
+        sqlite_where=sa.text("service is null"),
+    ),
 )
 
 ledger_job_day = sa.Table(
@@ -641,7 +683,11 @@ ledger_job_day = sa.Table(
     sa.Column("id", sa.Uuid, primary_key=True),
     sa.Column("workspace_id", sa.Uuid, nullable=False),
     sa.Column("day", sa.Date, nullable=False),
+    sa.Column("service", sa.Text, nullable=True),
     sa.Column("dimension", sa.Text, nullable=False),
+    sa.Column("backend", sa.Text, nullable=True),
+    sa.Column("token_id", sa.Uuid, nullable=True),
+    sa.Column("byok", sa.Boolean, nullable=True),
     sa.Column("model", sa.Text, nullable=False),
     sa.Column("price_digest", sa.Text, nullable=True),
     sa.Column("amount", sa.BigInteger, nullable=False),

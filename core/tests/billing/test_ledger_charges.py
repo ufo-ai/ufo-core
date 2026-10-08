@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -8,18 +9,22 @@ from ufo_ext_sample.spend import ALLOWANCE_TABLE, CHARGE_TABLE, AllowanceRaised,
 from ufo.db import workspace_tx
 from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT
 from ufo.runtime.billing.accounting import (
+    GIB_DIMENSION,
     IMAGES_DIMENSION,
+    MODELS_SERVICE,
+    PROXY_SERVICE,
     TOKENS_DIMENSION,
     VIDEOS_DIMENSION,
     Ledger,
 )
 from ufo.runtime.billing.spend import GateDeploy
 from ufo.schema import tables
-from ufo.schema.records import Usage, ledger_id_for
+from ufo.schema.records import Usage, ledger_id_for, service_ledger_id_for
 
 LEDGER = Ledger(gates=(SampleGate(GateDeploy(public_base_url=None, home_surface=None)),))
 MODEL = "claude-opus-4-8"
 DOLLAR = 1_000_000
+GIB_MICRO_USD = 168_750
 
 pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 
@@ -148,6 +153,85 @@ async def test_media_spend_charges_each_increment(db: None) -> None:
     ]
     assert sum(charge[3] for charge in charges) == await _priced(workspace_id)
     assert remaining == DOLLAR - await _priced(workspace_id)
+
+
+async def _remaining(workspace_id: UUID) -> int:
+    async with workspace_tx() as connection:
+        return int(
+            (
+                await connection.execute(
+                    sa.select(ALLOWANCE_TABLE.c.remaining_micro_usd).where(
+                        ALLOWANCE_TABLE.c.workspace_id == workspace_id
+                    )
+                )
+            ).scalar_one()
+        )
+
+
+async def test_a_service_record_charges_once_per_idempotency_key(db: None) -> None:
+    session_id = uuid4()
+    async with workspace_tx() as connection:
+        workspace_id, _ = await _seed_turn(connection)
+        await allow(connection, workspace_id, DOLLAR, "park")
+        for attempt in ("flush-1", "flush-1", "flush-2"):
+            await LEDGER.record_service_usage(
+                connection,
+                workspace_id,
+                service=PROXY_SERVICE,
+                dimension=GIB_DIMENSION,
+                backend=None,
+                amount=2**30,
+                token_id=None,
+                session_id=session_id,
+                labels={},
+                resource_id=None,
+                attempt=attempt,
+                occurred_at=datetime.now(UTC),
+                byok=False,
+                priced_micro_usd=GIB_MICRO_USD,
+                price_digest="sha256:card",
+            )
+    assert await _charges(workspace_id) == [
+        (
+            service_ledger_id_for(
+                workspace_id, PROXY_SERVICE, str(session_id), GIB_DIMENSION, attempt
+            ),
+            None,
+            GIB_DIMENSION,
+            GIB_MICRO_USD,
+            True,
+        )
+        for attempt in ("flush-1", "flush-2")
+    ]
+    assert await _remaining(workspace_id) == DOLLAR - 2 * GIB_MICRO_USD
+
+
+async def test_a_byok_service_record_charges_nothing(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, _ = await _seed_turn(connection)
+        await allow(connection, workspace_id, DOLLAR, "park")
+        await LEDGER.record_service_usage(
+            connection,
+            workspace_id,
+            service=MODELS_SERVICE,
+            dimension=TOKENS_DIMENSION,
+            backend="anthropic",
+            amount=1_100,
+            token_id=None,
+            session_id=uuid4(),
+            labels={},
+            resource_id=None,
+            attempt="flush-1",
+            occurred_at=datetime.now(UTC),
+            byok=True,
+            priced_micro_usd=8_000,
+            price_digest="sha256:card",
+            model=MODEL,
+            usage=Usage(input_tokens=1_000, output_tokens=100),
+        )
+    ((_, _, dimension, delta, platform_paid),) = await _charges(workspace_id)
+    assert (dimension, delta, platform_paid) == (TOKENS_DIMENSION, 8_000, False)
+    assert await _remaining(workspace_id) == DOLLAR
 
 
 async def test_a_charge_the_gate_refuses_takes_the_ledger_row_back(db: None) -> None:

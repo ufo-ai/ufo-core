@@ -10,7 +10,12 @@ from ufo.host.ext.loader import FIRST_PARTY_ENV, discovered, first_party_distrib
 from ufo.product import CensusSpec
 from ufo.runtime.billing.spend import SpendGateSpec
 from ufo.runtime.ext.context import ExtensionContext
-from ufo.runtime.ext.manifest import Manifest, ProxyCredentialSpec
+from ufo.runtime.ext.manifest import (
+    CredentialSlot,
+    InjectionTarget,
+    Manifest,
+    ProxyCredentialSpec,
+)
 
 
 @dataclass(frozen=True)
@@ -47,8 +52,22 @@ def test_the_runtime_distribution_is_always_first_party(monkeypatch: pytest.Monk
             version="0",
             spend_gates=(SpendGateSpec(name="acme_gate", build=SampleGate),),
         ),
+        Manifest(
+            name="acme",
+            version="0",
+            credentials=(
+                CredentialSlot(name="acme_token", description="A token acme mints.", minted=True),
+            ),
+        ),
     ],
-    ids=["member_context_read", "vault_read", "proxy_credentials", "census", "spend_gates"],
+    ids=[
+        "member_context_read",
+        "vault_read",
+        "proxy_credentials",
+        "census",
+        "spend_gates",
+        "minted_credential",
+    ],
 )
 def test_a_privileged_manifest_is_refused_unless_its_distribution_is_named(
     monkeypatch: pytest.MonkeyPatch, privileged: Manifest
@@ -84,3 +103,15 @@ def test_a_second_extension_declaring_the_proxy_credentials_fails_discovery(
     monkeypatch.setattr(loader, "entry_points", lambda group: (_entry(acme), _entry(beta)))
     with pytest.raises(ValueError, match="proxy_credentials; 'acme', 'beta' do"):
         discovered()
+
+
+def test_a_minted_slot_carries_no_injection_target() -> None:
+    with pytest.raises(ValueError, match="acme_token"):
+        CredentialSlot(
+            name="acme_token",
+            description="A token acme mints.",
+            minted=True,
+            injection=InjectionTarget(
+                host="api.acme.test", header="authorization", sentinel="Bearer sentinel-acme"
+            ),
+        )

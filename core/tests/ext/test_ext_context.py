@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+import ufo_ext_sample.manifest as sample
 from cryptography.fernet import Fernet
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
@@ -16,6 +17,7 @@ from opentelemetry.sdk.metrics.export import (
     NumberDataPoint,
 )
 from ufo_ext_sample.spend import CHARGE_TABLE, SampleGate, allow
+from ufo_ext_sample.tools import TOOL_NAME
 
 from ufo.db import workspace_tx
 from ufo.harness import o11y
@@ -50,17 +52,22 @@ from ufo.harness.sandbox.session import (
     SandboxSpec,
 )
 from ufo.harness.sandbox.terminal import TerminalGone
+from ufo.host.ext.loader import turn_hooks, turn_tools
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.vault import SecretValue, VaultReads
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.billing.accounting import (
     EGRESS_DIMENSION,
+    GIB_DIMENSION,
+    PROXY_SERVICE,
+    REQUESTS_DIMENSION,
     UNGATED_LEDGER,
     Ledger,
     OffTurnSpendRefused,
     ServiceTotal,
     SpendRollup,
     SpendTotals,
+    UsageLine,
 )
 from ufo.runtime.billing.spend import NO_SPEND_GATES, PARK, GateDeploy, SpendDecision, SpendGates
 from ufo.runtime.ext.context import (
@@ -606,6 +613,25 @@ async def test_credential_access_gates_a_slot_the_extension_resolves_per_workspa
                 await verb("undeclared_slot")
         await access.clear("acme_api_key")
         assert await store.stored_slots(workspace_id) == frozenset()
+
+
+async def test_the_sample_manifests_contexts_carry_the_slots_it_mints(db: None) -> None:
+    manifest = sample.manifest()
+    store = _store()
+    init_workspace_credentials(store)
+    _tools, ext_by_tool, _verbs = turn_tools((manifest,), store, audience=SHARED_AUDIENCE)
+    chain = turn_hooks((manifest,), store, audience=SHARED_AUDIENCE)
+    contexts = [
+        ext_by_tool[TOOL_NAME],
+        *(hook.ext for hooks in chain.hooks.values() for hook in hooks),
+    ]
+    assert {context.credentials.minted for context in contexts} == {frozenset({sample.MINTED_SLOT})}
+    credentials = ext_by_tool[TOOL_NAME].credentials
+    with ws(await _workspace()):
+        await credentials.put(sample.MINTED_SLOT, "minted-by-the-sample")
+        assert await credentials.get(sample.MINTED_SLOT) == "minted-by-the-sample"
+        with pytest.raises(UndeclaredCredentialSlot, match=sample.API_SLOT):
+            await credentials.put(sample.API_SLOT, "handed-over")
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1348,6 +1374,7 @@ async def test_an_extension_reads_what_the_gates_alone_decide_now(db: None) -> N
         assert (await context.spend_admitted()).outcome == "allow"
         assert (await context.spend_admitted(MODEL)).outcome == "allow"
         assert await context.spend_admitted("gpt-5.6-luna") == refused
+        assert await context.spend_admitted(platform_paid=True) == refused
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1359,6 +1386,22 @@ async def test_a_context_wired_with_no_spend_refuses_to_read_or_meter_it(db: Non
         with pytest.raises(RuntimeError, match="ledger; none is wired"):
             await context.meter_tokens(
                 uuid4(), "provider", Usage(input_tokens=10), ModelPrice(1, 0, 0, 0, 0), byok=False
+            )
+        with pytest.raises(RuntimeError, match="record_usage requires the deploy's ledger"):
+            await context.record_usage(
+                PROXY_SERVICE,
+                REQUESTS_DIMENSION,
+                None,
+                1,
+                token_id=None,
+                session_id=uuid4(),
+                labels={},
+                resource_id=None,
+                attempt="flush-1",
+                occurred_at=datetime.now(UTC),
+                byok=False,
+                price_micro_usd=1,
+                price_digest="sha256:card",
             )
     with pytest.raises(ValueError, match="spend gates and ledger"):
         context_for(
@@ -1451,3 +1494,85 @@ async def test_spend_rollup_reads_the_bound_workspaces_totals_naming_no_member_o
         None, report.total_micro_usd, report.by_dimension, report.by_service, report.usage
     )
     assert totals.by_service == (ServiceTotal("models", 5_084), ServiceTotal("proxy", 0))
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_an_extension_records_a_service_row_once(db: None) -> None:
+    workspace_id, neighbor = await _workspace(), await _workspace()
+    context = context_for("core", frozenset(), ledger=UNGATED_LEDGER)
+    session_id = uuid4()
+    record = {
+        "token_id": None,
+        "session_id": session_id,
+        "labels": {"team": "platform"},
+        "resource_id": None,
+        "attempt": "flush-1",
+        "occurred_at": datetime.now(UTC),
+        "byok": False,
+        "price_micro_usd": 3,
+        "price_digest": "sha256:card",
+    }
+    with ws(workspace_id):
+        written = await context.record_usage(PROXY_SERVICE, REQUESTS_DIMENSION, None, 3, **record)
+        replayed = await context.record_usage(PROXY_SERVICE, REQUESTS_DIMENSION, None, 3, **record)
+    with ws(neighbor):
+        elsewhere = await context.record_usage(PROXY_SERVICE, REQUESTS_DIMENSION, None, 3, **record)
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.workspace_id,
+                    tables.ledger.c.service,
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.labels,
+                ).where(tables.ledger.c.session_id == session_id)
+            )
+        ).all()
+    assert (written, replayed, elsewhere) == (True, False, True)
+    assert {row.workspace_id: tuple(row)[1:] for row in rows} == {
+        workspace_id: ("proxy", "requests", 3, 3, {"team": "platform"}),
+        neighbor: ("proxy", "requests", 3, 3, {"team": "platform"}),
+    }
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_an_extension_reads_usage_lines_and_spend_windows_of_its_workspace_alone(
+    db: None,
+) -> None:
+    workspace_id, neighbor = await _workspace(), await _workspace()
+    context = context_for("core", frozenset(), ledger=UNGATED_LEDGER)
+    token_id, session_id, now = uuid4(), uuid4(), datetime.now(UTC)
+    record = {
+        "token_id": token_id,
+        "session_id": session_id,
+        "labels": {"team": "platform"},
+        "resource_id": None,
+        "attempt": "flush-1",
+        "occurred_at": now,
+        "byok": False,
+        "price_digest": "sha256:card",
+    }
+    with ws(neighbor):
+        await context.record_usage(
+            PROXY_SERVICE, GIB_DIMENSION, None, 2**30, price_micro_usd=168_750, **record
+        )
+    with ws(workspace_id):
+        await context.record_usage(
+            PROXY_SERVICE, REQUESTS_DIMENSION, None, 3, price_micro_usd=3, **record
+        )
+        lines = await context.usage_lines(
+            now - timedelta(hours=1),
+            now + timedelta(minutes=1),
+            keys=frozenset({"service", "dimension", "token"}),
+            label_keys=frozenset({"team"}),
+        )
+        token_spent = await context.token_spend(token_id, 3_600)
+        session_spent = await context.session_spend(session_id)
+    assert lines == (
+        UsageLine(
+            now.date(), "proxy", "requests", None, False, token_id, {"team": "platform"}, 3, 3
+        ),
+    )
+    assert (token_spent, session_spent) == (3, 3)

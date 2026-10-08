@@ -95,6 +95,7 @@ from ufo.runtime.ext.manifest import (
     ProxyCredentials,
     SubagentProfile,
     declared_slots,
+    minted_slots,
 )
 from ufo.runtime.ext.surface import TurnTailer
 from ufo.runtime.indexing import EmbedClient, IndexBackend
@@ -212,6 +213,7 @@ def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
             or manifest.operator_rules
             or manifest.member_added
             or manifest.spend_gates
+            or any(slot.minted for slot in manifest.credentials)
         ) and (entry.dist is None or entry.dist.name not in first_party):
             raise ValueError(
                 f"third-party extension {manifest.name!r} cannot declare privileged capabilities"
@@ -543,7 +545,11 @@ def _resolved_slot_names(manifest: Manifest) -> Callable[[], Awaitable[frozenset
 def _extension_context(manifest: Manifest) -> ExtensionContext:
     """The plain workspace-scoped context for one manifest, with nothing wired that a credential
     read does not reach."""
-    return context_for(manifest.name, frozenset(slot.name for slot in manifest.credentials))
+    return context_for(
+        manifest.name,
+        frozenset(slot.name for slot in manifest.credentials),
+        minted=minted_slots(manifest),
+    )
 
 
 def turn_tools(
@@ -623,6 +629,7 @@ def turn_tools(
             probes=probes,
             deploy_credentials=deploy_credentials,
             workspace_credentials=_resolved_slot_names(manifest),
+            minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
         )
@@ -714,6 +721,7 @@ def member_object_registry(
             artifact_token_secret=artifact_token_secret,
             deploy_credentials=deploy_credentials,
             workspace_credentials=_resolved_slot_names(manifest),
+            minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
         )
@@ -904,7 +912,7 @@ async def turn_member_skills(
                 f"extension {manifest.name!r} provides member skills but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(manifest.name, declared, index, embed)
+        context = context_for(manifest.name, declared, index, embed, minted=minted_slots(manifest))
         for card in await manifest.member_skills.cards(context):
             if card.agents and agent_name not in card.agents:
                 continue
@@ -944,7 +952,7 @@ async def member_skill_listing(
                 f"extension {manifest.name!r} provides member skills but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(manifest.name, declared, index, embed)
+        context = context_for(manifest.name, declared, index, embed, minted=minted_slots(manifest))
         for skill in await manifest.member_skills.materialize_all(context):
             if skill.name in listed:
                 log("skill.member_card_collision", skill=skill.name, extension=manifest.name)
@@ -974,7 +982,7 @@ def index_backend(
             declared = frozenset(slot.name for slot in manifest.credentials)
             if declared and credential_store is None:
                 raise RuntimeError(f"index backend {name!r} needs a credential key but none is set")
-            context = context_for(manifest.name, declared)
+            context = context_for(manifest.name, declared, minted=minted_slots(manifest))
             return spec.factory(context)
     raise NotRegisteredError(f"config selects index backend {name!r} but no extension registers it")
 
@@ -997,7 +1005,7 @@ def embed_backend(
             declared = frozenset(slot.name for slot in manifest.credentials)
             if declared and credential_store is None:
                 raise RuntimeError(f"embed backend {name!r} needs a credential key but none is set")
-            context = context_for(manifest.name, declared)
+            context = context_for(manifest.name, declared, minted=minted_slots(manifest))
             return spec.factory(context)
     raise NotRegisteredError(f"config selects embed backend {name!r} but no extension registers it")
 
@@ -1027,7 +1035,8 @@ def memory_search(
             f"memory search provider {manifest.name!r} declares credential slots "
             "but no credential key is set"
         )
-    return MemorySearch(spec.build(context_for(manifest.name, declared, index, embed)))
+    context = context_for(manifest.name, declared, index, embed, minted=minted_slots(manifest))
+    return MemorySearch(spec.build(context))
 
 
 def validate_ext_tools(
@@ -1114,6 +1123,7 @@ async def turn_workspace_facts(
                 surface.name for surface in manifest.surfaces if surface.addressed
             ),
             audience=audience,
+            minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
         )
@@ -1180,6 +1190,7 @@ def turn_hooks(
             audience=audience,
             public_base_url=public_base_url,
             search=search,
+            minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
         )
@@ -1246,6 +1257,7 @@ def connection_hooks(
             frozenset(slot.name for slot in manifest.credentials),
             index,
             embed,
+            minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
         )
