@@ -37,4 +37,4 @@ def cloud_apis_for(*apps: Starlette, base_url: str = "https://api.test") -> Clou
         await PlainTextResponse("Not Found", status_code=404)(scope, receive, send)
 
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=routed), base_url=base_url)
-    return CloudApis(base_url=base_url, client=lambda: client, bearer_for=_test_bearer)
+    return CloudApis(base_url=base_url, client=client, bearer_for=_test_bearer)

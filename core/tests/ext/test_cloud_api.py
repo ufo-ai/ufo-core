@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
 import json
 import logging
 import secrets
-from collections.abc import AsyncIterator
+import threading
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
@@ -17,6 +19,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from ufo_testsupport.cloud import TEST_BEARER, cloud_apis_for
 
+import ufo.runtime.cloud
 from ufo.config import BlobConfig, CloudConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
 from ufo.host.ext.loader import proxy_credentials
@@ -27,14 +30,15 @@ from ufo.runtime.cloud import (
     CloudApis,
     CloudRefused,
     CloudUnavailable,
-    LoopClients,
+    LoopTransport,
+    dispose_loop_clients,
     proxy_bearer,
 )
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest, ProxyCredentialSpec
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
-from ufo.serve import _require_cloud
+from ufo.serve import _one_shot, _require_cloud
 
 pytestmark = pytest.mark.usefixtures("db")
 
@@ -137,7 +141,7 @@ async def apis(store: CredentialStore, recorder: Starlette) -> AsyncIterator[Clo
     credentials = proxy_credentials((DECLARING,))
     assert credentials is not None
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=recorder)) as client:
-        yield CloudApis(API_URL, lambda: client, proxy_bearer(credentials))
+        yield CloudApis(API_URL, client, proxy_bearer(credentials))
 
 
 async def _slot(store: CredentialStore, workspace_id: UUID) -> str:
@@ -187,7 +191,7 @@ async def test_a_bearer_read_that_raises_surfaces_as_unavailable(recorder: Starl
     )
     assert credentials is not None
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=recorder)) as client:
-        apis = CloudApis(API_URL, lambda: client, proxy_bearer(credentials))
+        apis = CloudApis(API_URL, client, proxy_bearer(credentials))
         with pytest.raises(CloudUnavailable) as raised:
             await apis.bound(await _workspace()).send("GET", SEARCH_PATH, answer=Echo)
 
@@ -273,7 +277,7 @@ async def test_a_5xx_a_timeout_and_a_refused_connection_raise_unavailable() -> N
         (httpx.ConnectError("refused"), "ConnectError"),
     ):
         async with httpx.AsyncClient(transport=raising(error)) as client:
-            apis = CloudApis(API_URL, lambda client=client: client, unavailable.bearer_for)
+            apis = CloudApis(API_URL, client, unavailable.bearer_for)
             with pytest.raises(CloudUnavailable) as raised:
                 await apis.bound(workspace_id).send("GET", SEARCH_PATH, answer=Echo)
         assert raised.value.reason == reason
@@ -379,14 +383,74 @@ async def test_no_bearer_reaches_a_log_record(
     assert not [record for record in caplog.records if minted in repr(record.__dict__)]
 
 
-def test_one_client_serves_each_event_loop() -> None:
-    clients = LoopClients()
+@dataclass(frozen=True)
+class KeepAliveServer:
+    url: str
+    hung_up: threading.Semaphore
 
-    async def twice() -> tuple[httpx.AsyncClient, httpx.AsyncClient]:
-        return clients(), clients()
 
-    first, again = asyncio.run(twice())
-    other, _ = asyncio.run(twice())
+@pytest.fixture
+def keep_alive_server() -> Iterator[KeepAliveServer]:
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever)
+    thread.start()
+    hung_up = threading.Semaphore(0)
 
-    assert first is again
-    assert other is not first
+    async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(asyncio.IncompleteReadError):
+            while await reader.readuntil(b"\r\n\r\n"):
+                writer.write(b'HTTP/1.1 200 OK\r\ncontent-length: 11\r\n\r\n{"ok":true}')
+                await writer.drain()
+        writer.close()
+        hung_up.release()
+
+    async def listen() -> asyncio.Server:
+        return await asyncio.start_server(answer, "127.0.0.1", 0)
+
+    server = asyncio.run_coroutine_threadsafe(listen(), loop).result()
+    port = server.sockets[0].getsockname()[1]
+    yield KeepAliveServer(url=f"http://127.0.0.1:{port}/", hung_up=hung_up)
+    server.close()
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join()
+    loop.close()
+
+
+def test_one_client_serves_loops_in_turn_and_no_closed_loop_keeps_a_pool(
+    keep_alive_server: KeepAliveServer,
+) -> None:
+    client = httpx.AsyncClient(transport=LoopTransport())
+
+    async def call(dispose: bool) -> asyncio.AbstractEventLoop:
+        hang_up = {} if dispose else {"connection": "close"}
+        answer = await client.get(keep_alive_server.url, headers=hang_up)
+        assert answer.json() == {"ok": True}
+        if dispose:
+            await dispose_loop_clients()
+        return asyncio.get_running_loop()
+
+    disposed = asyncio.run(call(dispose=True))
+    assert disposed not in ufo.runtime.cloud._TRANSPORTS
+    assert keep_alive_server.hung_up.acquire(timeout=5)
+
+    abandoned = asyncio.run(call(dispose=False))
+    assert abandoned in ufo.runtime.cloud._TRANSPORTS
+    asyncio.run(call(dispose=True))
+    assert abandoned not in ufo.runtime.cloud._TRANSPORTS
+    assert keep_alive_server.hung_up.acquire(timeout=5)
+    assert keep_alive_server.hung_up.acquire(timeout=5)
+
+
+def test_a_serve_one_shot_step_closes_its_loops_cloud_connections(
+    keep_alive_server: KeepAliveServer,
+) -> None:
+    client = httpx.AsyncClient(transport=LoopTransport())
+
+    async def call() -> asyncio.AbstractEventLoop:
+        assert (await client.get(keep_alive_server.url)).json() == {"ok": True}
+        return asyncio.get_running_loop()
+
+    loop = _one_shot(call())
+
+    assert loop not in ufo.runtime.cloud._TRANSPORTS
+    assert keep_alive_server.hung_up.acquire(timeout=5)

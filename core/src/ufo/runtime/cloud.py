@@ -9,12 +9,10 @@ bearer that could not be read raises `CloudUnavailable`."""
 import asyncio
 import functools
 import json
-import threading
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
-from weakref import WeakKeyDictionary
 
 import httpx
 from pydantic import BaseModel, ConfigDict
@@ -70,28 +68,31 @@ class ErrorEnvelope(BaseModel):
     error: ErrorBody
 
 
-@dataclass(frozen=True)
-class LoopClients:
-    """One HTTP client per event loop: serve's surfaces and its durable workflows run on different
-    loops, and a pooled connection answers only on the loop that opened it."""
+_TRANSPORTS: dict[asyncio.AbstractEventLoop, httpx.AsyncHTTPTransport] = {}
 
-    clients: WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient] = field(
-        default_factory=WeakKeyDictionary
-    )
-    lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def __call__(self) -> httpx.AsyncClient:
+class LoopTransport(httpx.AsyncBaseTransport):
+    """A connection pool per event loop: serve's surfaces and its durable workflows run on
+    different loops, and a pooled connection answers only on the loop that opened it. A closed
+    loop's pool leaves the registry on the next request from any loop; `dispose_loop_clients`
+    closes the running loop's pool before that loop closes."""
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         loop = asyncio.get_running_loop()
-        with self.lock:
-            client = self.clients.get(loop)
-            if client is None:
-                client = httpx.AsyncClient(
-                    timeout=httpx.Timeout(
-                        CLOUD_TIMEOUT_SECONDS, connect=CLOUD_CONNECT_TIMEOUT_SECONDS
-                    )
-                )
-                self.clients[loop] = client
-            return client
+        for stale in [held for held in list(_TRANSPORTS) if held.is_closed()]:
+            _TRANSPORTS.pop(stale, None)
+        transport = _TRANSPORTS.get(loop)
+        if transport is None:
+            transport = _TRANSPORTS[loop] = httpx.AsyncHTTPTransport()
+        return await transport.handle_async_request(request)
+
+
+async def dispose_loop_clients() -> None:
+    """Close and drop the running loop's pool. The steps serve drives on throwaway `asyncio.run`
+    loops call this before their loop closes, so no pooled connection is abandoned to it."""
+    transport = _TRANSPORTS.pop(asyncio.get_running_loop(), None)
+    if transport is not None:
+        await transport.aclose()
 
 
 @dataclass(frozen=True)
@@ -100,7 +101,7 @@ class CloudApi:
 
     base_url: str
     bearer: Callable[[], Awaitable[str]]
-    client: Callable[[], httpx.AsyncClient]
+    client: httpx.AsyncClient
 
     async def send[T: BaseModel](
         self,
@@ -135,7 +136,7 @@ class CloudApi:
         if idempotency_key is not None:
             headers[IDEMPOTENCY_HEADER] = idempotency_key
         try:
-            response = await self.client().request(
+            response = await self.client.request(
                 method,
                 self.base_url + path,
                 content=content,
@@ -162,7 +163,7 @@ class CloudApis:
     """The deploy's cloud API, bound per workspace."""
 
     base_url: str
-    client: Callable[[], httpx.AsyncClient]
+    client: httpx.AsyncClient
     bearer_for: Callable[[UUID], Awaitable[str]]
 
     def bound(self, workspace_id: UUID) -> CloudApi:

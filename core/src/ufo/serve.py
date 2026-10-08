@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
+import httpx
 import uvicorn
 from cryptography import x509
 from cryptography.fernet import Fernet
@@ -118,7 +119,14 @@ from ufo.runtime.access.vault import VaultReads
 from ufo.runtime.background_tasks import BackgroundTaskSweep
 from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger
 from ufo.runtime.billing.spend import NO_SPEND_GATES, GateDeploy, SpendGates, built_gates
-from ufo.runtime.cloud import CloudApis, LoopClients, proxy_bearer
+from ufo.runtime.cloud import (
+    CLOUD_CONNECT_TIMEOUT_SECONDS,
+    CLOUD_TIMEOUT_SECONDS,
+    CloudApis,
+    LoopTransport,
+    dispose_loop_clients,
+    proxy_bearer,
+)
 from ufo.runtime.context_boundary import (
     CORE_FLAGS,
     select_context_boundary,
@@ -394,7 +402,14 @@ def run(fleet: Fleet) -> None:
     cloud = (
         None
         if config.cloud.api_url is None or bearer_source is None
-        else CloudApis(config.cloud.api_url, LoopClients(), proxy_bearer(bearer_source))
+        else CloudApis(
+            config.cloud.api_url,
+            httpx.AsyncClient(
+                transport=LoopTransport(),
+                timeout=httpx.Timeout(CLOUD_TIMEOUT_SECONDS, connect=CLOUD_CONNECT_TIMEOUT_SECONDS),
+            ),
+            proxy_bearer(bearer_source),
+        )
     )
     init_workspace_credentials(credentials)
     init_flags(_select_flag_provider(config, manifests))
@@ -686,6 +701,7 @@ def _one_shot[T](coro: Coroutine[Any, Any, T]) -> T:
             return await coro
         finally:
             await dispose_loop_engines()
+            await dispose_loop_clients()
 
     return asyncio.run(step())
 
