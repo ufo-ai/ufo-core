@@ -79,6 +79,15 @@ class _RefusingEngine:
 def test_migrations_are_idempotent(database_url: str) -> None:
     apply_migrations(database_url)
     apply_migrations(database_url)
+    stamped = {
+        row["version_num"]
+        for row in _execute(database_url, sa.text("select version_num from alembic_version"))
+    }
+    assert _core_migration_head() in _reached(stamped)
+    assert (
+        _execute(database_url, sa.select(tables.conversation.c.detached_sandbox_handle).limit(0))
+        == []
+    )
 
 
 def _sqlite_shape(database: Path) -> tuple[frozenset[tuple[str, str]], frozenset[str]]:
@@ -480,12 +489,15 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         scripts = ScriptDirectory.from_config(config)
         heads = scripts.get_heads()
     core_head = _core_migration_head()
+    core_revisions = {
+        revision.revision for revision in scripts.iterate_revisions(core_head, "base")
+    }
     for head in heads:
         if head == core_head:
             continue
         revision = scripts.get_revision(head)
         assert revision.down_revision is None
-        assert revision.dependencies == core_head
+        assert revision.dependencies in core_revisions
     assert {
         core_head,
         "index_default_0003",
