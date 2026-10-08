@@ -21,7 +21,7 @@ for a slot. A one-shot tick rides the jobs queue, as does the execution it fans 
 handler work is therefore confined to `ufo.serve.JOBS_FLEET`, while every image can drain every
 application queue across a rollout or rollback."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -65,10 +65,12 @@ from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.runtime.cloud import CloudApis
 from ufo.runtime.ext.context import (
     CORE_EXTENSION,
+    NO_SELF_USER_IDS,
     SPEND_REFUSAL_NOTICE_KEY,
     ConversationProbes,
     ExtensionContext,
     ScopedStore,
+    SelfUserIdResolver,
     TurnInvoker,
     agent_is_live,
     context_for,
@@ -520,6 +522,7 @@ class PageChangeRunner:
     spend: SpendGates = NO_SPEND_GATES
     ledger: Ledger = UNGATED_LEDGER
     cloud: CloudApis | None = None
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS
 
     def consumers(self) -> tuple[PageChangeConsumer, ...]:
         consumers: list[PageChangeConsumer] = []
@@ -739,6 +742,7 @@ class PageChangeRunner:
             ledger=self.ledger,
             cloud_client=consumer.cloud_client,
             cloud=self.cloud,
+            self_user_ids=self.self_user_ids,
         )
 
     async def _retry_parked(
@@ -1240,6 +1244,7 @@ class JobRunner:
     spend: SpendGates = NO_SPEND_GATES
     ledger: Ledger = UNGATED_LEDGER
     cloud: CloudApis | None = None
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS
     public_base_url: str | None = None
     home_surface: str | None = None
     provisioned_workspaces: set[UUID] = field(default_factory=set, compare=False, repr=False)
@@ -1345,6 +1350,7 @@ class JobRunner:
                 ledger=self.ledger,
                 cloud_client=binding.cloud_client,
                 cloud=self.cloud,
+                self_user_ids=self.self_user_ids,
             )
             try:
                 await binding.spec.handler(context)

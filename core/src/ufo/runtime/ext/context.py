@@ -16,6 +16,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, 
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -342,6 +343,9 @@ class DeployCredentials:
 
 
 NO_DEPLOY_CREDENTIALS = DeployCredentials()
+
+SelfUserIdResolver = Callable[[UUID], Awaitable[str | None]]
+NO_SELF_USER_IDS: Mapping[str, SelfUserIdResolver] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -1151,7 +1155,7 @@ def _page_as_of(
     return datetime.fromisoformat(supplied.replace("Z", "+00:00")).date().isoformat()
 
 
-def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnElement[bool]:
+def _connection_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnElement[bool]:
     granted = sa.exists(
         sa.select(1)
         .select_from(tables.connector_grant)
@@ -1196,16 +1200,18 @@ def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnEleme
         granted,
         sa.and_(reader_is_main, sa.or_(tables.connection.c.shared, speaker_owns)),
     )
+    return sa.and_(tables.connection.c.workspace_id == workspace_id, disclosed, reachable)
+
+
+def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnElement[bool]:
     return sa.and_(
         tables.source.c.workspace_id == workspace_id,
         sa.exists(
             sa.select(1)
             .select_from(tables.connection)
             .where(
-                tables.connection.c.workspace_id == workspace_id,
                 tables.connection.c.id == tables.source.c.connection_id,
-                disclosed,
-                reachable,
+                _connection_readable(workspace_id, reader),
             )
             .correlate(tables.source)
         ),
@@ -1375,6 +1381,7 @@ class ExtensionContext:
     vault: "VaultReads | None" = None
     cloud_client_allowed: bool = False
     cloud: CloudApis | None = None
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS
 
     @property
     def workspace_id(self) -> UUID:
@@ -2467,6 +2474,24 @@ class ExtensionContext:
             for row in rows
         }
 
+    async def readable_connections(self, reader: SourceReader) -> frozenset[UUID]:
+        """The bound workspace's connections `reader` reaches: disclosed to one of its subjects,
+        and granted to its agent or, for the main agent, shared or owned by the member it speaks
+        for."""
+        query = sa.select(tables.connection.c.id).where(
+            _connection_readable(self.store.workspace_id, reader)
+        )
+        async with workspace_tx() as connection:
+            return frozenset((await connection.execute(query)).scalars())
+
+    async def self_user_id(self, surface: str) -> str | None:
+        """The bound workspace's own speaker on `surface`, as that surface's
+        `SurfaceSpec.self_user_id` resolves it; None where the surface declares no resolver."""
+        resolve = self.self_user_ids.get(surface)
+        if resolve is None:
+            return None
+        return await resolve(self.workspace_id)
+
     async def readable_source_ids(self, reader: SourceReader) -> frozenset[UUID]:
         query = sa.select(tables.source.c.uid).where(
             _source_readable(self.store.workspace_id, reader),
@@ -2918,6 +2943,7 @@ def context_for(
     vault: "VaultReads | None" = None,
     cloud_client: bool = False,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
@@ -2939,7 +2965,8 @@ def context_for(
     metering and spend reads go through; a context wired with neither refuses both reads.
     `vault_read` is the manifest's privileged capability to resolve a bound secret through the
     deploy's `vault`, which a context without it never carries, and `cloud_client` its capability
-    to call the deploy's `cloud` API as the bound workspace."""
+    to call the deploy's `cloud` API as the bound workspace. `self_user_ids` maps each surface
+    declaring a `SurfaceSpec.self_user_id` resolver to it, bound to a workspace by id."""
     if model_resolver is not None and model_job is None:
         raise ValueError("a wired model_resolver needs the model_job its spend is attributed to")
     if model_resolver is not None and (spend is None or ledger is None):
@@ -2981,4 +3008,5 @@ def context_for(
         vault=vault if vault_read else None,
         cloud_client_allowed=cloud_client,
         cloud=cloud if cloud_client else None,
+        self_user_ids=self_user_ids,
     )

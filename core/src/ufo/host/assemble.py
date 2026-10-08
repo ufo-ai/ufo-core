@@ -55,7 +55,13 @@ from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger
 from ufo.runtime.billing.spend import NO_SPEND_GATES, SpendGates
 from ufo.runtime.cloud import CloudApis
-from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, TurnInvoker
+from ufo.runtime.ext.context import (
+    NO_SELF_USER_IDS,
+    ConversationProbes,
+    ExtensionContext,
+    SelfUserIdResolver,
+    TurnInvoker,
+)
 from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.ext.surface import TurnTailer
@@ -138,6 +144,7 @@ class HostEnvironment:
     cloud: CloudApis | None = None
     """The deploy's cloud API, which every extension context a turn builds carries for a manifest
     declaring `cloud_client`."""
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS
 
     async def assemble(self, request: AssembleRequest) -> AssembledTurn:
         turn, agent, profile = request.turn, request.agent, request.profile
@@ -171,6 +178,7 @@ class HostEnvironment:
                 spend=self.spend,
                 ledger=self.ledger,
                 cloud=self.cloud,
+                self_user_ids=self.self_user_ids,
             )
         )
         if held:
@@ -285,6 +293,7 @@ class HostEnvironment:
             spend=self.spend,
             ledger=self.ledger,
             cloud=self.cloud,
+            self_user_ids=self.self_user_ids,
         )
 
     def hooks(self, *, audience: Audience) -> HookChain:
@@ -300,6 +309,7 @@ class HostEnvironment:
             spend=self.spend,
             ledger=self.ledger,
             cloud=self.cloud,
+            self_user_ids=self.self_user_ids,
         )
 
     async def member_skills(
@@ -312,6 +322,7 @@ class HostEnvironment:
             self.embed,
             agent_name=agent_name,
             cloud=self.cloud,
+            self_user_ids=self.self_user_ids,
         )
 
     async def environment_model(self, environment: str, profile: str | None) -> str | None:

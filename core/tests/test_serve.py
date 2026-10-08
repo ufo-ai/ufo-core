@@ -287,9 +287,11 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
 
     probes = object()
     cloud = cloud_apis_for()
-    serve._launch_jobs(runtime, object(), object(), object(), probes, cloud)
+    speakers = {"chat": object()}
+    serve._launch_jobs(runtime, object(), object(), object(), probes, cloud, speakers)
 
     assert captured["page"]["cloud"] is captured["jobs"]["cloud"] is cloud
+    assert captured["page"]["self_user_ids"] is captured["jobs"]["self_user_ids"] is speakers
     assert captured["page"]["manifests"] is manifests
     assert captured["page"]["registry"] is registry
     assert captured["jobs"]["registry"] is registry
@@ -341,7 +343,7 @@ def test_launch_jobs_hands_both_runners_the_background_jobs_model(
     monkeypatch.setattr(serve, "JobRunner", Runner)
 
     probes = object()
-    serve._launch_jobs(runtime, object(), object(), object(), probes, None)
+    serve._launch_jobs(runtime, object(), object(), object(), probes, None, {})
 
     assert captured["page"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL
     assert captured["jobs"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL

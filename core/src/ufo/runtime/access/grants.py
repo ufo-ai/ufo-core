@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 
 from ufo.db import workspace_tx
+from ufo.runtime.access.connectors import brokered_account
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.object_name import OBJECT_NAME_MAX_LENGTH
 from ufo.runtime.object_scope import object_agent_id
@@ -243,6 +244,12 @@ class FeedConnection:
     backfill_days: int | None
     owner_member_id: UUID | None
     shared: bool
+
+    @property
+    def broker_account(self) -> str | None:
+        """The broker's connected-account id this connection authenticates as, or None where the
+        workspace's own provider key answers instead."""
+        return brokered_account(self.account_id)
 
 
 @dataclass(frozen=True)

@@ -71,9 +71,11 @@ from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger
 from ufo.runtime.billing.spend import NO_SPEND_GATES, SpendGates
 from ufo.runtime.cloud import CloudApis
 from ufo.runtime.ext.context import (
+    NO_SELF_USER_IDS,
     ConversationProbes,
     DeployCredentials,
     ExtensionContext,
+    SelfUserIdResolver,
     TurnInvoker,
     context_for,
 )
@@ -98,7 +100,7 @@ from ufo.runtime.ext.manifest import (
     declared_slots,
     minted_slots,
 )
-from ufo.runtime.ext.surface import TurnTailer
+from ufo.runtime.ext.surface import SurfaceIdentityContext, TurnTailer
 from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.kinds.agents import AGENT_OBJECT
 from ufo.runtime.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
@@ -122,7 +124,7 @@ from ufo.runtime.skills.runtime import (
 )
 from ufo.runtime.tools.registry import ToolDef, ToolRegistry
 from ufo.runtime.turns.audience import Audience
-from ufo.runtime.workspace import ws_current
+from ufo.runtime.workspace import ws, ws_current
 
 CORE_OBJECT_KINDS: tuple[BoundKind, ...] = (
     BoundKind(kind=AGENT_OBJECT, extension=None, context=None),
@@ -529,6 +531,52 @@ def proxy_credentials(manifests: tuple[Manifest, ...]) -> ProxyCredentials | Non
     return None
 
 
+def self_user_id_resolvers(
+    manifests: tuple[Manifest, ...],
+    credentials: CredentialStore | None,
+    blob: WorkspaceBlobStore,
+) -> dict[str, SelfUserIdResolver]:
+    """Each surface declaring a `SurfaceSpec.self_user_id` resolver, bound to a workspace by id:
+    the resolver runs under that workspace and reads only its own manifest's credential slots."""
+    resolvers: dict[str, SelfUserIdResolver] = {}
+    for manifest in manifests:
+        declared = frozenset(slot.name for slot in manifest.credentials)
+        for surface in manifest.surfaces:
+            if surface.self_user_id is None:
+                continue
+            if surface.name in resolvers:
+                raise RuntimeError(f"two surfaces resolve self_user_id for {surface.name!r}")
+
+            async def resolve(
+                workspace_id: UUID,
+                handler=surface.self_user_id,
+                slots=declared,
+                store=credentials,
+            ) -> str | None:
+                async def credential(credential_slot: str) -> str:
+                    if credential_slot not in slots:
+                        raise ValueError(
+                            f"surface identity reads undeclared credential slot {credential_slot!r}"
+                        )
+                    if store is None:
+                        raise RuntimeError(
+                            "surface identity reads a credential but no store is configured"
+                        )
+                    return await store.get(workspace_id, credential_slot)
+
+                with ws(workspace_id):
+                    return await handler(
+                        SurfaceIdentityContext(
+                            workspace_id=workspace_id,
+                            blob=blob,
+                            credential=credential,
+                        )
+                    )
+
+            resolvers[surface.name] = resolve
+    return resolvers
+
+
 def _resolved_slot_names(manifest: Manifest) -> Callable[[], Awaitable[frozenset[str]]] | None:
     """`ctx.credentials` gates a per-workspace slot on these names, so a declaration the extension's
     own rows carry counts as a manifest's."""
@@ -572,6 +620,7 @@ def turn_tools(
     spend: SpendGates = NO_SPEND_GATES,
     ledger: Ledger = UNGATED_LEDGER,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
 ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext], ObjectVerbs]:
     """The full tool set a turn dispatches against — core builtins plus every extension's declared
     tools and connector tools — the workspace-scoped ExtensionContext each extension tool's
@@ -637,6 +686,7 @@ def turn_tools(
             ledger=ledger,
             cloud_client=manifest.cloud_client,
             cloud=cloud,
+            self_user_ids=self_user_ids,
         )
         for tool in declared_tools:
             if tool.bound is not None:
@@ -684,6 +734,7 @@ def member_object_registry(
     spend: SpendGates,
     ledger: Ledger,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
 ) -> MemberObjectRegistry:
     """The deploy's object kinds and actions bound for member reads outside a turn — the portal's
     registry. The same kinds and the same boot validation as `turn_tools`, but each extension
@@ -732,6 +783,7 @@ def member_object_registry(
             ledger=ledger,
             cloud_client=manifest.cloud_client,
             cloud=cloud,
+            self_user_ids=self_user_ids,
         )
         actions.extend(
             BoundAction(action=tool, extension=manifest.name, context=context)
@@ -903,6 +955,7 @@ async def turn_member_skills(
     *,
     agent_name: str,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
 ) -> tuple[tuple[SkillCard, ...], SkillMaterializer]:
     """The bound agent's member tier: every active extension's saved-skill routing cards, in load
     order, and one materializer that routes a name back to the provider that contributed it (an
@@ -929,6 +982,7 @@ async def turn_member_skills(
             minted=minted_slots(manifest),
             cloud_client=manifest.cloud_client,
             cloud=cloud,
+            self_user_ids=self_user_ids,
         )
         for card in await manifest.member_skills.cards(context):
             if card.agents and agent_name not in card.agents:
@@ -956,6 +1010,7 @@ async def member_skill_listing(
     embed: EmbedClient | None = None,
     *,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
 ) -> tuple[RuntimeSkill, ...]:
     """Every provider's member skills materialized whole — the portal's management listing read:
     one store read per provider through `materialize_all`, a corrupt row skipped by the provider
@@ -979,6 +1034,7 @@ async def member_skill_listing(
             minted=minted_slots(manifest),
             cloud_client=manifest.cloud_client,
             cloud=cloud,
+            self_user_ids=self_user_ids,
         )
         for skill in await manifest.member_skills.materialize_all(context):
             if skill.name in listed:
@@ -997,6 +1053,7 @@ def index_backend(
     credential_store: CredentialStore | None,
     *,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
 ) -> IndexBackend:
     """The workspace's index backend: the named backend an extension contributes through its
     `indexes` Manifest point, or — the config knob unset — the base-pinned `index_default`
@@ -1017,6 +1074,7 @@ def index_backend(
                 minted=minted_slots(manifest),
                 cloud_client=manifest.cloud_client,
                 cloud=cloud,
+                self_user_ids=self_user_ids,
             )
             return spec.factory(context)
     raise NotRegisteredError(f"config selects index backend {name!r} but no extension registers it")
@@ -1028,6 +1086,7 @@ def embed_backend(
     credential_store: CredentialStore | None,
     *,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
 ) -> EmbedClient:
     """The deploy's embed client: the named backend an extension contributes through its `embeds`
     Manifest point, or — the config knob unset — the base-pinned `embed_openai` extension
@@ -1048,6 +1107,7 @@ def embed_backend(
                 minted=minted_slots(manifest),
                 cloud_client=manifest.cloud_client,
                 cloud=cloud,
+                self_user_ids=self_user_ids,
             )
             return spec.factory(context)
     raise NotRegisteredError(f"config selects embed backend {name!r} but no extension registers it")
@@ -1061,6 +1121,7 @@ def memory_search(
     name: str = DEFAULT_MEMORY_SEARCH_PROVIDER,
     *,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
 ) -> MemorySearch | None:
     """Build one named provider with its declaring extension's scoped context."""
     providers: list[tuple[Manifest, MemorySearchProviderSpec]] = []
@@ -1088,6 +1149,7 @@ def memory_search(
         minted=minted_slots(manifest),
         cloud_client=manifest.cloud_client,
         cloud=cloud,
+        self_user_ids=self_user_ids,
     )
     return MemorySearch(spec.build(context))
 
@@ -1161,6 +1223,7 @@ async def turn_workspace_facts(
     spend: SpendGates,
     ledger: Ledger,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
 ) -> tuple[str, ...]:
     """The lines every declared workspace fact says this workspace holds, in manifest order.
 
@@ -1186,6 +1249,7 @@ async def turn_workspace_facts(
             ledger=ledger,
             cloud_client=manifest.cloud_client,
             cloud=cloud,
+            self_user_ids=self_user_ids,
         )
         for fact in manifest.workspace_facts:
             try:
@@ -1216,6 +1280,7 @@ def turn_hooks(
     spend: SpendGates = NO_SPEND_GATES,
     ledger: Ledger = UNGATED_LEDGER,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
 ) -> HookChain:
     """The turn's reactive hook chain — every declared turn-lifecycle hook bound to its extension's
     workspace-scoped ExtensionContext (the same handle its tools and jobs receive), grouped by
@@ -1256,6 +1321,7 @@ def turn_hooks(
             ledger=ledger,
             cloud_client=manifest.cloud_client,
             cloud=cloud,
+            self_user_ids=self_user_ids,
         )
         for spec in manifest.hooks:
             if spec.event not in TURN_HOOK_EVENTS:
@@ -1302,6 +1368,7 @@ def connection_hooks(
     spend: SpendGates,
     ledger: Ledger,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
 ) -> ConnectionHookChain:
     """The chain the connect flow publishes to — every declared `connection_recorded` hook bound to
     its extension's workspace-scoped ExtensionContext, the same handle its jobs receive, so the
@@ -1326,6 +1393,7 @@ def connection_hooks(
             ledger=ledger,
             cloud_client=manifest.cloud_client,
             cloud=cloud,
+            self_user_ids=self_user_ids,
         )
         bound.extend(BoundHook(spec=spec, ext=context) for spec in specs)
     return ConnectionHookChain(hooks=tuple(bound))

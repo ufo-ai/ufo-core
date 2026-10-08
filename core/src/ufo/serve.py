@@ -89,6 +89,7 @@ from ufo.host.ext.loader import (
     member_skill_listing,
     memory_search,
     proxy_credentials,
+    self_user_id_resolvers,
     skill_registry,
     turn_subagent_grants,
     turn_subagents,
@@ -133,7 +134,13 @@ from ufo.runtime.context_boundary import (
     select_flagged_context_boundary,
 )
 from ufo.runtime.delivery import DeliverySweep
-from ufo.runtime.ext.context import ConversationProbes, CredentialAccess, ModelAccess
+from ufo.runtime.ext.context import (
+    NO_SELF_USER_IDS,
+    ConversationProbes,
+    CredentialAccess,
+    ModelAccess,
+    SelfUserIdResolver,
+)
 from ufo.runtime.ext.context import context_for as extension_context_for
 from ufo.runtime.ext.conversation_slots import BoundConversationSlot
 from ufo.runtime.ext.deploy import DeployContext
@@ -157,7 +164,6 @@ from ufo.runtime.ext.surface import (
     SurfaceAuth,
     SurfaceBoot,
     SurfaceContext,
-    SurfaceIdentityContext,
     SurfaceListenerRunner,
     SurfaceModel,
     SurfaceRoute,
@@ -209,7 +215,6 @@ from ufo.runtime.sources.sync import (
     CorePageFeed,
     FolderSource,
     SourceBackend,
-    SourceIdentityResolver,
     SyncDriver,
     register_sources,
 )
@@ -415,6 +420,7 @@ def run(fleet: Fleet) -> None:
     init_flags(_select_flag_provider(config, manifests))
     blob_backend = blob_store_for(config.blob)
     blob = WorkspaceBlobStore(backend=blob_backend)
+    self_user_ids = self_user_id_resolvers(manifests, credentials, blob)
     fleet_blob = FleetBlobStore(backend=blob_backend)
     artifact_secret = os.environ.get(config.artifacts.token_secret_env, "")
     hub = _select_hub(config, manifests)
@@ -423,9 +429,23 @@ def run(fleet: Fleet) -> None:
     carrier, carrier_spec = carriers.carrier, carriers.spec
     runtime_identity = _runtime_identity(config, carrier_spec)
     registry = model_registry(config, manifests)
-    embed = embed_backend(manifests, config.memory.embed_backend, credentials, cloud=cloud)
-    index = index_backend(manifests, config.memory.index_backend, credentials, cloud=cloud)
-    memory = memory_search(manifests, credentials, index, embed, cloud=cloud)
+    embed = embed_backend(
+        manifests,
+        config.memory.embed_backend,
+        credentials,
+        cloud=cloud,
+        self_user_ids=self_user_ids,
+    )
+    index = index_backend(
+        manifests,
+        config.memory.index_backend,
+        credentials,
+        cloud=cloud,
+        self_user_ids=self_user_ids,
+    )
+    memory = memory_search(
+        manifests, credentials, index, embed, cloud=cloud, self_user_ids=self_user_ids
+    )
     search = _select_search_provider(config, manifests, credentials)
     subagents = SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests)))
     subagent_grants = turn_subagent_grants(manifests)
@@ -510,6 +530,7 @@ def run(fleet: Fleet) -> None:
             spend=spend,
             ledger=ledger,
             cloud=cloud,
+            self_user_ids=self_user_ids,
         ),
         registry=registry,
         skills=skills,
@@ -545,6 +566,7 @@ def run(fleet: Fleet) -> None:
             spend=spend,
             ledger=ledger,
             cloud=cloud,
+            self_user_ids=self_user_ids,
         )
     )
     dbos = DBOS(
@@ -591,7 +613,7 @@ def run(fleet: Fleet) -> None:
         blob=blob,
         postgres=config.database.url.startswith("postgresql"),
         source_credentials=SourceCredentialResolver(connectors),
-        identity_resolvers=_source_identity_resolvers(manifests, credentials, blob),
+        identity_resolvers=self_user_ids,
         spend=spend,
     )
     unknown_backends = sorted(
@@ -601,7 +623,7 @@ def run(fleet: Fleet) -> None:
         raise RuntimeError(f"[[sources]] names unknown backends: {', '.join(unknown_backends)}")
     app.state.configured_sources = config.sources
     page_feed = CorePageFeed(blob=blob)
-    _launch_jobs(runtime, invoker_for, sync_driver, page_feed, probes, cloud)
+    _launch_jobs(runtime, invoker_for, sync_driver, page_feed, probes, cloud, self_user_ids)
     _mount_ext_routes(
         app,
         manifests,
@@ -612,6 +634,7 @@ def run(fleet: Fleet) -> None:
         spend,
         ledger,
         cloud=cloud,
+        self_user_ids=self_user_ids,
         vault=VaultReads(
             credentials,
             workspace_slot_source(manifests),
@@ -661,7 +684,7 @@ def run(fleet: Fleet) -> None:
         sandbox_sizes=carrier_spec.sizes,
         skills=skills,
         member_skill_listing=lambda: member_skill_listing(
-            manifests, credentials, index, embed, cloud=cloud
+            manifests, credentials, index, embed, cloud=cloud, self_user_ids=self_user_ids
         ),
         memory=memory,
         sign_in_path=config.serve.sign_in_path,
@@ -676,8 +699,10 @@ def run(fleet: Fleet) -> None:
             spend=spend,
             ledger=ledger,
             cloud=cloud,
+            self_user_ids=self_user_ids,
         ),
         cloud=cloud,
+        self_user_ids=self_user_ids,
     )
     _assert_no_reserved_routes(app, config.serve.gateway_prefixes)
     log("serve.started", fleet=fleet.name, host=config.serve.host, port=config.serve.port)
@@ -737,6 +762,7 @@ def _launch_jobs(
     page_feed: CorePageFeed,
     probes: ConversationProbes,
     cloud: CloudApis | None,
+    self_user_ids: Mapping[str, SelfUserIdResolver],
 ) -> None:
     page_change_runner = PageChangeRunner(
         manifests=runtime.manifests,
@@ -752,6 +778,7 @@ def _launch_jobs(
         spend=runtime.spend,
         ledger=runtime.ledger,
         cloud=cloud,
+        self_user_ids=self_user_ids,
     )
     preview_url = os.environ.get(PREVIEW_SERVICE_URL_ENV)
     preview_renderer = (
@@ -791,6 +818,7 @@ def _launch_jobs(
         spend=runtime.spend,
         ledger=runtime.ledger,
         cloud=cloud,
+        self_user_ids=self_user_ids,
         public_base_url=runtime.config.connect.public_base_url,
         home_surface=home_surface(runtime.manifests),
     ).launch()
@@ -807,50 +835,6 @@ def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend
                 raise RuntimeError(f"two extensions register source backend {provider.backend!r}")
             backends[provider.backend] = provider.build(credentials)
     return backends
-
-
-def _source_identity_resolvers(
-    manifests: tuple[Manifest, ...],
-    credentials: CredentialStore | None,
-    blob: WorkspaceBlobStore,
-) -> dict[str, SourceIdentityResolver]:
-    resolvers: dict[str, SourceIdentityResolver] = {}
-    for manifest in manifests:
-        declared = frozenset(slot.name for slot in manifest.credentials)
-        for surface in manifest.surfaces:
-            if surface.self_user_id is None:
-                continue
-            if surface.name in resolvers:
-                raise RuntimeError(f"two surfaces resolve source identity for {surface.name!r}")
-
-            async def resolve(
-                workspace_id: UUID,
-                handler=surface.self_user_id,
-                slots=declared,
-                store=credentials,
-            ) -> str | None:
-                async def credential(credential_slot: str) -> str:
-                    if credential_slot not in slots:
-                        raise ValueError(
-                            f"surface identity reads undeclared credential slot {credential_slot!r}"
-                        )
-                    if store is None:
-                        raise RuntimeError(
-                            "surface identity reads a credential but no store is configured"
-                        )
-                    return await store.get(workspace_id, credential_slot)
-
-                with ws(workspace_id):
-                    return await handler(
-                        SurfaceIdentityContext(
-                            workspace_id=workspace_id,
-                            blob=blob,
-                            credential=credential,
-                        )
-                    )
-
-            resolvers[surface.name] = resolve
-    return resolvers
 
 
 def _select_hub(config: Config, manifests: tuple[Manifest, ...]) -> Hub:
@@ -1147,6 +1131,7 @@ def _mount_ext_routes(
     ledger: Ledger,
     *,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
     vault: VaultReads | None = None,
 ) -> None:
     for manifest in manifests:
@@ -1171,6 +1156,7 @@ def _mount_ext_routes(
             vault=vault,
             cloud_client=manifest.cloud_client,
             cloud=cloud,
+            self_user_ids=self_user_ids,
         )
         for spec in manifest.routes:
 
@@ -1365,6 +1351,7 @@ def _mount_shared_surfaces(
     ledger: Ledger = UNGATED_LEDGER,
     ambient_reply_for: "Callable[[str], AmbientReplyClassifier] | None" = None,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
 ) -> None:
     app.add_middleware(WorkspaceScopeBoundary)
     if connectors is None:
@@ -1395,6 +1382,7 @@ def _mount_shared_surfaces(
                 ledger=ledger,
                 cloud_client=manifest.cloud_client,
                 cloud=cloud,
+                self_user_ids=self_user_ids,
             ),
         )
         for manifest, provider in conversation_slot_declarations(manifests)
@@ -1693,6 +1681,7 @@ def _connect_flow(
     spend: SpendGates,
     ledger: Ledger,
     cloud: CloudApis | None = None,
+    self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
 ) -> ConnectFlow | None:
     if credentials is None:
         return None
@@ -1712,7 +1701,14 @@ def _connect_flow(
         portal_url=portal_url(config.connect.public_base_url, home_surface(manifests)),
         resolver=open_connector_namespace(manifests),
         connections=connection_hooks(
-            manifests, credentials, index, embed, spend=spend, ledger=ledger, cloud=cloud
+            manifests,
+            credentials,
+            index,
+            embed,
+            spend=spend,
+            ledger=ledger,
+            cloud=cloud,
+            self_user_ids=self_user_ids,
         ),
         resumption=resumption,
         labels={

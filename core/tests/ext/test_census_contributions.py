@@ -211,6 +211,7 @@ def _served_jobs(
         CorePageFeed(blob=blob),
         None,
         None,
+        {},
     )
     return launched[0]
 
