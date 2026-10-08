@@ -1,5 +1,5 @@
-"""Compile one session's egress policy, and answer the two questions the tool bridge and the cache
-daemon still ask of a run: whether its turn is live, and which git credential a cached fetch rides.
+"""Compile one session's egress policy, and answer the two questions egress control asks of a run
+token: whether its turn is live, and which git credential a cached fetch rides.
 `PerAgentRules` derives everything fresh each call from the deploy's own declarations, the
 workspace's keyed credentials, and the bound agent's grants, under the caller's workspace scope."""
 

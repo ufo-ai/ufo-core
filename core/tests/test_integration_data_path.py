@@ -311,7 +311,7 @@ async def test_member_fact_recall_is_isolated_from_other_members(db: None) -> No
         )
 
 
-async def test_metered_sandbox_tokens_breach_a_member_cap_and_park(db: None) -> None:
+async def test_models_tokens_via_proxy_breach_a_member_cap_and_park(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed_billable(connection)
         await _set_member_cap(

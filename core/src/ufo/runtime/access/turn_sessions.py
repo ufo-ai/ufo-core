@@ -25,10 +25,6 @@ from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import PolicyScope, SessionPolicy
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.access.proxy_sessions import (
-    AGENT_LABEL,
-    CONVERSATION_LABEL,
-    MEMBER_LABEL,
-    PROBE_LABEL,
     PROXY_SESSION_MAX_TTL_SECONDS,
     PROXY_SESSION_TTL_SECONDS,
     SESSION_EXPIRED_CODE,
@@ -37,7 +33,13 @@ from ufo.runtime.access.proxy_sessions import (
     SessionCreated,
 )
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.billing.accounting import TURN_LABEL
+from ufo.runtime.billing.accounting import (
+    AGENT_LABEL,
+    CONVERSATION_LABEL,
+    MEMBER_LABEL,
+    PROBE_LABEL,
+    TURN_LABEL,
+)
 from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import NON_TERMINAL_STATUSES, Turn, TurnStatus
@@ -46,11 +48,10 @@ POLICY_KEY_DIGEST_CHARS = 16
 PROBE_SESSION_MARGIN_SECONDS = 60
 
 
+# The proxy service withholds a route's header values in every answer, so a changed policy is
+# found by comparing the one core last sent.
 @dataclass(frozen=True)
 class _Held:
-    """An open session and the policy core last sent it: the proxy service answers a route's header
-    values withheld, so a changed policy is found by comparing what was sent."""
-
     session: SessionCreated
     policy: SessionPolicy
 

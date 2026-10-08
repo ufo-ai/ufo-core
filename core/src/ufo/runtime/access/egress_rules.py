@@ -126,7 +126,7 @@ async def derive_credential_binds(
     declares for itself: each injecting slot holding a value binds its name on the host its
     declaration resolves to, under the env the sandbox sends its sentinel as. A slot with nothing
     stored binds nothing, and neither does one whose stored host selection the declaration does not
-    offer. Which slots hold a value is one read; no value is read.
+    offer. Which slots hold a value is one read; no secret is read, only a stored host selection.
 
     **One slot resolves or one slot is withheld — never the turn.** A host selection this deploy
     cannot decrypt is that slot's own uncertainty, so a slot that raises contributes nothing and the

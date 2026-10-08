@@ -54,7 +54,8 @@ the session's environment from the proxy service, writes `$UFO_HOME/proxy/ca.pem
 roots plus the proxy's CA), starts a loopback daemon that relays to the proxy over TLS (reusing one
 that already relays to the same proxy service and replacing one that relays elsewhere), and prints
 the variables to set: the four proxy variables pointing at the daemon, `NO_PROXY`, each binding's
-sentinel, and the CA bundle for every tool that reads one. `--env` prints them as `export` lines for `eval "$(ufo proxy --session TOKEN --env)"`, and `--stop` ends the daemon.
+sentinel, and the CA bundle for every tool that reads one. `--env` prints them as `export` lines
+for `eval "$(ufo proxy --session TOKEN --env)"`, and `--stop` ends the daemon.
 
 ## Run it in development
 

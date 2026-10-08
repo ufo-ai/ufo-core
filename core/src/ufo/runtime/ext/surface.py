@@ -3933,8 +3933,8 @@ class SurfaceContext:
         On S3 the sandbox fetches it itself: a `curl` of a presigned GET, run as an off-turn probe
         so a signed token authorizes the egress — the bytes go store to sandbox and never cross this
         process. The probe needs no connector capability: the presigned URL is its own authority
-        and the store host is admitted by the base egress rules. A filesystem dev store signs no
-        URL, so the bytes stream out through the carrier instead."""
+        and every session policy the deploy compiles names the store host. A filesystem dev store
+        signs no URL, so the bytes stream out through the carrier instead."""
         match self.blob.backend:
             case S3BlobStore():
                 if self._probes is None:

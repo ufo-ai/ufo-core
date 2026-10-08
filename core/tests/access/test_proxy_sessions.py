@@ -19,16 +19,14 @@ from ufo.host.ext.loader import proxy_credentials
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.egress_rules import Bind, HostEntry, SessionPolicy
 from ufo.runtime.access.proxy_sessions import (
-    AGENT_LABEL,
-    CONVERSATION_LABEL,
     IDEMPOTENCY_HEADER,
     INVALID_REQUEST_CODE,
-    MEMBER_LABEL,
     PROXY_CALL_TIMEOUT_SECONDS,
     PROXY_SESSION_TTL_SECONDS,
     ProxyRefused,
     ProxySessions,
 )
+from ufo.runtime.billing.accounting import AGENT_LABEL, CONVERSATION_LABEL, MEMBER_LABEL
 from ufo.runtime.ext.context import ExtensionContext
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest, ProxyCredentialSpec
 from ufo.runtime.workspace import init_workspace_credentials, ws

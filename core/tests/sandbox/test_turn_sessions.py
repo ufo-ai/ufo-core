@@ -20,10 +20,7 @@ from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import UFO_MODELS_SECRET, Bind, policy_hosts
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.access.proxy_sessions import (
-    AGENT_LABEL,
-    CONVERSATION_LABEL,
     IDEMPOTENCY_HEADER,
-    MEMBER_LABEL,
     PROXY_SESSION_MAX_TTL_SECONDS,
     PROXY_SESSION_TTL_SECONDS,
     SESSION_REVOKED_CODE,
@@ -34,7 +31,7 @@ from ufo.runtime.access.turn_sessions import TurnSessions
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.background_tasks import mark_detached
-from ufo.runtime.billing.accounting import TURN_LABEL
+from ufo.runtime.billing.accounting import AGENT_LABEL, CONVERSATION_LABEL, MEMBER_LABEL, TURN_LABEL
 from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.runtime.workspace import ws
 from ufo.schema import tables

@@ -8,7 +8,7 @@ The lockfile is the deploy's pinned extension set: when it exists, only the exte
 and each must match its pinned digest or boot fails loud — tamper and drift are refused, not run.
 With no lockfile the deploy is in dev mode and every discovered extension is active. `ufoctl ext`
 and `ufoctl bundle` write this file; `load_manifests` reads it, so the set the operator pinned is
-exactly what every derivation (tools, jobs, routes, proxy rules) sees.
+exactly what every derivation (tools, jobs, routes, session policies) sees.
 
 `turn_tools` reads the active manifests into the set a turn dispatches against and the owning
 ExtensionContext for each extension tool; `turn_hooks` reads them into the turn's reactive
@@ -470,8 +470,8 @@ def deploy_claims(manifests: tuple[Manifest, ...]) -> DeployCredentials:
 
 def workspace_slot_source(manifests: tuple[Manifest, ...]) -> WorkspaceSlots:
     """Every injecting slot a workspace can hold: this deploy's own declarations, and the reader
-    each extension that resolves slots per workspace contributes. The proxy's rule derivation and
-    the sandbox's environment take this one source, so neither knows which half a slot came from.
+    each extension that resolves slots per workspace contributes. The session policy and the
+    sandbox's environment take this one source, so neither knows which half a slot came from.
 
     A provider's reader runs under its extension's own workspace-scoped context — the handle its
     tools and jobs receive — because the rows it reads are the extension's own."""

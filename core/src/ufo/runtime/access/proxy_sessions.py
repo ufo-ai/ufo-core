@@ -31,10 +31,6 @@ SESSIONS_PATH = "/v1/sessions"
 SESSION_REVOKED_CODE = "session_revoked"
 SESSION_EXPIRED_CODE = "conflict"
 INVALID_REQUEST_CODE = "invalid_request"
-CONVERSATION_LABEL = "conversation"
-AGENT_LABEL = "agent"
-MEMBER_LABEL = "member"
-PROBE_LABEL = "probe"
 
 
 class CreateSession(BaseModel):

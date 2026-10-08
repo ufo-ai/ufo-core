@@ -67,11 +67,7 @@ from ufo.runtime.access.egress_rules import (
 )
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.access.proxy_sessions import (
-    AGENT_LABEL,
-    CONVERSATION_LABEL,
     IDEMPOTENCY_HEADER,
-    MEMBER_LABEL,
-    PROBE_LABEL,
     ProxySessions,
 )
 from ufo.runtime.access.turn_sessions import PROBE_SESSION_MARGIN_SECONDS, ProbeSessions
@@ -79,7 +75,11 @@ from ufo.runtime.access.vault import SecretUnbound, SecretValue, VaultReads
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.billing.accounting import (
+    AGENT_LABEL,
+    CONVERSATION_LABEL,
     GIB_DIMENSION,
+    MEMBER_LABEL,
+    PROBE_LABEL,
     PROXY_SERVICE,
     REQUESTS_DIMENSION,
     UNGATED_LEDGER,

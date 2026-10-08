@@ -44,6 +44,10 @@ SERVICE_UNITS: Mapping[str, tuple[str, ...]] = {
 }
 """The `(service, dimension)` pairs a service record may carry."""
 TURN_LABEL = "turn"
+CONVERSATION_LABEL = "conversation"
+AGENT_LABEL = "agent"
+MEMBER_LABEL = "member"
+PROBE_LABEL = "probe"
 VIA_LABEL = "via"
 PROXY_VIA = "proxy"
 LABELS_MAX_KEYS = 16

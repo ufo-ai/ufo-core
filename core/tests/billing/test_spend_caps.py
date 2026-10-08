@@ -379,7 +379,7 @@ async def test_under_cap_allows(db: None) -> None:
     assert decision.outcome == "allow"
 
 
-async def test_sandbox_tokens_count_toward_a_cap(db: None) -> None:
+async def test_models_tokens_via_proxy_count_toward_a_cap(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
         turn_id = uuid4()
