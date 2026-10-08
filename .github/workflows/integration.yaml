@@ -72,27 +72,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
-      - id: egress
-        uses: actions/cache@v4
-        with:
-          path: servers/egress/target/debug/ufo-egress
-          key: ufo-egress-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('servers/egress/**', '!servers/egress/target/**') }}
       - id: client
         uses: actions/cache@v4
         with:
           path: client/target/x86_64-unknown-linux-musl/release/ufo
           key: ufo-client-musl-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('client/**', '!client/target/**') }}
-      - if: steps.egress.outputs.cache-hit != 'true'
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: servers/egress
       - if: steps.client.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: client
           key: x86_64-unknown-linux-musl
-      - if: steps.egress.outputs.cache-hit != 'true'
-        run: cargo build --manifest-path servers/egress/Cargo.toml
       - if: steps.client.outputs.cache-hit != 'true'
         uses: ./.github/actions/client-gh
         with:

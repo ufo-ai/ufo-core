@@ -5,6 +5,5 @@ The standalone Rust services. Each directory is one self-contained crate with it
 
 | Crate      | Binary        | Does                                                                 |
 | ---------- | ------------- | -------------------------------------------------------------------- |
-| `cache/`   | `ufo-cache`   | caches sandbox git clones and package installs in the egress path    |
-| `egress/`  | `ufo-egress`  | the proxy every byte of sandbox network traffic passes through       |
+| `cache/`   | `ufo-cache`   | caches sandbox git clones and package installs beside the proxy      |
 | `preview/` | `ufo-preview` | renders documents to PNG page images and videos to a frame           |

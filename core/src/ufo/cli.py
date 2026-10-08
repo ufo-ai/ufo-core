@@ -541,7 +541,7 @@ def new_migration(slug: str) -> None:
     ),
 )
 def serve(fleet: str) -> None:
-    """Run surfaces, workers, jobs, and the egress-control RPC the Rust proxy calls."""
+    """Run surfaces, workers, jobs, and the routes the proxy service relays to."""
     config = load_config()
     surface = home_surface(load_manifests(config.pack.name))
     if surface is not None:
