@@ -117,7 +117,7 @@ class TurnSessions:
             status, detached_until = await self._ending()
             now = datetime.now(UTC)
             if status in NON_TERMINAL_STATUSES:
-                log("turn.sessions.left_open", turn_id=str(self.turn.id), status=status)
+                log("turn.sessions.left_open", turn_id=str(self.turn.id), turn_status=status)
                 return
             if detached_until is None or detached_until <= now:
                 revoked = await self.proxy.revoke_labelled(
