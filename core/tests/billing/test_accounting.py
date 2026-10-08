@@ -1622,7 +1622,7 @@ async def test_usage_lines_refuses_an_unknown_key_and_an_inverted_window(db: Non
         for since in (now, now + timedelta(hours=1)):
             with pytest.raises(ValueError, match="starts before it ends"):
                 await usage_lines(connection, workspace_id, since, now, keys=SERVICE_KEYS)
-        with pytest.raises(ValueError, match="label key"):
+        with pytest.raises(ValueError) as refused:
             await usage_lines(
                 connection,
                 workspace_id,
@@ -1631,6 +1631,9 @@ async def test_usage_lines_refuses_an_unknown_key_and_an_inverted_window(db: Non
                 keys=SERVICE_KEYS,
                 label_keys=frozenset({"Team"}),
             )
+        assert str(refused.value) == (
+            "A label key is 1 to 64 lowercase letters, digits, dots, dashes and underscores."
+        )
         with pytest.raises(ValueError, match="label key"):
             await usage_lines(
                 connection, workspace_id, hour_ago, now, keys=SERVICE_KEYS, labels={"te am": "x"}

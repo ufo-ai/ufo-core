@@ -49,7 +49,8 @@ VIA_LABEL = "via"
 PROXY_VIA = "proxy"
 LABELS_MAX_KEYS = 16
 LABEL_MAX_CHARS = 64
-LABEL_KEY = re.compile(r"[a-z0-9_.-]{1,64}")
+LABEL_KEY_MAX_CHARS = 64
+LABEL_KEY = re.compile(rf"[a-z0-9_.-]{{1,{LABEL_KEY_MAX_CHARS}}}")
 SERVICE_CLOCK_SKEW_SECONDS = 60
 UNCACHED_PROMPT_WARN_TOKENS = 20_000
 """Where a turn that cached nothing stops being a small cold prompt and starts being a fault. Well
@@ -575,8 +576,10 @@ class Ledger:
         """Book one record a service metered, once: True when this call wrote it, False when the
         same record was booked before. The row is keyed on the service, the resource it metered
         (else its session), the unit and the service's attempt, so a replayed batch books and
-        charges nothing twice, and a replay whose content differs raises `TurnUsageConflict` rather
-        than move what was booked and charged.
+        charges nothing twice. A replay whose workspace, backend, token, session, labels, amount,
+        `byok`, price or model differs from the booked row raises `TurnUsageConflict` rather than
+        move what was booked and charged; its price digest, time and token classes are not
+        compared.
 
         The row is booked at `occurred_at`, which caps, windows and day buckets key on, so it falls
         at most `JOB_DAY_SETTLE_SECONDS` before now, on a day the fold has not closed, and at most
@@ -860,10 +863,12 @@ EXPORT_SETTLE_MARGIN_SECONDS = 900
 @dataclass(frozen=True, slots=True)
 class UsageExport:
     """One unshipped usage delta for an external billing consumer: the ledger row's growth between
-    `from_amount` and the amount at mint, frozen so a re-send after an unacknowledged delivery is
-    byte-identical under the same `(ledger_id, from_amount)` dedup key — the consumer's
-    at-least-once retry can therefore never double- or under-bill. A service row also names its
-    backend, token, session and labels."""
+    `from_amount` and the amount at mint, frozen so a re-send after an unacknowledged delivery
+    carries the same amounts under the same `(ledger_id, from_amount)` dedup key — the consumer's
+    at-least-once retry can therefore never double- or under-bill. The descriptive fields are read
+    from the ledger row at each send, so a re-send carries the labels the service backfill gave a
+    row it reached after the mint. A service row also names its backend, token, session and
+    labels."""
 
     ledger_id: UUID
     from_amount: int
@@ -1016,8 +1021,8 @@ async def read_pending_usage_exports(
     connection: AsyncConnection, workspace_id: UUID, consumer: str, limit: int
 ) -> tuple[UsageExport, ...]:
     """The consumer's minted, unacknowledged deltas in mint order, each joined to its ledger row's
-    immutable descriptive fields. A delivery the consumer never saw acknowledged stays pending and
-    re-reads identically — the frozen intent, never a recomputation. A row the service backfill
+    descriptive fields as they read now. A delivery the consumer never saw acknowledged stays
+    pending and re-reads the same frozen amounts, never a recomputation. A row the service backfill
     has not reached yet reads the service its dimension belongs to."""
     export = tables.ledger_export
     rows = (
@@ -2209,8 +2214,8 @@ async def usage_lines(
         raise ValueError("A usage read's window starts before it ends.")
     if any(LABEL_KEY.fullmatch(key) is None for key in (*label_keys, *labels)):
         raise ValueError(
-            f"A label key is at most {LABEL_MAX_CHARS} characters of lowercase letters, digits, "
-            "dot, dash and underscore."
+            f"A label key is 1 to {LABEL_KEY_MAX_CHARS} lowercase letters, digits, dots, dashes "
+            "and underscores."
         )
     rolled_through = await _rolled_through(connection, workspace_id)
     ledger, folded = tables.ledger, tables.ledger_job_day
