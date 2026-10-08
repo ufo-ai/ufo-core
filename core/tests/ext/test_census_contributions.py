@@ -210,7 +210,7 @@ def _served_jobs(
         SyncDriver(backends={}, blob=blob, postgres=False),
         None,
         None,
-        frozenset(),
+        None,
         {},
     )
     return launched[0]

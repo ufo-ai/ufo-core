@@ -289,14 +289,18 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
     probes = object()
     cloud = cloud_apis_for()
     speakers = {"chat": object()}
-    serve._launch_jobs(runtime, object(), object(), probes, cloud, frozenset({"sources"}), speakers)
+    sources = serve._sources_service(cloud, frozenset({"sources"}))
+    serve._launch_jobs(runtime, object(), object(), probes, cloud, sources, speakers)
 
     assert captured["page"]["cloud"] is captured["jobs"]["cloud"] is cloud
     feed = captured["page"]["pages"]
     assert isinstance(feed, SourcesFeed)
-    assert feed.apis is cloud
-    assert feed.links.entries == {}
+    assert sources is not None
+    assert feed.apis is sources.apis is cloud
+    assert feed.links is sources.links
+    assert sources.links.entries == {}
     assert captured["jobs"]["pages"] is feed
+    assert captured["page"]["sources_service"] is captured["jobs"]["sources_service"] is sources
     assert captured["page"]["self_user_ids"] is captured["jobs"]["self_user_ids"] is speakers
     assert captured["page"]["manifests"] is manifests
     assert captured["page"]["registry"] is registry
@@ -361,14 +365,16 @@ def test_launch_jobs_hands_both_runners_the_background_jobs_model(
     monkeypatch.setattr(serve, "JobRunner", Runner)
 
     probes = object()
-    serve._launch_jobs(runtime, object(), object(), probes, None, frozenset(), {})
+    serve._launch_jobs(runtime, object(), object(), probes, None, None, {})
 
     feed = captured["page"]["pages"]
     assert isinstance(feed, CorePageFeed)
     assert feed.blob is runtime.blob
     assert captured["jobs"]["pages"] is feed
+    assert captured["page"]["sources_service"] is captured["jobs"]["sources_service"] is None
+    assert serve._sources_service(cloud_apis_for(), frozenset()) is None
     with pytest.raises(RuntimeError, match="UFO_CLOUD_CLIENTS names sources"):
-        serve._launch_jobs(runtime, object(), object(), probes, None, frozenset({"sources"}), {})
+        serve._sources_service(None, frozenset({"sources"}))
     assert captured["page"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL
     assert captured["jobs"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL
     assert captured["jobs"]["registry"] is registry

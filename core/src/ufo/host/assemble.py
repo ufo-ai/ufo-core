@@ -100,6 +100,7 @@ from ufo.runtime.skills.runtime import (
     parse_skill_content,
 )
 from ufo.runtime.skills.selection import MemberVisibility, member_visibility
+from ufo.runtime.sources_api import SourcesService
 from ufo.runtime.subagents import FINISH_CONTRACT, subagent_system_prompt
 from ufo.runtime.tools.context import TextContent, ToolContext, ToolResult
 from ufo.runtime.tools.registry import ToolDef, ToolRegistry
@@ -145,6 +146,7 @@ class HostEnvironment:
     """The deploy's cloud API, which every extension context a turn builds carries for a manifest
     declaring `cloud_client`."""
     self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS
+    sources_service: SourcesService | None = None
 
     async def assemble(self, request: AssembleRequest) -> AssembledTurn:
         turn, agent, profile = request.turn, request.agent, request.profile
@@ -179,6 +181,7 @@ class HostEnvironment:
                 ledger=self.ledger,
                 cloud=self.cloud,
                 self_user_ids=self.self_user_ids,
+                sources_service=self.sources_service,
             )
         )
         if held:
@@ -294,6 +297,7 @@ class HostEnvironment:
             ledger=self.ledger,
             cloud=self.cloud,
             self_user_ids=self.self_user_ids,
+            sources_service=self.sources_service,
         )
 
     def hooks(self, *, audience: Audience) -> HookChain:
@@ -310,6 +314,7 @@ class HostEnvironment:
             ledger=self.ledger,
             cloud=self.cloud,
             self_user_ids=self.self_user_ids,
+            sources_service=self.sources_service,
         )
 
     async def member_skills(
@@ -323,6 +328,7 @@ class HostEnvironment:
             agent_name=agent_name,
             cloud=self.cloud,
             self_user_ids=self.self_user_ids,
+            sources_service=self.sources_service,
         )
 
     async def environment_model(self, environment: str, profile: str | None) -> str | None:

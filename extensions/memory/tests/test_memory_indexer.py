@@ -105,12 +105,13 @@ class ReclassifyingPage:
                 subject=self.before if self.calls == 1 else self.after,
                 revision=self.before_revision if self.calls == 1 else self.after_revision,
                 digest="sha256:test",
-                body_ref=f"pages/{self.page_id}",
                 title="Q3 pricing rollout",
                 stream="pull_requests",
                 indexed=True,
                 as_of="2026-03-01",
                 backend="github",
+                source_id=UUID(int=1),
+                connection_id=UUID(int=2),
             )
         }
 

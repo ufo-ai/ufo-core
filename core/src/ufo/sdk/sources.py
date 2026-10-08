@@ -46,7 +46,7 @@ connector. The concrete shapes live in `ufo.runtime.sources`, reached only here.
 
 A `page_change` consumer reads `PageChange`s from the sources service's feed through `SourcesFeed`,
 each carrying the core connection its source names in `labels.connection`; `SourcesApi` is that
-service's client."""
+service's client, and `SourcesService` the deploy's handle on it where it is selected."""
 
 from ufo.runtime.access.connectors import (
     ToolExecutor as ToolExecutor,
@@ -196,6 +196,9 @@ from ufo.runtime.sources_api import (
     FEED_READS_MAX as FEED_READS_MAX,
 )
 from ufo.runtime.sources_api import (
+    PAGES_READ_MAX as PAGES_READ_MAX,
+)
+from ufo.runtime.sources_api import (
     SOURCE_CONNECTION_LABEL as SOURCE_CONNECTION_LABEL,
 )
 from ufo.runtime.sources_api import (
@@ -203,6 +206,15 @@ from ufo.runtime.sources_api import (
 )
 from ufo.runtime.sources_api import (
     ChangesPage as ChangesPage,
+)
+from ufo.runtime.sources_api import (
+    PagesRead as PagesRead,
+)
+from ufo.runtime.sources_api import (
+    PagesReadResult as PagesReadResult,
+)
+from ufo.runtime.sources_api import (
+    PageSummary as PageSummary,
 )
 from ufo.runtime.sources_api import (
     Source as Source,
@@ -221,6 +233,9 @@ from ufo.runtime.sources_api import (
 )
 from ufo.runtime.sources_api import (
     SourcesFeed as SourcesFeed,
+)
+from ufo.runtime.sources_api import (
+    SourcesService as SourcesService,
 )
 from ufo.runtime.sources_api import (
     WireFeedItem as WireFeedItem,

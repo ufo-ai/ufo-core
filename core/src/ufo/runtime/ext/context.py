@@ -9,6 +9,7 @@ exact path an extension does. The `ExtensionContext` shape is open: it carries t
 index/embed backends, a transaction over the extension's own tables, governed proposals, and
 invoke, without reshaping what handlers already hold."""
 
+import asyncio
 import hashlib
 import json
 import time
@@ -105,6 +106,7 @@ from ufo.runtime.sources.sync import (
     feed_handle,
     feed_handle_for,
 )
+from ufo.runtime.sources_api import SourcesApi, SourcesService
 from ufo.runtime.turns.audience import (
     SHARED_AUDIENCE,
     Audience,
@@ -1123,25 +1125,20 @@ class PageRecord:
 
 @dataclass(frozen=True)
 class PageState:
+    """One live page's state: its visibility subject, revision and content digest, browse
+    metadata, the date it states itself as of, its provider, and the source and core connection it
+    belongs to."""
+
     subject: str
     revision: int
     digest: str
-    body_ref: str
     title: str
     stream: str
     indexed: bool
     as_of: str
     backend: str
-
-
-def _page_with_source() -> sa.Join:
-    return tables.page.join(
-        tables.source,
-        sa.and_(
-            tables.page.c.workspace_id == tables.source.c.workspace_id,
-            tables.page.c.source_uid == tables.source.c.uid,
-        ),
-    )
+    source_id: UUID
+    connection_id: UUID
 
 
 def _page_as_of(
@@ -1382,6 +1379,7 @@ class ExtensionContext:
     cloud_client_allowed: bool = False
     cloud: CloudApis | None = None
     self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS
+    sources_service: SourcesService | None = None
 
     @property
     def workspace_id(self) -> UUID:
@@ -2396,60 +2394,66 @@ class ExtensionContext:
             ).scalar_one()
 
     async def page_states(self, page_ids: tuple[UUID, ...]) -> dict[UUID, PageState]:
-        """Current subject and revision for this workspace's live named pages."""
+        """The live state of this workspace's named pages: the sources service's, for pages whose
+        source names a core connection, where the deploy selects that service; core's page rows
+        otherwise."""
         if not page_ids:
             return {}
-        query = (
-            sa.select(
-                tables.page.c.uid,
-                tables.page.c.subject,
-                tables.page.c.revision,
-                tables.page.c.digest,
-                tables.page.c.body_ref,
-                tables.page.c.title,
-                tables.page.c.stream,
-                tables.page.c.indexed,
-                tables.page.c.record_created_at,
-                tables.page.c.record_updated_at,
-                tables.page.c.updated_at,
-                tables.source.c.backend,
+        if self.sources_service is not None:
+            api = SourcesApi(cloud=self.sources_service.apis.bound(self.store.workspace_id))
+            pages = await api.page_states(page_ids)
+            links = await self.sources_service.links.of(
+                api, self.store.workspace_id, [page.source_id for page in pages]
             )
-            .select_from(_page_with_source())
-            .where(
-                tables.page.c.workspace_id == self.store.workspace_id,
-                tables.page.c.uid.in_(page_ids),
-                tables.page.c.tombstone.is_(False),
-            )
-        )
-        async with workspace_tx() as connection:
-            rows = (await connection.execute(query)).all()
-        return {
-            row.uid: PageState(
-                subject=row.subject,
-                revision=row.revision,
-                digest=row.digest,
-                body_ref=row.body_ref,
-                title=row.title,
-                stream=row.stream,
-                indexed=bool(row.indexed),
-                as_of=_page_as_of(row.record_updated_at, row.record_created_at, row.updated_at),
-                backend=row.backend,
-            )
-            for row in rows
-        }
+            return {
+                page.id: PageState(
+                    subject=page.subject,
+                    revision=page.revision,
+                    digest=page.digest,
+                    title=page.title,
+                    stream=page.stream,
+                    indexed=page.indexed,
+                    as_of=page.as_of.date().isoformat(),
+                    backend=page.provider,
+                    source_id=page.source_id,
+                    connection_id=link.connection_id,
+                )
+                for page in pages
+                if (link := links.get(page.source_id)) is not None
+            }
+        return await self._page_rows(page_ids, sa.true())
 
     async def readable_page_states(
         self, page_ids: tuple[UUID, ...], reader: SourceReader
     ) -> dict[UUID, PageState]:
+        """The live pages among `page_ids` that `reader` may read: disclosed to one of its
+        subjects, on a connection it reaches."""
         if not page_ids:
             return {}
+        if self.sources_service is not None:
+            states, reached = await asyncio.gather(
+                self.page_states(page_ids), self.readable_connections(reader)
+            )
+            return {
+                page_id: state
+                for page_id, state in states.items()
+                if state.subject in reader.subjects and state.connection_id in reached
+            }
+        return await self._page_rows(
+            page_ids,
+            sa.and_(_page_disclosed(reader), _source_readable(self.store.workspace_id, reader)),
+        )
+
+    async def _page_rows(
+        self, page_ids: tuple[UUID, ...], readable: sa.ColumnElement[bool]
+    ) -> dict[UUID, PageState]:
         query = (
             sa.select(
                 tables.page.c.uid,
+                tables.page.c.source_uid,
                 tables.page.c.subject,
                 tables.page.c.revision,
                 tables.page.c.digest,
-                tables.page.c.body_ref,
                 tables.page.c.title,
                 tables.page.c.stream,
                 tables.page.c.indexed,
@@ -2457,14 +2461,22 @@ class ExtensionContext:
                 tables.page.c.record_updated_at,
                 tables.page.c.updated_at,
                 tables.source.c.backend,
+                tables.source.c.connection_id,
             )
-            .select_from(_page_with_source())
+            .select_from(
+                tables.page.join(
+                    tables.source,
+                    sa.and_(
+                        tables.page.c.workspace_id == tables.source.c.workspace_id,
+                        tables.page.c.source_uid == tables.source.c.uid,
+                    ),
+                )
+            )
             .where(
                 tables.page.c.workspace_id == self.store.workspace_id,
                 tables.page.c.uid.in_(page_ids),
                 tables.page.c.tombstone.is_(False),
-                _page_disclosed(reader),
-                _source_readable(self.store.workspace_id, reader),
+                readable,
             )
         )
         async with workspace_tx() as connection:
@@ -2474,12 +2486,13 @@ class ExtensionContext:
                 subject=row.subject,
                 revision=row.revision,
                 digest=row.digest,
-                body_ref=row.body_ref,
                 title=row.title,
                 stream=row.stream,
                 indexed=bool(row.indexed),
                 as_of=_page_as_of(row.record_updated_at, row.record_created_at, row.updated_at),
                 backend=row.backend,
+                source_id=row.source_uid,
+                connection_id=row.connection_id,
             )
             for row in rows
         }
@@ -2954,6 +2967,7 @@ def context_for(
     cloud_client: bool = False,
     cloud: CloudApis | None = None,
     self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
+    sources_service: SourcesService | None = None,
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
@@ -2976,7 +2990,9 @@ def context_for(
     `vault_read` is the manifest's privileged capability to resolve a bound secret through the
     deploy's `vault`, which a context without it never carries, and `cloud_client` its capability
     to call the deploy's `cloud` API as the bound workspace. `self_user_ids` maps each surface
-    declaring a `SurfaceSpec.self_user_id` resolver to it, bound to a workspace by id."""
+    declaring a `SurfaceSpec.self_user_id` resolver to it, bound to a workspace by id.
+    `sources_service` is the deploy's sources service where it is selected, which page state is read
+    from in place of core's page rows."""
     if model_resolver is not None and model_job is None:
         raise ValueError("a wired model_resolver needs the model_job its spend is attributed to")
     if model_resolver is not None and (spend is None or ledger is None):
@@ -3019,4 +3035,5 @@ def context_for(
         cloud_client_allowed=cloud_client,
         cloud=cloud if cloud_client else None,
         self_user_ids=self_user_ids,
+        sources_service=sources_service,
     )

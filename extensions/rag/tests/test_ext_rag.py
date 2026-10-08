@@ -1,9 +1,11 @@
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+import sqlalchemy as sa
 import ufo_ext_rag.manifest as rag
 from ufo_ext_rag.pages import PageStore
 from ufo_ext_rag.prefetch import (
@@ -13,11 +15,17 @@ from ufo_ext_rag.prefetch import (
     Prefetch,
 )
 from ufo_ext_rag.route import route
+from ufo_testsupport.cloud import cloud_apis_for
+from ufo_testsupport.sources_service import SOURCES_WIRE, SourcesServiceStandIn
 
-from ufo.runtime.ext.context import ExtensionContext, PageState, ScopedStore
+from ufo.db import workspace_tx
+from ufo.runtime.ext.context import ExtensionContext, PageState, ScopedStore, context_for
 from ufo.runtime.ext.source_reader import SourceReader
 from ufo.runtime.indexing import OWNER_KIND_PAGE, Chunk, Hit, IndexScope, TextChunker
+from ufo.runtime.sources_api import SourceLink, SourceLinks, SourcesService
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
+from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.context import CredentialAccess
 from ufo.sdk.hub import SourceRef
@@ -34,6 +42,9 @@ ORDER_FORM_BODY = (
 READER = SourceReader(agent_id=uuid4(), requesting_member_id=None, subjects=frozenset({"shared"}))
 PRICING_PAGE = "https://northwind.example/pricing"
 PAGE_DIGEST = "sha256:order-form"
+PAGE_SUMMARY = json.loads(SOURCES_WIRE.read_text(encoding="utf-8"))["sources.pages_read"]["answer"][
+    "body"
+]["items"][0]
 
 
 @dataclass(frozen=True)
@@ -145,12 +156,6 @@ def _index_hit(chunk: Chunk, score: float) -> Hit:
     )
 
 
-def _page_chunks(
-    page_id: UUID, title: str, body: str, subject: str = "shared"
-) -> tuple[Chunk, ...]:
-    return TextChunker().chunk(body, OWNER_KIND_PAGE, str(page_id), subject, PAGE_DIGEST)
-
-
 def _store(
     pages: dict[UUID, tuple[str, str]],
     subject: str = "shared",
@@ -171,12 +176,13 @@ def _store(
                 subject=subject,
                 revision=1,
                 digest=live_digest,
-                body_ref="blob:seed",
                 title=pages[page_id][0],
                 stream="notes",
                 indexed=True,
                 as_of=as_of,
                 backend="notion",
+                source_id=uuid4(),
+                connection_id=uuid4(),
             )
             for page_id in page_ids
             if page_id in pages and subject in reader.subjects
@@ -184,6 +190,116 @@ def _store(
 
     return PageStore(
         index=StubIndex(chunks=chunks, raises=raises), embed=StubEmbed(), readable=readable
+    )
+
+
+@dataclass(frozen=True)
+class _Workspace:
+    workspace_id: UUID
+    agent_id: UUID
+    member_id: UUID
+    shared_id: UUID
+    private_id: UUID
+
+
+async def _workspace() -> _Workspace:
+    state = _Workspace(*(uuid4() for _ in range(5)))
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=state.workspace_id, created_at=now, updated_at=now
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=state.member_id,
+                workspace_id=state.workspace_id,
+                email=f"{state.member_id.hex}@x.test",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=state.agent_id,
+                workspace_id=state.workspace_id,
+                name="ufo",
+                prompt="p",
+                model="m",
+                is_main=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.connection),
+            [
+                {
+                    "id": connection_id,
+                    "workspace_id": state.workspace_id,
+                    "provider": "notion",
+                    "account_id": account_id,
+                    "host": "",
+                    "owner_member_id": owner,
+                    "shared": owner is None,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for connection_id, account_id, owner in (
+                    (state.shared_id, "", None),
+                    (state.private_id, "owned", state.member_id),
+                )
+            ],
+        )
+    return state
+
+
+def _served_store(
+    state: _Workspace,
+    connection_id: UUID,
+    subject: str = SHARED_SUBJECT,
+    live_digest: str = PAGE_DIGEST,
+) -> PageStore:
+    stand_in, source_id = SourcesServiceStandIn(), uuid4()
+    stand_in.answer(
+        "sources.pages_read",
+        200,
+        {
+            "items": [
+                {
+                    **PAGE_SUMMARY,
+                    "id": str(ORDER_FORM),
+                    "source_id": str(source_id),
+                    "title": "Northwind order form",
+                    "subject": subject,
+                    "digest": live_digest,
+                }
+            ]
+        },
+    )
+    context = context_for(
+        rag.NAME,
+        frozenset(),
+        sources_service=SourcesService(
+            apis=cloud_apis_for(stand_in.app),
+            links=SourceLinks(
+                entries={
+                    (state.workspace_id, source_id): SourceLink(
+                        connection_id=connection_id, provider="notion"
+                    )
+                }
+            ),
+        ),
+    )
+    return PageStore(
+        index=StubIndex(
+            chunks=TextChunker().chunk(
+                ORDER_FORM_BODY, OWNER_KIND_PAGE, str(ORDER_FORM), subject, PAGE_DIGEST
+            )
+        ),
+        embed=StubEmbed(),
+        readable=context.readable_page_states,
     )
 
 
@@ -534,24 +650,26 @@ def test_the_preface_is_the_sentences_the_arms_kept() -> None:
     )
 
 
-async def test_the_page_leg_serves_only_pages_the_reader_may_read() -> None:
-    private = UUID("33333333-3333-3333-3333-333333333333")
-    store = _store({private: ("Board pack", ORDER_FORM_BODY)}, subject="member:dana")
-    with ws(WORKSPACE):
-        mine = await store.hits("What does Northwind bill per seat?", READER, 5)
-        theirs = await store.hits(
-            "What does Northwind bill per seat?",
-            SourceReader(
-                agent_id=uuid4(),
-                requesting_member_id=None,
-                subjects=frozenset({"member:dana"}),
-            ),
-            5,
+async def test_the_page_leg_serves_only_pages_the_reader_may_read(db: None) -> None:
+    state = await _workspace()
+    dana = member_subject(state.member_id)
+    store = _served_store(state, state.private_id, subject=dana)
+    question = "What does Northwind bill per seat?"
+    with ws(state.workspace_id):
+        shared = await store.hits(
+            question, SourceReader(state.agent_id, None, frozenset({SHARED_SUBJECT})), 5
+        )
+        unspoken = await store.hits(
+            question, SourceReader(state.agent_id, None, frozenset({dana})), 5
+        )
+        spoken = await store.hits(
+            question, SourceReader(state.agent_id, state.member_id, frozenset({dana})), 5
         )
 
-    assert mine == ()
-    assert [hit.page_id for hit in theirs] == [private]
-    assert theirs[0].ref == f"page/{private}"
+    assert shared == ()
+    assert unspoken == ()
+    assert [hit.page_id for hit in spoken] == [ORDER_FORM]
+    assert spoken[0].ref == f"page/{ORDER_FORM}"
 
 
 def test_the_hook_builds_its_page_store_from_the_workspace_index() -> None:
@@ -564,12 +682,18 @@ def test_the_hook_builds_its_page_store_from_the_workspace_index() -> None:
     assert unwired is None
 
 
-async def test_the_page_leg_refuses_chunks_the_page_body_no_longer_holds() -> None:
-    edited = _store({ORDER_FORM: ("Northwind order form", ORDER_FORM_BODY)}, live_digest="sha256:2")
-    with ws(WORKSPACE):
-        hits = await edited.hits("What does Northwind bill per seat?", READER, 5)
+async def test_the_page_leg_refuses_chunks_the_page_body_no_longer_holds(db: None) -> None:
+    state = await _workspace()
+    reader = SourceReader(state.agent_id, None, frozenset({SHARED_SUBJECT}))
+    question = "What does Northwind bill per seat?"
+    with ws(state.workspace_id):
+        live = await _served_store(state, state.shared_id).hits(question, reader, 5)
+        edited = await _served_store(state, state.shared_id, live_digest="sha256:2").hits(
+            question, reader, 5
+        )
 
-    assert hits == ()
+    assert [hit.page_id for hit in live] == [ORDER_FORM]
+    assert edited == ()
 
 
 async def test_the_hook_routes_the_members_own_words_not_the_channel_around_them() -> None:

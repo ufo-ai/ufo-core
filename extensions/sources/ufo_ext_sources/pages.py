@@ -179,16 +179,10 @@ class PageObjects:
         current = (
             await _require_ext(ctx).readable_page_states((page.id,), ctx.source_reader())
         ).get(page.id)
-        if current is None or (
-            current.subject,
-            current.revision,
-            current.digest,
-            current.body_ref,
-        ) != (
+        if current is None or (current.subject, current.revision, current.digest) != (
             page.subject,
             page.revision,
             page.digest,
-            page.body_ref,
         ):
             return None
         return ObjectDetail(

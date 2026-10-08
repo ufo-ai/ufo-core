@@ -107,7 +107,7 @@ from ufo.runtime.signin_photo import (
     unfetched_signin_photo_workspaces,
 )
 from ufo.runtime.sources.sync import SOURCE_SYNC_JOB, SOURCE_SYNC_SCHEDULE, SyncDriver
-from ufo.runtime.sources_api import SourcesFeed
+from ufo.runtime.sources_api import SourcesFeed, SourcesService
 from ufo.runtime.turns.audience import SHARED_AUDIENCE
 from ufo.runtime.turns.dispatch import dispatch_wait_ms
 from ufo.runtime.turns.record import subagent_activity
@@ -517,6 +517,7 @@ class PageChangeRunner:
     ledger: Ledger = UNGATED_LEDGER
     cloud: CloudApis | None = None
     self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS
+    sources_service: SourcesService | None = None
 
     def consumers(self) -> tuple[PageChangeConsumer, ...]:
         consumers: list[PageChangeConsumer] = []
@@ -770,6 +771,7 @@ class PageChangeRunner:
             cloud_client=consumer.cloud_client,
             cloud=self.cloud,
             self_user_ids=self.self_user_ids,
+            sources_service=self.sources_service,
         )
 
     async def _retry_parked(
@@ -1272,6 +1274,7 @@ class JobRunner:
     ledger: Ledger = UNGATED_LEDGER
     cloud: CloudApis | None = None
     self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS
+    sources_service: SourcesService | None = None
     public_base_url: str | None = None
     home_surface: str | None = None
     provisioned_workspaces: set[UUID] = field(default_factory=set, compare=False, repr=False)
@@ -1378,6 +1381,7 @@ class JobRunner:
                 cloud_client=binding.cloud_client,
                 cloud=self.cloud,
                 self_user_ids=self.self_user_ids,
+                sources_service=self.sources_service,
             )
             try:
                 await binding.spec.handler(context)

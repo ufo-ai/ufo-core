@@ -6,7 +6,7 @@ core connection names — one a program connected with its own token — feeds n
 are dropped, and the feed reads on so they never hold a consumer's cursor."""
 
 import asyncio
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -20,6 +20,7 @@ from ufo.runtime.workspace import ws_current
 SOURCE_CONNECTION_LABEL = "connection"
 SOURCE_LINKS_MAX = 65_536
 FEED_READS_MAX = 4
+PAGES_READ_MAX = 200
 NOT_FOUND_STATUS = 404
 
 
@@ -84,6 +85,39 @@ class Source(BaseModel):
     updated_at: AwareDatetime
 
 
+class PageSummary(BaseModel):
+    """One live page as the sources service holds it, without its body."""
+
+    model_config = ConfigDict(extra="ignore")
+    id: UUID
+    source_id: UUID
+    connection_id: UUID
+    provider: str
+    stream: str
+    title: str
+    subject: str
+    digest: str
+    revision: int
+    indexed: bool
+    as_of: AwareDatetime
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
+
+
+class PagesRead(BaseModel):
+    """The pages a read asks for by id."""
+
+    model_config = ConfigDict(extra="forbid")
+    ids: list[UUID]
+
+
+class PagesReadResult(BaseModel):
+    """The live pages among those a read asked for, in the order asked."""
+
+    model_config = ConfigDict(extra="ignore")
+    items: list[PageSummary]
+
+
 @dataclass(frozen=True)
 class SourcesApi:
     """The sources service's routes, called as one workspace."""
@@ -99,6 +133,22 @@ class SourcesApi:
             params=(*params, ("limit", str(limit))),
             answer=ChangesPage,
         )
+
+    async def page_states(self, ids: Sequence[UUID]) -> tuple[PageSummary, ...]:
+        """The live pages among `ids`, in the order asked, `PAGES_READ_MAX` ids a call and every
+        call at once."""
+        reads = await asyncio.gather(
+            *(
+                self.cloud.send(
+                    "POST",
+                    "/v1/sources/pages/read",
+                    body=PagesRead(ids=list(ids[start : start + PAGES_READ_MAX])),
+                    answer=PagesReadResult,
+                )
+                for start in range(0, len(ids), PAGES_READ_MAX)
+            )
+        )
+        return tuple(page for read in reads for page in read.items)
 
     async def source(self, source_id: UUID) -> Source | None:
         """The source `source_id`, or None when the service holds no such source."""
@@ -154,6 +204,15 @@ class SourceLinks:
         while len(self.entries) > SOURCE_LINKS_MAX:
             self.entries.pop(next(iter(self.entries)), None)
         return links
+
+
+@dataclass(frozen=True)
+class SourcesService:
+    """The deploy's sources service where `UFO_CLOUD_CLIENTS` selects it: its API, bound per
+    workspace, and each source's core connection."""
+
+    apis: CloudApis
+    links: SourceLinks
 
 
 def _link(source: Source) -> SourceLink | None:

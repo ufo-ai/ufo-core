@@ -219,7 +219,7 @@ from ufo.runtime.sources.sync import (
     SyncDriver,
     register_sources,
 )
-from ufo.runtime.sources_api import SourceLinks, SourcesFeed
+from ufo.runtime.sources_api import SourceLinks, SourcesFeed, SourcesService
 from ufo.runtime.steps import DurableTurnSteps
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.surfaces.admission import (
@@ -421,6 +421,7 @@ def run(fleet: Fleet) -> None:
             proxy_bearer(bearer_source),
         )
     )
+    sources_service = _sources_service(cloud, clients)
     init_workspace_credentials(credentials)
     init_flags(_select_flag_provider(config, manifests))
     blob_backend = blob_store_for(config.blob)
@@ -440,6 +441,7 @@ def run(fleet: Fleet) -> None:
         credentials,
         cloud=cloud,
         self_user_ids=self_user_ids,
+        sources_service=sources_service,
     )
     index = index_backend(
         manifests,
@@ -447,9 +449,16 @@ def run(fleet: Fleet) -> None:
         credentials,
         cloud=cloud,
         self_user_ids=self_user_ids,
+        sources_service=sources_service,
     )
     memory = memory_search(
-        manifests, credentials, index, embed, cloud=cloud, self_user_ids=self_user_ids
+        manifests,
+        credentials,
+        index,
+        embed,
+        cloud=cloud,
+        self_user_ids=self_user_ids,
+        sources_service=sources_service,
     )
     search = _select_search_provider(config, manifests, credentials)
     subagents = SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests)))
@@ -536,6 +545,7 @@ def run(fleet: Fleet) -> None:
             ledger=ledger,
             cloud=cloud,
             self_user_ids=self_user_ids,
+            sources_service=sources_service,
         ),
         registry=registry,
         skills=skills,
@@ -572,6 +582,7 @@ def run(fleet: Fleet) -> None:
             ledger=ledger,
             cloud=cloud,
             self_user_ids=self_user_ids,
+            sources_service=sources_service,
         )
     )
     dbos = DBOS(
@@ -627,7 +638,7 @@ def run(fleet: Fleet) -> None:
     if unknown_backends:
         raise RuntimeError(f"[[sources]] names unknown backends: {', '.join(unknown_backends)}")
     app.state.configured_sources = config.sources
-    _launch_jobs(runtime, invoker_for, sync_driver, probes, cloud, clients, self_user_ids)
+    _launch_jobs(runtime, invoker_for, sync_driver, probes, cloud, sources_service, self_user_ids)
     _mount_ext_routes(
         app,
         manifests,
@@ -639,6 +650,7 @@ def run(fleet: Fleet) -> None:
         ledger,
         cloud=cloud,
         self_user_ids=self_user_ids,
+        sources_service=sources_service,
         vault=VaultReads(
             credentials,
             workspace_slot_source(manifests),
@@ -691,7 +703,13 @@ def run(fleet: Fleet) -> None:
         sandbox_sizes=carrier_spec.sizes,
         skills=skills,
         member_skill_listing=lambda: member_skill_listing(
-            manifests, credentials, index, embed, cloud=cloud, self_user_ids=self_user_ids
+            manifests,
+            credentials,
+            index,
+            embed,
+            cloud=cloud,
+            self_user_ids=self_user_ids,
+            sources_service=sources_service,
         ),
         memory=memory,
         sign_in_path=config.serve.sign_in_path,
@@ -707,9 +725,11 @@ def run(fleet: Fleet) -> None:
             ledger=ledger,
             cloud=cloud,
             self_user_ids=self_user_ids,
+            sources_service=sources_service,
         ),
         cloud=cloud,
         self_user_ids=self_user_ids,
+        sources_service=sources_service,
     )
     _assert_no_reserved_routes(app, config.serve.gateway_prefixes)
     log("serve.started", fleet=fleet.name, host=config.serve.host, port=config.serve.port)
@@ -768,14 +788,14 @@ def _launch_jobs(
     sync_driver: SyncDriver,
     probes: ConversationProbes,
     cloud: CloudApis | None,
-    clients: frozenset[str],
+    sources_service: SourcesService | None,
     self_user_ids: Mapping[str, SelfUserIdResolver],
 ) -> None:
-    page_feed: PageFeed = CorePageFeed(blob=runtime.blob)
-    if SOURCES_SERVICE in clients:
-        if cloud is None:
-            raise RuntimeError(f"{CLOUD_CLIENTS_ENV} names sources, so the cloud API must be set.")
-        page_feed = SourcesFeed(apis=cloud, links=SourceLinks(entries={}))
+    page_feed: PageFeed = (
+        CorePageFeed(blob=runtime.blob)
+        if sources_service is None
+        else SourcesFeed(apis=sources_service.apis, links=sources_service.links)
+    )
     page_change_runner = PageChangeRunner(
         manifests=runtime.manifests,
         pages=page_feed,
@@ -791,6 +811,7 @@ def _launch_jobs(
         ledger=runtime.ledger,
         cloud=cloud,
         self_user_ids=self_user_ids,
+        sources_service=sources_service,
     )
     preview_url = os.environ.get(PREVIEW_SERVICE_URL_ENV)
     preview_renderer = (
@@ -831,6 +852,7 @@ def _launch_jobs(
         ledger=runtime.ledger,
         cloud=cloud,
         self_user_ids=self_user_ids,
+        sources_service=sources_service,
         public_base_url=runtime.config.connect.public_base_url,
         home_surface=home_surface(runtime.manifests),
     ).launch()
@@ -954,6 +976,16 @@ def _cloud_clients() -> frozenset[str]:
     if unknown:
         raise RuntimeError(f"{CLOUD_CLIENTS_ENV} names unknown services: {', '.join(unknown)}.")
     return named
+
+
+def _sources_service(cloud: CloudApis | None, clients: frozenset[str]) -> SourcesService | None:
+    """The sources service where `UFO_CLOUD_CLIENTS` selects it, one `SourceLinks` for the
+    process."""
+    if SOURCES_SERVICE not in clients:
+        return None
+    if cloud is None:
+        raise RuntimeError(f"{CLOUD_CLIENTS_ENV} names sources, so the cloud API must be set.")
+    return SourcesService(apis=cloud, links=SourceLinks(entries={}))
 
 
 def _require_cloud(
@@ -1157,6 +1189,7 @@ def _mount_ext_routes(
     *,
     cloud: CloudApis | None = None,
     self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
+    sources_service: SourcesService | None = None,
     vault: VaultReads | None = None,
 ) -> None:
     for manifest in manifests:
@@ -1182,6 +1215,7 @@ def _mount_ext_routes(
             cloud_client=manifest.cloud_client,
             cloud=cloud,
             self_user_ids=self_user_ids,
+            sources_service=sources_service,
         )
         for spec in manifest.routes:
 
@@ -1377,6 +1411,7 @@ def _mount_shared_surfaces(
     ambient_reply_for: "Callable[[str], AmbientReplyClassifier] | None" = None,
     cloud: CloudApis | None = None,
     self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
+    sources_service: SourcesService | None = None,
 ) -> None:
     app.add_middleware(WorkspaceScopeBoundary)
     if connectors is None:
@@ -1408,6 +1443,7 @@ def _mount_shared_surfaces(
                 cloud_client=manifest.cloud_client,
                 cloud=cloud,
                 self_user_ids=self_user_ids,
+                sources_service=sources_service,
             ),
         )
         for manifest, provider in conversation_slot_declarations(manifests)
@@ -1710,6 +1746,7 @@ def _connect_flow(
     ledger: Ledger,
     cloud: CloudApis | None = None,
     self_user_ids: Mapping[str, SelfUserIdResolver] = NO_SELF_USER_IDS,
+    sources_service: SourcesService | None = None,
 ) -> ConnectFlow | None:
     if credentials is None:
         return None
@@ -1737,6 +1774,7 @@ def _connect_flow(
             ledger=ledger,
             cloud=cloud,
             self_user_ids=self_user_ids,
+            sources_service=sources_service,
         ),
         resumption=resumption,
         labels={
