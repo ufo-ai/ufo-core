@@ -682,6 +682,7 @@ async def test_the_listing_quotes_the_head_the_way_search_does(db: None) -> None
                 frozenset(),
                 index=default_index(),
                 embed=StubEmbed(probe),
+                cloud_client=True,
             )
         )
         page = await service.list_recent(frozenset({SHARED_SUBJECT}), 10)
@@ -2051,7 +2052,13 @@ async def test_the_memory_listing_drops_a_row_its_page_has_left(db: None) -> Non
             )
         )
         service = memory_manifest.MemorySearchService(
-            ctx=context_for("memory", frozenset(), index=default_index(), embed=embed)
+            ctx=context_for(
+                "memory",
+                frozenset(),
+                index=default_index(),
+                embed=embed,
+                cloud_client=True,
+            )
         )
         listed = await service.list_recent(frozenset({SHARED_SUBJECT}), 10)
         assert {match.text for match in listed.rows} == {

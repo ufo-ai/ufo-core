@@ -523,7 +523,7 @@ async def _facts(workspace_id: UUID) -> list[sa.Row]:
 
 def _store(workspace_id: UUID, vector: tuple[float, ...]) -> MemoryStore:
     embed = StubEmbed(vector)
-    ext = context_for("memory", frozenset())
+    ext = context_for("memory", frozenset(), cloud_client=True)
     return MemoryStore(
         index=default_index(),
         embed=embed,
@@ -1161,7 +1161,7 @@ async def test_a_committed_replacement_retires_the_prior_revision_exactly_once(d
     probe = vec((14, 1.0))
     reader = await _granted_reader(workspace_id, SHARED_SUBJECT, source_id)
     index = CountingIndex(default_index())
-    ext = context_for("memory", frozenset())
+    ext = context_for("memory", frozenset(), cloud_client=True)
     store = MemoryStore(
         index=index,
         embed=StubEmbed(probe),
@@ -2279,7 +2279,7 @@ def _profile_ctx(workspace_id: UUID) -> ToolContext:
         speaker_member_id=None,
         audience=foreign,
         artifact_token_secret="",
-        ext=context_for(memory_manifest.NAME, frozenset(), audience=foreign),
+        ext=context_for(memory_manifest.NAME, frozenset(), audience=foreign, cloud_client=True),
     )
 
 
@@ -2631,7 +2631,9 @@ async def _wiki_rows(workspace_id: UUID, reader: SourceReader) -> list[tuple[str
         speaker_member_id=None,
         audience=SHARED_AUDIENCE,
         artifact_token_secret="",
-        ext=context_for(memory_manifest.NAME, frozenset(), audience=SHARED_AUDIENCE),
+        ext=context_for(
+            memory_manifest.NAME, frozenset(), audience=SHARED_AUDIENCE, cloud_client=True
+        ),
     )
     with ws(workspace_id):
         listed = await MemoryObjects().list(

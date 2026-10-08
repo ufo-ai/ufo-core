@@ -262,7 +262,7 @@ async def _seed_page(
 
 
 def _verbs() -> dict[str, ToolDef]:
-    memory_ctx = context_for("memory", frozenset())
+    memory_ctx = context_for("memory", frozenset(), cloud_client=True)
     sources_ctx = context_for("sources", frozenset())
     registry = object_registry(
         (
@@ -636,7 +636,7 @@ async def test_links_stay_visibility_congruent_and_hidden_targets_fail_closed(
             workspace_id, source_uid, blob, subject=member_subject(member_id)
         )
 
-        memory_ext = context_for("memory", frozenset())
+        memory_ext = context_for("memory", frozenset(), cloud_client=True)
         item_id = uuid4()
         async with workspace_tx() as connection:
             revision = (

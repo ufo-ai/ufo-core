@@ -2,15 +2,18 @@
 gate (the installed rule's grant, `?ws=` under each reach, forged/missing bearers), the shared
 session-cookie bind, and the one read route — a plain enumeration of the workspace's memory_item
 rows, shared and per-member, live and superseded, indexed and still due, newest first. The same
-seam an operator hits; no runtime engine, no index backend — the explorer only reads the
-extension's own table under the resolver's ambient workspace binding."""
+seam an operator hits; no runtime engine, no index backend — the explorer reads the extension's
+own table under the resolver's ambient workspace binding, or the memory service's stand-in through
+the surface's cloud where the deploy selects it."""
 
 import base64
 import hashlib
 import hmac
 import json
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -23,6 +26,8 @@ from ufo_ext_memory.manifest import manifest as memory_manifest
 from ufo_ext_memory.store import body_digest, memory_item
 from ufo_ext_sample.manifest import manifest as sample_manifest
 from ufo_ext_sample.operator import OPERATOR_DOMAIN, OPERATOR_RULE, OPERATOR_SIGN_IN
+from ufo_testsupport.cloud import cloud_apis_for
+from ufo_testsupport.memory_service import MEMORY_WIRE, MemoryServiceStandIn
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
@@ -35,6 +40,9 @@ from ufo.db import workspace_tx
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint
+from ufo.runtime.billing.accounting import MEMORY_SERVICE
+from ufo.runtime.cloud import CloudApis
+from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.ext.operator import OperatorSetup, install_operator, select_operator_rule
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
@@ -50,6 +58,22 @@ SECRET = "memory-token-secret"
 ADMIN = "admin@acme.com"
 MEMBER = "member@acme.com"
 BASE_TIME = datetime(2026, 7, 1, tzinfo=UTC)
+SELECTED = frozenset({MEMORY_SERVICE})
+LISTED_ITEM: dict = json.loads(MEMORY_WIRE.read_text(encoding="utf-8"))["memory.list"]["answer"][
+    "body"
+]["items"][0]
+SERVED_FIELDS = {
+    "subject",
+    "body",
+    "item_class",
+    "memory_kind",
+    "confidence",
+    "source_ref",
+    "superseded_by",
+    "overtaken_by",
+    "created_at",
+    "age_days",
+}
 
 
 class _StubDbos:
@@ -90,18 +114,13 @@ def operator_rule() -> Iterator[None]:
     install_operator(None)
 
 
-@pytest.fixture
-async def explorer(
-    db: None, operator_rule: None, tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[AsyncClient]:
-    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
-    blob = FilesystemBlobStore(root=tmp_path)
+def _app(tmp_path: Path, manifest: Manifest, cloud: CloudApis | None) -> FastAPI:
     app = FastAPI()
     _mount_shared_surfaces(
         app,
-        (memory_manifest(),),
+        (manifest,),
         None,
-        blob,
+        FilesystemBlobStore(root=tmp_path),
         ConversationSandbox(
             carrier=LocalCarrier(),
             backend="local",
@@ -119,7 +138,36 @@ async def explorer(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        cloud=cloud,
     )
+    return app
+
+
+@pytest.fixture
+async def explorer(
+    db: None, operator_rule: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[AsyncClient]:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
+    app = _app(tmp_path, memory_manifest(), None)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://fleet") as client:
+        yield client
+
+
+@pytest.fixture
+def memory_service() -> MemoryServiceStandIn:
+    return MemoryServiceStandIn()
+
+
+@pytest.fixture
+async def served_explorer(
+    db: None,
+    operator_rule: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_service: MemoryServiceStandIn,
+) -> AsyncIterator[AsyncClient]:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
+    app = _app(tmp_path, memory_manifest(), cloud_apis_for(memory_service.app, clients=SELECTED))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://fleet") as client:
         yield client
 
@@ -365,3 +413,107 @@ async def test_page_serves_and_fails_loud_when_missing(explorer, monkeypatch) ->
     monkeypatch.setattr(memory_surface, "APP_HTML", None)
     with pytest.raises(RuntimeError, match=r"static/memory\.html"):
         await explorer.get("/surface/memory", headers=_auth(token))
+
+
+def _listed(body: str, subject: str, **fields: object) -> dict:
+    return LISTED_ITEM | {"id": str(uuid4()), "body": body, "subject": subject} | fields
+
+
+async def test_the_explorer_lists_every_subject(
+    served_explorer: AsyncClient, memory_service: MemoryServiceStandIn
+) -> None:
+    workspace_id = await _seed_workspace()
+    member_id, head = uuid4(), uuid4()
+    memory_service.answer(
+        "memory.list",
+        200,
+        {
+            "items": [
+                _listed(
+                    "The importer ships in September.",
+                    SHARED_SUBJECT,
+                    invalidated_by=str(head),
+                    invalid_at="2026-10-07T13:00:00Z",
+                    source_ref="slack:C1/p1",
+                ),
+                _listed(
+                    "I prefer concise summaries.", member_subject(member_id), kind="preference"
+                ),
+            ],
+            "next_cursor": None,
+            "prev_cursor": None,
+        },
+    )
+    await _seed_memory(workspace_id, SHARED_SUBJECT, "a store row the service never held", minute=1)
+    token = _mint(SECRET, workspace_id, ADMIN)
+
+    listed = await served_explorer.get("/surface/memory/api/memories", headers=_auth(token))
+
+    assert listed.status_code == 200
+    rows = listed.json()
+    assert [(row["subject"], row["body"]) for row in rows] == [
+        (SHARED_SUBJECT, "The importer ships in September."),
+        (member_subject(member_id), "I prefer concise summaries."),
+    ]
+    assert all(set(row) == SERVED_FIELDS for row in rows)
+    assert rows[0]["overtaken_by"] == str(head)
+    assert rows[0]["source_ref"] == "slack:C1/p1"
+    assert rows[0]["memory_kind"] == LISTED_ITEM["kind"]
+    assert rows[1]["memory_kind"] == "preference"
+    assert all(row["age_days"] > 0 for row in rows)
+    (sent,) = memory_service.sent
+    assert sent.operation == "memory.list"
+    assert sent.query == (("limit", "200"),)
+
+
+async def test_the_explorer_reads_the_newest_five_hundred_a_page_at_a_time(
+    served_explorer: AsyncClient, memory_service: MemoryServiceStandIn
+) -> None:
+    workspace_id = await _seed_workspace()
+    cursors = [f"older|2026-10-07T12:00:00+00:00|{uuid4()}" for _ in range(3)]
+    memory_service.queue(
+        "memory.list",
+        [
+            (
+                200,
+                {
+                    "items": [_listed(f"fact {page} {n}", SHARED_SUBJECT) for n in range(200)],
+                    "next_cursor": cursor,
+                    "prev_cursor": None,
+                },
+            )
+            for page, cursor in enumerate(cursors)
+        ],
+    )
+    token = _mint(SECRET, workspace_id, ADMIN)
+
+    listed = await served_explorer.get("/surface/memory/api/memories", headers=_auth(token))
+
+    assert len(listed.json()) == 500
+    sent = [dict(call.query) for call in memory_service.sent]
+    assert [call["limit"] for call in sent] == ["200", "200", "100"]
+    assert [call.get("cursor") for call in sent] == [None, *cursors[:2]]
+
+
+async def test_a_surface_whose_manifest_declares_no_cloud_client_reads_no_cloud(
+    db: None,
+    operator_rule: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_service: MemoryServiceStandIn,
+) -> None:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
+    app = _app(
+        tmp_path,
+        replace(memory_manifest(), cloud_client=False),
+        cloud_apis_for(memory_service.app, clients=SELECTED),
+    )
+    workspace_id = await _seed_workspace()
+    await _seed_memory(workspace_id, SHARED_SUBJECT, "a store row", minute=1)
+    token = _mint(SECRET, workspace_id, ADMIN)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://fleet") as client:
+        listed = await client.get("/surface/memory/api/memories", headers=_auth(token))
+
+    assert [row["body"] for row in listed.json()] == ["a store row"]
+    assert memory_service.sent == []

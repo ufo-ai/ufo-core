@@ -23,12 +23,13 @@ refuse."""
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Final
+from typing import Final, get_args
 from uuid import UUID
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
+from ufo.sdk.accounting import MEMORY_SERVICE
 from ufo.sdk.audience import audience_subjects, conversation_audience
 from ufo.sdk.context import (
     ExtensionContext,
@@ -51,8 +52,17 @@ from ufo.sdk.objects import (
 )
 from ufo.sdk.subjects import SHARED_SUBJECT
 from ufo.sdk.tools import ToolContext
+from ufo_ext_memory.client import ItemClass, Memory, MemoryApi, MemoryKind, PageSource, Reach
 from ufo_ext_memory.condenser import memory_profile
-from ufo_ext_memory.store import _aware, clip_to_word, memory_item, one_row_per_statement
+from ufo_ext_memory.store import (
+    OVERVIEW,
+    SECTION,
+    SEMANTIC,
+    _aware,
+    clip_to_word,
+    memory_item,
+    one_row_per_statement,
+)
 
 MEMORY_KIND = "memory"
 PROFILE_KIND = "profile"
@@ -72,6 +82,7 @@ TEXT_MAX = 2000
 paragraph a band renders whole, so the bound sits far past one; a row stays lightweight, so the
 bound exists."""
 MEMORY_LIST_MAX = 500
+CONDENSED_CLASSES = frozenset({SEMANTIC, SECTION, OVERVIEW})
 
 
 class MemorySpec(BaseModel):
@@ -127,6 +138,20 @@ def _row(
     )
 
 
+def _own_page(memory: Memory) -> UUID | None:
+    """The page a memory was drawn from; a condensed memory's pages are the sources of the memories
+    it stands for, not its own."""
+    if memory.item_class in CONDENSED_CLASSES:
+        return None
+    return next(
+        (source.page_id for source in memory.sources if isinstance(source, PageSource)), None
+    )
+
+
+def _reach_of(reader: SourceReader) -> Reach:
+    return Reach(agent_id=reader.agent_id, member_id=reader.requesting_member_id)
+
+
 def _member_reader(member_id: UUID) -> SourceReader:
     """The same three a turn's `source_reader` carries, taken from the portal read."""
     return SourceReader(
@@ -138,7 +163,8 @@ def _member_reader(member_id: UUID) -> SourceReader:
 
 @dataclass(frozen=True)
 class MemoryObjects:
-    """Read-only handlers over the extension's own `memory_item` rows under the caller's subjects:
+    """Read-only handlers over the memories the caller's subjects read — the memory service's, as
+    the caller's reach, where the deploy selects it, else the extension's own `memory_item` rows:
     list shows live (non-superseded) items newest first, get resolves any visible row — including a
     superseded one, whose `superseded_by` link names its replacement. Both mutations refuse."""
 
@@ -202,6 +228,8 @@ class MemoryObjects:
     async def _page(
         self, ext: ExtensionContext, reader: SourceReader, query: ObjectListQuery
     ) -> ObjectPage:
+        if ext.cloud_selects(MEMORY_SERVICE):
+            return await self._served_page(ext, reader, query)
         subjects = reader.subjects
         async with ext.transaction() as connection:
             rows = (
@@ -259,6 +287,45 @@ class MemoryObjects:
             query,
         )
 
+    async def _served_page(
+        self, ext: ExtensionContext, reader: SourceReader, query: ObjectListQuery
+    ) -> ObjectPage:
+        item_class = query.filters.get("item_class")
+        memory_kind = query.filters.get("memory_kind")
+        if (
+            not reader.subjects
+            or (item_class is not None and item_class not in get_args(ItemClass))
+            or (memory_kind is not None and memory_kind not in get_args(MemoryKind))
+        ):
+            return object_page((), query)
+        memories = await MemoryApi(cloud=ext.cloud_api()).newest(
+            subjects=reader.subjects,
+            item_classes=() if item_class is None else (str(item_class),),
+            kinds=() if memory_kind is None else (str(memory_kind),),
+            reach=_reach_of(reader),
+            total=MEMORY_LIST_MAX,
+        )
+        cited = await ext.readable_page_states(
+            tuple(page_id for memory in memories if (page_id := _own_page(memory)) is not None),
+            reader,
+        )
+        return object_page(
+            tuple(
+                _row(
+                    str(memory.id),
+                    memory.body,
+                    memory.subject,
+                    memory.item_class,
+                    memory.kind,
+                    memory.created_at,
+                    _own_page(memory),
+                    cited,
+                )
+                for memory in memories
+            ),
+            query,
+        )
+
     async def _item(
         self, ext: ExtensionContext, reader: SourceReader, name: str
     ) -> ObjectDetail[MemorySpec] | None:
@@ -266,6 +333,8 @@ class MemoryObjects:
             item_id = UUID(name)
         except ValueError:
             return None
+        if ext.cloud_selects(MEMORY_SERVICE):
+            return await self._served_item(ext, reader, item_id)
         subjects = reader.subjects
         async with ext.transaction() as connection:
             row = (
@@ -331,6 +400,54 @@ class MemoryObjects:
             ),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            links=tuple(links),
+        )
+
+    async def _served_item(
+        self, ext: ExtensionContext, reader: SourceReader, item_id: UUID
+    ) -> ObjectDetail[MemorySpec] | None:
+        if not reader.subjects:
+            return None
+        found = await MemoryApi(cloud=ext.cloud_api()).get(
+            item_id, subjects=reader.subjects, reach=_reach_of(reader)
+        )
+        if found is None:
+            return None
+        page_id = _own_page(found)
+        links: list[ObjectLink] = []
+        if page_id is not None:
+            links.append(
+                ObjectLink(
+                    relation=CREATED_FROM,
+                    target=ObjectRef(kind=PAGE_OBJECT_KIND, name=str(page_id)),
+                )
+            )
+        if found.superseded_by is not None:
+            links.append(
+                ObjectLink(
+                    relation="superseded_by",
+                    target=ObjectRef(kind=MEMORY_KIND, name=str(found.superseded_by)),
+                )
+            )
+        if found.invalidated_by is not None:
+            links.append(
+                ObjectLink(
+                    relation="overtaken_by",
+                    target=ObjectRef(kind=MEMORY_KIND, name=str(found.invalidated_by)),
+                )
+            )
+        return ObjectDetail(
+            spec=MemorySpec(
+                body=found.body,
+                subject=found.subject,
+                item_class=found.item_class,
+                memory_kind=found.kind,
+                confidence=found.confidence,
+                source_ref=found.source_ref,
+                as_of=None if found.as_of is None else found.as_of.isoformat(),
+            ),
+            created_at=found.created_at,
+            updated_at=None,
             links=tuple(links),
         )
 

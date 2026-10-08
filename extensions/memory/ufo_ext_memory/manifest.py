@@ -79,6 +79,7 @@ from ufo.sdk.tools import (
 from ufo_ext_memory.client import (
     ConversationSource,
     Correct,
+    ItemClass,
     Memory,
     MemoryApi,
     PageSource,
@@ -112,6 +113,7 @@ from ufo_ext_memory.events import (
 )
 from ufo_ext_memory.heads import Heads, topic_pointer
 from ufo_ext_memory.objects import (
+    CONDENSED_CLASSES,
     MEMORY_KIND,
     MEMORY_OBJECT,
     PAGE_OBJECT_KIND,
@@ -128,8 +130,6 @@ from ufo_ext_memory.store import (
     OVERVIEW,
     RECALL_ITEM_MAX_CHARS,
     SECTION,
-    SEMANTIC,
-    ItemClass,
     MemoryIndexer,
     MemoryKind,
     MemoryWrite,
@@ -156,7 +156,6 @@ MAX_MEMORY_QUERIES = 3
 DERIVED_SOURCES_MAX = 12
 """The most sources one condensed row names: an overview stands over up to OVERVIEW_FACTS_MAX
 facts, and a surface checks each conversation it would link."""
-CONDENSED_CLASSES = frozenset({SEMANTIC, SECTION, OVERVIEW})
 MEMORY_UPDATE_TOOL = "memory_update"
 MEMORY_UPDATE_ACTIVITY = "Updating memory"
 RECORD_CORRECTION_ACTION = "record_correction"
@@ -481,6 +480,7 @@ class MemorySearchService:
     ) -> tuple[MemoryMatch, ...]:
         if not reader.subjects:
             return ()
+        reach = Reach(agent_id=reader.agent_id, member_id=reader.requesting_member_id)
         matches = await memory.search(
             Search(
                 queries=list(queries),
@@ -488,10 +488,10 @@ class MemorySearchService:
                 start=start,
                 end=end,
                 limit=MEMORY_SEARCH_LIMIT,
-                reach=Reach(agent_id=reader.agent_id, member_id=reader.requesting_member_id),
+                reach=reach,
             )
         )
-        heads = await Heads(memory).of(matches, reader)
+        heads = await Heads(memory).of(matches, reader.subjects, reach)
         return tuple(
             _served_match(
                 match,
@@ -579,8 +579,8 @@ class MemorySearchService:
         )
 
     def listable_kinds(self) -> tuple[str, ...]:
-        """The item classes this store writes, read off `ItemClass` itself so a class added there
-        reaches a consumer's filter without a second list to remember."""
+        """The item classes a memory carries, read off the client's `ItemClass` itself so a class
+        added there reaches a consumer's filter without a second list to remember."""
         return get_args(ItemClass)
 
     async def list_recent(
@@ -604,7 +604,13 @@ class MemorySearchService:
 
         A served row names its page's provider and title only where one of `readers` may read that
         page, so the listing never names a page its viewer cannot open. A condensed row carries the
-        sources of the rows it stands for under the same fence (`derived_provenance`)."""
+        sources of the rows it stands for under the same fence (`derived_provenance`).
+
+        Where the deploy selects the memory service, the page comes from its listing with no reach
+        and its own cursors, and a row names a page, its own or one it stands for, only where one
+        of `readers` may read it."""
+        if self.ctx.cloud_selects(MEMORY_SERVICE):
+            return await self._served_recent(subjects, limit, kinds, cursor, readers)
         query = sa.select(
             memory_item.c.id,
             memory_item.c.body,
@@ -696,6 +702,53 @@ class MemorySearchService:
             ),
             older=page.older,
             newer=page.newer,
+        )
+
+    async def _served_recent(
+        self,
+        subjects: frozenset[str],
+        limit: int,
+        kinds: frozenset[str] | None,
+        cursor: ListingCursor | None,
+        readers: tuple[SourceReader, ...],
+    ) -> ListingPage[MemoryMatch]:
+        if not subjects or kinds == frozenset():
+            return ListingPage(rows=())
+        memory = MemoryApi(cloud=self.ctx.cloud_api())
+        page = await memory.list(
+            subjects=subjects,
+            item_classes=kinds or (),
+            cursor=None if cursor is None else cursor.encode(),
+            limit=limit,
+        )
+        heads = await Heads(memory).of(page.items, subjects, None)
+        readable = await self._named_pages(
+            tuple(
+                source.page_id
+                for item in page.items
+                for source in item.sources
+                if isinstance(source, PageSource)
+            ),
+            readers,
+        )
+        return ListingPage(
+            rows=tuple(
+                _served_match(
+                    item.model_copy(
+                        update={
+                            "sources": [
+                                source
+                                for source in item.sources
+                                if not isinstance(source, PageSource) or source.page_id in readable
+                            ]
+                        }
+                    ),
+                    _quoted(item.body, heads.get(item.id)),
+                )
+                for item in page.items
+            ),
+            older=None if page.next_cursor is None else ListingCursor.decode(page.next_cursor),
+            newer=None if page.prev_cursor is None else ListingCursor.decode(page.prev_cursor),
         )
 
 
@@ -902,19 +955,17 @@ async def _served_recall(
     ext: ExtensionContext, text: str, reader: SourceReader
 ) -> tuple[_Recall, ...]:
     memory = MemoryApi(cloud=ext.cloud_api())
+    reach = Reach(agent_id=reader.agent_id, member_id=reader.requesting_member_id)
     matches = tuple(
         match
         for match in await memory.search(
             Search(
-                queries=[text],
-                subjects=sorted(reader.subjects),
-                limit=RECALL_LIMIT,
-                reach=Reach(agent_id=reader.agent_id, member_id=reader.requesting_member_id),
+                queries=[text], subjects=sorted(reader.subjects), limit=RECALL_LIMIT, reach=reach
             )
         )
         if match.item_class != EPISODIC
     )
-    heads = await Heads(memory).of(matches, reader)
+    heads = await Heads(memory).of(matches, reader.subjects, reach)
     return tuple(_Recall(match.id, match.body, heads.get(match.id)) for match in matches)
 
 

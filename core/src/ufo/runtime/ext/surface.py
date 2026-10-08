@@ -211,6 +211,7 @@ from ufo.sdk.http import cookie_secure
 
 if TYPE_CHECKING:
     from ufo.runtime.access.workspace_slots import WorkspaceSlots
+    from ufo.runtime.cloud import CloudApis
     from ufo.runtime.ext.context import ConversationProbes
     from ufo.runtime.ext.conversation_slots import (
         BoundConversationSlot,
@@ -2578,6 +2579,9 @@ class SurfaceContext:
     _preview_url: str | None = None
     _preview_token: str | None = None
     _probes: "ConversationProbes | None" = None
+    cloud: "CloudApis | None" = None
+    """The deploy's cloud API, handed only to a surface whose manifest declares `cloud_client`, so
+    the surface reads a service `cloud.clients` selects as the workspace it serves."""
 
     @property
     def fleet_blob(self) -> FleetBlobStore:

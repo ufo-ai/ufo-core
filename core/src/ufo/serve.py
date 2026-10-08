@@ -1461,6 +1461,9 @@ def _mount_shared_surfaces(
 
     preview_service_url = os.environ.get(PREVIEW_SERVICE_URL_ENV)
     preview_token = os.environ.get(PREVIEW_TOKEN_ENV)
+    cloud_surfaces = frozenset(
+        spec.name for manifest in manifests if manifest.cloud_client for spec in manifest.surfaces
+    )
 
     def context_for(workspace_id: UUID, surface: str) -> SurfaceContext:
         return SurfaceContext(
@@ -1506,6 +1509,7 @@ def _mount_shared_surfaces(
             _preview_url=preview_service_url.rstrip("/") if preview_service_url else None,
             _preview_token=preview_token,
             _probes=probes,
+            cloud=cloud if surface in cloud_surfaces else None,
         )
 
     for manifest in manifests:

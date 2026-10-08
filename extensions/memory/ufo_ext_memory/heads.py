@@ -1,11 +1,10 @@
 """What is true now about an overtaken memory, and the pointer an episodic match is served as."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
-from ufo.sdk.context import SourceReader
 from ufo_ext_memory.client import Memory, MemoryApi, Reach
 
 HEAD_WALK_MAX = 8
@@ -26,12 +25,13 @@ class Heads:
 
     memory: MemoryApi
 
-    async def of(self, matches: Sequence[Memory], reader: SourceReader) -> dict[UUID, str]:
+    async def of(
+        self, matches: Sequence[Memory], subjects: Collection[str], reach: Reach | None
+    ) -> dict[UUID, str]:
         """The body of the live memory each overtaken match's chain ends at, keyed by the match's
-        id. Each level fetches every pending memory at once under `reader`'s subjects and reach,
-        for at most `HEAD_WALK_MAX` levels; a memory the service does not show the reader, a
-        retired one, or the cap ends that chain with no head."""
-        reach = Reach(agent_id=reader.agent_id, member_id=reader.requesting_member_id)
+        id. Each level fetches every pending memory at once under `subjects` and `reach`, for at
+        most `HEAD_WALK_MAX` levels; a memory the service does not show that reader, a retired
+        one, or the cap ends that chain with no head."""
         heads: dict[UUID, str] = {}
         pending = {
             match.id: match.invalidated_by for match in matches if match.invalidated_by is not None
@@ -41,10 +41,7 @@ class Heads:
                 break
             targets = tuple(dict.fromkeys(pending.values()))
             found = await asyncio.gather(
-                *(
-                    self.memory.get(target, subjects=reader.subjects, reach=reach)
-                    for target in targets
-                )
+                *(self.memory.get(target, subjects=subjects, reach=reach) for target in targets)
             )
             rows = dict(zip(targets, found, strict=True))
             following: dict[UUID, UUID] = {}
