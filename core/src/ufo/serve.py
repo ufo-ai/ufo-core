@@ -1509,7 +1509,7 @@ def _mount_shared_surfaces(
             _preview_url=preview_service_url.rstrip("/") if preview_service_url else None,
             _preview_token=preview_token,
             _probes=probes,
-            cloud=cloud if surface in cloud_surfaces else None,
+            _cloud=cloud if surface in cloud_surfaces else None,
         )
 
     for manifest in manifests:

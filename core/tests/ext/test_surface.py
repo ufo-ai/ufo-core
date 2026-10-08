@@ -83,6 +83,7 @@ from ufo.runtime.billing.spend import (
     SpendGates,
     SpendOutcome,
 )
+from ufo.runtime.cloud import CloudApis
 from ufo.runtime.engine import INJECTED_CONTEXT, _context_tag
 from ufo.runtime.ext.context import context_for as extension_context_for
 from ufo.runtime.ext.operator import OperatorSetup, install_operator, select_operator_rule
@@ -533,6 +534,31 @@ def _fleet_poller(
         context_for=lambda workspace_id, _name: contexts[workspace_id],
         candidates=writeback_workspaces(),
     )
+
+
+async def test_a_surface_reaches_the_cloud_only_as_the_workspace_it_serves(tmp_path: Path) -> None:
+    async def bearer_for(workspace_id: UUID) -> str:
+        return f"bearer-{workspace_id}"
+
+    workspace_id = uuid4()
+    held = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    async with httpx.AsyncClient() as client:
+        ctx = replace(
+            held,
+            _cloud=CloudApis(
+                base_url="https://cloud.example.test",
+                client=client,
+                bearer_for=bearer_for,
+                clients=frozenset({"memory"}),
+            ),
+        )
+
+        assert await ctx.cloud_api().bearer() == f"bearer-{workspace_id}"
+    assert ctx.cloud_selects("memory")
+    assert not ctx.cloud_selects("sources")
+    assert not held.cloud_selects("memory")
+    with pytest.raises(RuntimeError, match="holds no cloud API"):
+        held.cloud_api()
 
 
 def test_surface_delivery_error_rejects_negative_retry_delay() -> None:

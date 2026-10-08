@@ -6,7 +6,7 @@ scopes it to the workspace it claims or, under fleet reach, to the one `?ws=` na
 is the workspace every read runs under. The page is a self-contained HTML file served
 whole; it renders `api/memories`, a plain enumeration of the bound workspace's newest memories —
 shared and per-member — so an operator sees exactly what recall draws from. Where the deploy selects
-the memory service, the surface's cloud lists them there naming no subject, which answers every
+the memory service, the surface's cloud API lists them there naming no subject, which answers every
 subject the workspace holds. Otherwise it reads the extension's OWN `memory_item` table — live and
 superseded, indexed and still due — through the extension's workspace-scoped transaction
 (`ExtensionContext.transaction`) rather than a core internal, scoped to the same ambient workspace
@@ -60,10 +60,8 @@ async def memories(ctx: SurfaceContext, request: Request) -> Response:
     deploy selects it, else every memory_item row. The extension context is built only to reach
     its own scoped transaction; the ambient workspace the resolver bound is already set, so the
     read runs RLS-scoped and the explicit `workspace_id` predicate matches."""
-    if ctx.cloud is not None and MEMORY_SERVICE in ctx.cloud.clients:
-        served = await MemoryApi(cloud=ctx.cloud.bound(ctx.workspace_id)).newest(
-            total=MEMORY_INVENTORY_LIMIT
-        )
+    if ctx.cloud_selects(MEMORY_SERVICE):
+        served = await MemoryApi(cloud=ctx.cloud_api()).newest(total=MEMORY_INVENTORY_LIMIT)
         now = datetime.now(UTC)
         return JSONResponse(
             [

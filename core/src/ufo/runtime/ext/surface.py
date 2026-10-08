@@ -211,7 +211,7 @@ from ufo.sdk.http import cookie_secure
 
 if TYPE_CHECKING:
     from ufo.runtime.access.workspace_slots import WorkspaceSlots
-    from ufo.runtime.cloud import CloudApis
+    from ufo.runtime.cloud import CloudApi, CloudApis
     from ufo.runtime.ext.context import ConversationProbes
     from ufo.runtime.ext.conversation_slots import (
         BoundConversationSlot,
@@ -2579,15 +2579,29 @@ class SurfaceContext:
     _preview_url: str | None = None
     _preview_token: str | None = None
     _probes: "ConversationProbes | None" = None
-    cloud: "CloudApis | None" = None
-    """The deploy's cloud API, handed only to a surface whose manifest declares `cloud_client`, so
-    the surface reads a service `cloud.clients` selects as the workspace it serves."""
+    _cloud: "CloudApis | None" = None
 
     @property
     def fleet_blob(self) -> FleetBlobStore:
         """The deploy-owned view of the same store `blob` scopes: closed to the fleet namespaces
         (static assets), for data every workspace shares."""
         return FleetBlobStore(backend=self.blob.backend)
+
+    def cloud_api(self) -> "CloudApi":
+        """The cloud API's client as the workspace this surface serves. Only a surface whose
+        manifest declares `cloud_client`, on a deploy that sets `[cloud] api_url` and loads a
+        `proxy_credentials` extension, holds one."""
+        if self._cloud is None:
+            raise RuntimeError(
+                f"The surface {self.surface!r} holds no cloud API: its manifest declares no "
+                "cloud_client, or the deploy sets no [cloud] api_url."
+            )
+        return self._cloud.bound(self.workspace_id)
+
+    def cloud_selects(self, service: str) -> bool:
+        """Whether this surface reads `service` through the cloud API, as `UFO_CLOUD_CLIENTS`
+        selects; False for a surface that holds no cloud API."""
+        return self._cloud is not None and service in self._cloud.clients
 
     @property
     def conversation_slots(self) -> tuple["BoundConversationSlot", ...]:
