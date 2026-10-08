@@ -47,6 +47,7 @@ from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import embed_backend, index_backend, skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.billing.spend import NO_SPEND_GATES, SpendGates
 from ufo.runtime.engine import (
     EMPTY_RESPONSE_NUDGE,
@@ -492,6 +493,7 @@ def dbos_runtime(
             index=index,
             embed=embed,
             artifact_token_secret="",
+            rules=PerAgentRules(),
         )
     )
     yield config, hub, blob

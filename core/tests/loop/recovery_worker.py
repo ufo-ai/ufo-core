@@ -48,6 +48,7 @@ from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.runtime_instance import ExecutorRecovery, Heartbeat
 from ufo.runtime.subagents import SubagentRegistry
@@ -239,6 +240,7 @@ def _install_runtime(env: _Env, model: _CrashModel | _AnswerModel) -> None:
             index=default_index(),
             embed=_StubEmbed(),
             artifact_token_secret="",
+            rules=PerAgentRules(),
         )
     )
 

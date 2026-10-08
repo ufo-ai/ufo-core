@@ -61,6 +61,7 @@ from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore, member_slot
+from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
@@ -902,6 +903,7 @@ def wire_server(
                 index=default_index(),
                 embed=StubEmbed(),
                 artifact_token_secret="",
+                rules=PerAgentRules(),
             )
         )
 

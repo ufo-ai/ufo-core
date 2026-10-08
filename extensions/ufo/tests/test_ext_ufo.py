@@ -63,6 +63,7 @@ from ufo.runtime.access.credentials import (
     CredentialStore,
     seal_credential_request,
 )
+from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest
 from ufo.runtime.hub import (
@@ -911,6 +912,7 @@ def runtime(
             index=default_index(),
             embed=StubEmbed(),
             artifact_token_secret=SECRET,
+            rules=PerAgentRules(),
         )
     )
     yield config, hub, blob, sandboxes

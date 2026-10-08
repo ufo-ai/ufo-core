@@ -5,7 +5,7 @@ import json
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
@@ -673,13 +673,13 @@ class Runtime:
     index: IndexBackend
     embed: EmbedClient
     artifact_token_secret: str
+    rules: PerAgentRules
     site_previewer: SitePreviewer | None = None
     spend: SpendGates = NO_SPEND_GATES
     ledger: Ledger = UNGATED_LEDGER
     home_surface: str | None = None
     tailer: TurnTailer | None = None
     memory: MemorySearch | None = None
-    rules: PerAgentRules = field(default_factory=PerAgentRules)
     sessions: ProxySessions | None = None
 
 

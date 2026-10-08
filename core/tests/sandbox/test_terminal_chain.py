@@ -76,6 +76,7 @@ from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.schema import tables
@@ -399,6 +400,7 @@ def terminal_server(
                 index=default_index(),
                 embed=StubEmbed(),
                 artifact_token_secret="",
+                rules=PerAgentRules(),
             )
         )
 
