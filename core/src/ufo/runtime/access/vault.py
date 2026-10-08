@@ -192,12 +192,19 @@ class VaultReads:
             return None
         filled = name in await self.credentials.stored_slots(workspace_id)
         provider = None if slot.feed is None else slot.feed.provider
+        if slot.feed is not None:
+            released = filled and (
+                bool(slot.feed.hosts)
+                or (slot.feed.tenant and bool(await self._tenant_hosts(workspace_id, slot.feed)))
+            )
+        else:
+            released = filled and slot.injection is not None
         return SecretDescription(
             name=name,
             kind="static",
             provider=provider,
             usable=filled,
-            released=filled and (slot.injection is not None or slot.feed is not None),
+            released=released,
             broker=None,
             account=None,
             base_url=None,

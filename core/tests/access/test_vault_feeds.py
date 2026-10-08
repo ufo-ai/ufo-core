@@ -315,6 +315,22 @@ async def _empty_feed_slot(store: CredentialStore, workspace_id: UUID) -> tuple[
     return "linear", "api.linear.app"
 
 
+async def _connected_tenant_slot(store: CredentialStore, workspace_id: UUID) -> tuple[str, str]:
+    await _fill(store, workspace_id, {"zendesk": "zd-key"})
+    await _connection(workspace_id, "zendesk", "", base_url=ZENDESK_URL)
+    return "zendesk", "acme.zendesk.com"
+
+
+async def _unconnected_tenant_slot(store: CredentialStore, workspace_id: UUID) -> tuple[str, str]:
+    await _fill(store, workspace_id, {"zendesk": "zd-key"})
+    return "zendesk", "acme.zendesk.com"
+
+
+async def _hostless_feed_slot(store: CredentialStore, workspace_id: UUID) -> tuple[str, str]:
+    await _fill(store, workspace_id, {"granola_mcp": "granola-key"})
+    return "granola_mcp", "mcp.granola.ai"
+
+
 async def _broker_connection(store: CredentialStore, workspace_id: UUID) -> tuple[str, str]:
     return await _connection(workspace_id, "notion", "ca_notion"), "api.notion.com"
 
@@ -324,7 +340,16 @@ async def _cli_connection(store: CredentialStore, workspace_id: UUID) -> tuple[s
 
 
 @pytest.mark.parametrize(
-    "case", [_filled_feed_slot, _empty_feed_slot, _broker_connection, _cli_connection]
+    "case",
+    [
+        _filled_feed_slot,
+        _empty_feed_slot,
+        _connected_tenant_slot,
+        _unconnected_tenant_slot,
+        _hostless_feed_slot,
+        _broker_connection,
+        _cli_connection,
+    ],
 )
 async def test_released_is_true_exactly_when_resolve_answers(case: _Case, tmp_path: Path) -> None:
     store, workspace_id = _store(), await _workspace()
