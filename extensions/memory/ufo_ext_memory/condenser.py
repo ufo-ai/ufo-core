@@ -60,6 +60,7 @@ from ufo.sdk.o11y import warn
 from ufo.sdk.seats import Seats, workspace_domain
 from ufo.sdk.sources import PageChange
 from ufo.sdk.subjects import SHARED_SUBJECT
+from ufo_ext_memory.client import ItemClass, MemoryKind
 from ufo_ext_memory.store import (
     DEFAULT_CONFIDENCE,
     FACT,
@@ -69,8 +70,6 @@ from ufo_ext_memory.store import (
     OVERVIEW,
     SECTION,
     SEMANTIC,
-    ItemClass,
-    MemoryKind,
     MemoryStore,
     MemoryWrite,
     Transaction,

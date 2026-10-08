@@ -56,6 +56,7 @@ from ufo.sdk.index import (
 )
 from ufo.sdk.sources import PageChange
 from ufo.sdk.subjects import member_subject
+from ufo_ext_memory.client import ItemClass, MemoryKind
 
 RRF_K = 60
 RRF_WEIGHT = 0.7
@@ -108,14 +109,12 @@ HALFLIFE_DAYS: dict[str, float] = {
 
 logger = logging.getLogger(__name__)
 
-ItemClass = Literal["fact", "episodic", "semantic", "section", "overview"]
 FACT: Literal["fact"] = "fact"
 EPISODIC: ItemClass = "episodic"
 SEMANTIC: ItemClass = "semantic"
 SECTION: ItemClass = "section"
 OVERVIEW: ItemClass = "overview"
 
-MemoryKind = Literal["fact", "preference", "decision", "event", "task"]
 KIND_FACT: MemoryKind = "fact"
 
 Transaction = Callable[[], AbstractAsyncContextManager[AsyncConnection]]
