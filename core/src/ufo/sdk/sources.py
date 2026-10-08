@@ -42,10 +42,29 @@ each pass reports, and the close its consumer's early stop owes the response it 
 connector writes the page factory and nothing else. `syncing_streams` is which streams a connection
 registers. So the per-partition
 cursor-map codec, the bounded-backfill resume and the descent itself live once here, not in each
-connector. The concrete shapes live in `ufo.runtime.sources`, reached only here."""
+connector. The concrete shapes live in `ufo.runtime.sources`, reached only here.
+
+A `page_change` consumer reads `PageChange`s from the sources service's feed through `SourcesFeed`,
+each carrying the core connection its source names in `labels.connection`; `SourcesApi` is that
+service's client."""
 
 from ufo.runtime.access.connectors import (
     ToolExecutor as ToolExecutor,
+)
+from ufo.runtime.pages import (
+    PAGE_FEED_BATCH_MAX as PAGE_FEED_BATCH_MAX,
+)
+from ufo.runtime.pages import (
+    PageBatch as PageBatch,
+)
+from ufo.runtime.pages import (
+    PageChange as PageChange,
+)
+from ufo.runtime.pages import (
+    PageFeed as PageFeed,
+)
+from ufo.runtime.pages import (
+    page_cursor as page_cursor,
 )
 from ufo.runtime.sources.backend import (
     ConnectorBackend as ConnectorBackend,
@@ -147,15 +166,6 @@ from ufo.runtime.sources.sync import (
     Page as Page,
 )
 from ufo.runtime.sources.sync import (
-    PageBatch as PageBatch,
-)
-from ufo.runtime.sources.sync import (
-    PageChange as PageChange,
-)
-from ufo.runtime.sources.sync import (
-    PageFeed as PageFeed,
-)
-from ufo.runtime.sources.sync import (
     SourceAuth as SourceAuth,
 )
 from ufo.runtime.sources.sync import (
@@ -181,4 +191,37 @@ from ufo.runtime.sources.sync import (
 )
 from ufo.runtime.sources.tool import (
     ToolConnector as ToolConnector,
+)
+from ufo.runtime.sources_api import (
+    FEED_READS_MAX as FEED_READS_MAX,
+)
+from ufo.runtime.sources_api import (
+    SOURCE_CONNECTION_LABEL as SOURCE_CONNECTION_LABEL,
+)
+from ufo.runtime.sources_api import (
+    SOURCE_LINKS_MAX as SOURCE_LINKS_MAX,
+)
+from ufo.runtime.sources_api import (
+    ChangesPage as ChangesPage,
+)
+from ufo.runtime.sources_api import (
+    Source as Source,
+)
+from ufo.runtime.sources_api import (
+    SourceLink as SourceLink,
+)
+from ufo.runtime.sources_api import (
+    SourceLinks as SourceLinks,
+)
+from ufo.runtime.sources_api import (
+    SourceOptions as SourceOptions,
+)
+from ufo.runtime.sources_api import (
+    SourcesApi as SourcesApi,
+)
+from ufo.runtime.sources_api import (
+    SourcesFeed as SourcesFeed,
+)
+from ufo.runtime.sources_api import (
+    WireFeedItem as WireFeedItem,
 )

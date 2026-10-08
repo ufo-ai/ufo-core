@@ -23,7 +23,7 @@ from ufo_ext_sources.triggers import SourceTrigger
 from ufo.host.tools.builtins import BUILTIN_TOOLS
 from ufo.runtime.access.grants import FeedConnection
 from ufo.runtime.ext.manifest import Manifest
-from ufo.runtime.sources.sync import PageChange
+from ufo.runtime.pages import PageChange
 
 REPO = Path(__file__).resolve().parents[3]
 PIN = Path(__file__).with_name("model_read_text.json")
@@ -91,6 +91,8 @@ def _alerts() -> dict[str, object]:
         PageChange(
             page_id=UUID(int=100 + index),
             source_id=UUID(int=5),
+            connection_id=UUID(int=6),
+            provider="github",
             subject="",
             stream="pull_requests",
             title=f"Pull request {index}",

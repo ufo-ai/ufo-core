@@ -53,11 +53,12 @@ from ufo.runtime.kinds.agents import AgentSpec
 from ufo.runtime.memory import MemorySearchProvider
 from ufo.runtime.object_scope import ObjectActionRequestTarget, ObjectActionTarget
 from ufo.runtime.objects import ObjectKind
+from ufo.runtime.pages import PageChange
 from ufo.runtime.provisioning import WorkspaceFoundedSpec
 from ufo.runtime.search import SearchProvider
 from ufo.runtime.seats import MemberAddedSpec
 from ufo.runtime.skills.runtime import RuntimeSkill, SkillCard
-from ufo.runtime.sources.sync import PageChange, SourceBackend
+from ufo.runtime.sources.sync import SourceBackend
 from ufo.runtime.tools.registry import OBJECT_ACTION_TOOL, ToolDef
 from ufo.runtime.turns.audience import SHARED_AUDIENCE, Audience
 from ufo.runtime.turns.delivery_register import SUBAGENT_RESULT_DESCRIPTION

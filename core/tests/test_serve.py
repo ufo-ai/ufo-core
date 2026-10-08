@@ -68,6 +68,7 @@ from ufo.runtime.ext.operator import install_operator, installed_operator
 from ufo.runtime.ext.surface import SurfaceSpec
 from ufo.runtime.jobs import model_key_slots
 from ufo.runtime.sources.sync import FOLDER_BACKEND
+from ufo.runtime.sources_api import SourcesFeed
 from ufo.runtime.workspace import SeveralWorkspaces, ws
 from ufo.schema import tables
 
@@ -288,9 +289,14 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
     probes = object()
     cloud = cloud_apis_for()
     speakers = {"chat": object()}
-    serve._launch_jobs(runtime, object(), object(), object(), probes, cloud, speakers)
+    serve._launch_jobs(runtime, object(), object(), probes, cloud, speakers)
 
     assert captured["page"]["cloud"] is captured["jobs"]["cloud"] is cloud
+    feed = captured["page"]["pages"]
+    assert isinstance(feed, SourcesFeed)
+    assert feed.apis is cloud
+    assert feed.links.entries == {}
+    assert captured["jobs"]["pages"] is feed
     assert captured["page"]["self_user_ids"] is captured["jobs"]["self_user_ids"] is speakers
     assert captured["page"]["manifests"] is manifests
     assert captured["page"]["registry"] is registry
@@ -343,8 +349,9 @@ def test_launch_jobs_hands_both_runners_the_background_jobs_model(
     monkeypatch.setattr(serve, "JobRunner", Runner)
 
     probes = object()
-    serve._launch_jobs(runtime, object(), object(), object(), probes, None, {})
+    serve._launch_jobs(runtime, object(), object(), probes, None, {})
 
+    assert captured["page"]["pages"] is captured["jobs"]["pages"] is None
     assert captured["page"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL
     assert captured["jobs"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL
     assert captured["jobs"]["registry"] is registry

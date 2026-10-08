@@ -44,7 +44,8 @@ from ufo.runtime.objects import (
     VerbNotSupported,
     object_registry,
 )
-from ufo.runtime.sources.sync import PageChange, feed_handle_for
+from ufo.runtime.pages import PageChange
+from ufo.runtime.sources.sync import feed_handle_for
 from ufo.runtime.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.audience import conversation_audience
@@ -336,6 +337,8 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
                 PageChange(
                     page_id=page_id,
                     source_id=source_uid,
+                    connection_id=uuid4(),
+                    provider="folder",
                     subject=SHARED_SUBJECT,
                     stream="notes",
                     title="Cannery office",

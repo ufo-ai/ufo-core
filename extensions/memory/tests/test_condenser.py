@@ -109,7 +109,8 @@ from ufo.runtime.indexing import (
 )
 from ufo.runtime.jobs import PageChangeRunner
 from ufo.runtime.objects import ObjectListQuery
-from ufo.runtime.sources.sync import CorePageFeed, PageChange, feed_handle_for
+from ufo.runtime.pages import PageChange
+from ufo.runtime.sources.sync import CorePageFeed, feed_handle_for
 from ufo.runtime.tools.context import SpeakerRequired, ToolContext
 from ufo.runtime.turns.audience import conversation_audience, foreign_room_audience
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
@@ -647,6 +648,8 @@ def _change(
     return PageChange(
         page_id=page_id,
         source_id=source_id,
+        connection_id=uuid4(),
+        provider="folder",
         subject=subject,
         stream=stream,
         title="Acquisition",
@@ -918,6 +921,8 @@ async def test_derive_facts_is_idempotent(db: None) -> None:
     change = PageChange(
         page_id=page_id,
         source_id=source_id,
+        connection_id=uuid4(),
+        provider="folder",
         subject=subject,
         stream="notes",
         title="Office location",
@@ -965,6 +970,8 @@ async def test_fact_deriver_ignores_a_stale_private_payload_after_sanitization(
     private = PageChange(
         page_id=page_id,
         source_id=source_id,
+        connection_id=uuid4(),
+        provider="folder",
         subject=private_subject,
         stream="notes",
         title="Private plan",

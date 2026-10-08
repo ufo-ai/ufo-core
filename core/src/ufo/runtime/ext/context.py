@@ -98,9 +98,9 @@ from ufo.runtime.member_profiles import (
     ProfileSource,
     read_profiles,
 )
+from ufo.runtime.pages import PageFeed
 from ufo.runtime.search import SearchProvider
 from ufo.runtime.sources.sync import (
-    PageFeed,
     SourceRowConfig,
     feed_handle,
     feed_handle_for,

@@ -37,7 +37,7 @@ from ufo.product import (
 from ufo.runtime.ext.context import CORE_EXTENSION, context_for
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.jobs import JobRunner
-from ufo.runtime.sources.sync import CorePageFeed, SyncDriver
+from ufo.runtime.sources.sync import SyncDriver
 from ufo.runtime.tools.context import ToolContext
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws
@@ -208,7 +208,6 @@ def _served_jobs(
         runtime,
         lambda _workspace_id: RecordingInvoker(),
         SyncDriver(backends={}, blob=blob, postgres=False),
-        CorePageFeed(blob=blob),
         None,
         None,
         {},

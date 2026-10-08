@@ -18,10 +18,13 @@ instead of rewinding the cursor and replaying the batch. No mock call-log — a 
 through its capability APIs."""
 
 import hashlib
+import json
 import logging
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from urllib.parse import parse_qs
 from uuid import UUID, uuid4
 
 import pytest
@@ -30,7 +33,12 @@ import ufo_ext_sample.manifest as sample
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from pydantic import JsonValue
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.types import Receive, Scope, Send
 from ufo_ext_sample.hooks import HOOK_PAGE_CHANGE_KEY
+from ufo_testsupport.cloud import cloud_apis_for
+from ufo_testsupport.sources_service import SOURCES_WIRE, SourcesServiceStandIn
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -68,20 +76,12 @@ from ufo.runtime.jobs import (
     core_jobs,
     model_key_slots,
 )
-from ufo.runtime.sources.sync import (
-    CorePageFeed,
-    FolderSource,
-    PageBatch,
-    PageChange,
-    SyncDriver,
-    feed_handle_for,
-    page_cursor,
-)
+from ufo.runtime.pages import page_cursor
+from ufo.runtime.sources.sync import FolderSource, SyncDriver
+from ufo.runtime.sources_api import SourceLinks, SourcesFeed
 from ufo.runtime.subagents import SubagentRegistry
-from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.ids import uuid7
 from ufo.schema.records import Usage
 
 BACKGROUND_MODEL = "gpt-5.6-luna"
@@ -108,74 +108,58 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -> UUID:
-    source_uid = uuid7()
-    source_id, page_id, page_uid = uuid4(), uuid4(), uuid7()
-    when = datetime.now(UTC)
-    await blob.put(f"pages/{page_id}", body.encode())
-    async with workspace_tx() as connection:
-        connection_id = (
-            await connection.execute(
-                sa.select(tables.connection.c.id).where(
-                    tables.connection.c.workspace_id == workspace_id,
-                    tables.connection.c.provider == "folder",
-                    tables.connection.c.account_id == "",
-                )
-            )
-        ).scalar_one_or_none()
-        if connection_id is None:
-            connection_id = uuid4()
-            await connection.execute(
-                sa.insert(tables.connection).values(
-                    id=connection_id,
-                    workspace_id=workspace_id,
-                    provider="folder",
-                    account_id="",
-                    host="",
-                    owner_member_id=None,
-                    shared=True,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-        await connection.execute(
-            sa.insert(tables.source).values(
-                uid=source_uid,
-                workspace_id=workspace_id,
-                backend="folder",
-                config={"root": f"/{source_id.hex}"},
-                feed_handle=feed_handle_for({"root": f"/{source_id.hex}"}, frozenset()),
-                connection_id=connection_id,
-                cursor=None,
-                next_sync_at=when,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
+GOLDEN_ITEM = json.loads(SOURCES_WIRE.read_text(encoding="utf-8"))["sources.changes"]["answer"][
+    "body"
+]["items"][0]
+
+
+@dataclass
+class _Sources:
+    stand_in: SourcesServiceStandIn = field(default_factory=SourcesServiceStandIn)
+    items: list[dict[str, object]] = field(default_factory=list)
+
+    def add(self, body: str) -> UUID:
+        page_id = uuid4()
+        self.items.append(
+            {
+                **GOLDEN_ITEM,
+                "page_id": str(page_id),
+                "title": f"page {len(self.items) + 1}",
+                "body": body,
+                "digest": "sha256:" + hashlib.sha256(body.encode()).hexdigest(),
+                "revision": len(self.items) + 1,
+            }
         )
-        await connection.execute(
-            sa.insert(tables.page).values(
-                uid=page_uid,
-                workspace_id=workspace_id,
-                source_uid=source_uid,
-                digest="sha256:" + hashlib.sha256(body.encode()).hexdigest(),
-                body_ref=f"pages/{page_id}",
-                subject=SHARED_SUBJECT,
-                tombstone=False,
-                created_at=when,
-                updated_at=when,
-            )
+        return page_id
+
+    def feed(self) -> SourcesFeed:
+        return SourcesFeed(
+            apis=cloud_apis_for(
+                Starlette(routes=[Route("/v1/sources/changes", self)]),
+                self.stand_in.app,
+            ),
+            links=SourceLinks(entries={}),
         )
-    return page_uid
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        query = parse_qs(scope["query_string"].decode())
+        after = (0, UUID(int=0)) if "cursor" not in query else page_cursor(query["cursor"][0])
+        window = [
+            item for item in self.items if (item["revision"], UUID(str(item["page_id"]))) > after
+        ][: int(query["limit"][0])]
+        cursor = None if not window else f"{window[-1]['revision']}|{window[-1]['page_id']}"
+        self.stand_in.queue("sources.changes", [(200, {"items": window, "next_cursor": cursor})])
+        await self.stand_in.app(scope, receive, send)
 
 
 def _runner(
-    blob: FilesystemBlobStore,
+    sources: _Sources,
     manifests: tuple[object, ...] = (),
     registry: ModelRegistry | None = None,
 ) -> PageChangeRunner:
     return PageChangeRunner(
         manifests=manifests or (_sample_manifest(),),
-        pages=CorePageFeed(blob=blob),
+        pages=sources.feed(),
         registry=registry,
     )
 
@@ -203,13 +187,11 @@ def _stub_registry() -> ModelRegistry:
     )
 
 
-async def test_runner_delivers_changed_pages_and_advances_the_cursor(
-    db: None, tmp_path: object
-) -> None:
+async def test_runner_delivers_changed_pages_and_advances_the_cursor(db: None) -> None:
     workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    page_one = await _seed_page(blob, workspace_id, "the first page body")
-    runner = _runner(blob)
+    sources = _Sources()
+    page_one = sources.add("the first page body")
+    runner = _runner(sources)
     with ws(workspace_id):
         await _drive_all(runner)
 
@@ -218,7 +200,7 @@ async def test_runner_delivers_changed_pages_and_advances_the_cursor(
         first = await scoped.get(HOOK_PAGE_CHANGE_KEY)
     assert first == {"page_ids": [str(page_one)], "model_wired": False}
 
-    page_two = await _seed_page(blob, workspace_id, "the second page body")
+    page_two = sources.add("the second page body")
     with ws(workspace_id):
         await _drive_all(runner)
     with ws(workspace_id):
@@ -226,13 +208,13 @@ async def test_runner_delivers_changed_pages_and_advances_the_cursor(
     assert second == {"page_ids": [str(page_two)], "model_wired": False}
 
 
-async def test_runner_wires_the_model_into_the_off_turn_context(db: None, tmp_path: object) -> None:
+async def test_runner_wires_the_model_into_the_off_turn_context(db: None) -> None:
     workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    await _seed_page(blob, workspace_id, "a page for model wiring")
+    sources = _Sources()
+    sources.add("a page for model wiring")
     registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-4-8")
     with ws(workspace_id):
-        await _drive_all(_runner(blob, registry=registry))
+        await _drive_all(_runner(sources, registry=registry))
 
     with ws(workspace_id):
         scoped = ScopedStore(extension=sample.NAME)
@@ -241,12 +223,10 @@ async def test_runner_wires_the_model_into_the_off_turn_context(db: None, tmp_pa
     assert record["model_wired"] is True
 
 
-async def test_a_page_change_consumer_runs_on_the_background_jobs_model(
-    db: None, tmp_path: object
-) -> None:
+async def test_a_page_change_consumer_runs_on_the_background_jobs_model(db: None) -> None:
     workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    await _seed_page(blob, workspace_id, "a page for the background model")
+    sources = _Sources()
+    sources.add("a page for the background model")
     registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-5")
     seen: list[str] = []
 
@@ -263,7 +243,7 @@ async def test_a_page_change_consumer_runs_on_the_background_jobs_model(
                 hooks=(HookSpec(event="page_change", handler=_record_model),),
             ),
         ),
-        pages=CorePageFeed(blob=blob),
+        pages=sources.feed(),
         registry=registry,
         background_model="gpt-5.6-luna",
     )
@@ -275,11 +255,11 @@ async def test_a_page_change_consumer_runs_on_the_background_jobs_model(
 
 
 async def test_a_consumer_meters_its_model_call_under_its_own_page_change_job(
-    db: None, tmp_path: object, monkeypatch: pytest.MonkeyPatch
+    db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    await _seed_page(blob, workspace_id, "a page the deriver distills")
+    sources = _Sources()
+    sources.add("a page the deriver distills")
     reader = InMemoryMetricReader()
     monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
     monkeypatch.setattr(o11y, "_counters", {})
@@ -306,7 +286,7 @@ async def test_a_consumer_meters_its_model_call_under_its_own_page_change_job(
                 hooks=(HookSpec(event="page_change", handler=_derive_facts),),
             ),
         ),
-        pages=CorePageFeed(blob=blob),
+        pages=sources.feed(),
         registry=_stub_registry(),
         background_model=BACKGROUND_MODEL,
     )
@@ -338,15 +318,12 @@ class _NoProbes:
         raise AssertionError("no probe expected")
 
 
-def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) -> None:
+def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: Path) -> None:
     blob = FilesystemBlobStore(root=tmp_path)
     boom = Manifest(
         name="boom_ext", version="0", hooks=(HookSpec(event="page_change", handler=_raise),)
     )
-    runner = PageChangeRunner(
-        manifests=(_sample_manifest(), boom),
-        pages=CorePageFeed(blob=blob),
-    )
+    runner = PageChangeRunner(manifests=(_sample_manifest(), boom), pages=_Sources().feed())
     specs = core_jobs(
         SyncDriver(backends={"folder": FolderSource()}, blob=blob, postgres=False),
         TurnDispatcher(client=None),
@@ -366,16 +343,14 @@ def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) ->
     assert f"{CORE_EXTENSION}:{PAGE_CHANGE_JOB}:boom_ext:_raise" in keys
 
 
-async def test_a_page_a_consumer_keeps_refusing_is_parked_and_blocks_no_other(
-    db: None, tmp_path: object
-) -> None:
+async def test_a_page_a_consumer_keeps_refusing_is_parked_and_blocks_no_other(db: None) -> None:
     workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    page = await _seed_page(blob, workspace_id, "a page both consumers replay")
+    sources = _Sources()
+    page = sources.add("a page both consumers replay")
     boom = Manifest(
         name="boom_ext", version="0", hooks=(HookSpec(event="page_change", handler=_raise),)
     )
-    runner = _runner(blob, manifests=(boom, _sample_manifest()))
+    runner = _runner(sources, manifests=(boom, _sample_manifest()))
     consumers = {consumer.extension: consumer for consumer in runner.consumers()}
     boom_consumer, sample_consumer = consumers["boom_ext"], consumers[sample.NAME]
     boom_store = ScopedStore(extension="boom_ext")
@@ -452,15 +427,15 @@ async def _taker_state(discriminator: str) -> tuple[JsonValue | None, JsonValue 
 
 
 async def test_a_batch_the_handler_refuses_whole_is_retried_a_page_at_a_time(
-    db: None, tmp_path: object, caplog: pytest.LogCaptureFixture
+    db: None, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A refusal a batch earns as a whole — the embedding request its bodies add up to is over
     the provider's token cap — is not any one page's."""
     workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    pages = [await _seed_page(blob, workspace_id, f"page {n}") for n in range(3)]
+    sources = _Sources()
+    pages = [sources.add(f"page {n}") for n in range(3)]
     _TAKER.reset(refuses_batches=True)
-    runner = _runner(blob, manifests=(_taker_manifest(),))
+    runner = _runner(sources, manifests=(_taker_manifest(),))
     (consumer,) = runner.consumers()
 
     with caplog.at_level(logging.WARNING, logger="ufo"), ws(workspace_id):
@@ -482,15 +457,14 @@ async def test_a_batch_the_handler_refuses_whole_is_retried_a_page_at_a_time(
 
 async def test_a_batch_scoped_handler_retries_then_narrows(
     db: None,
-    tmp_path: object,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
+    sources = _Sources()
     pages = [
-        await _seed_page(blob, workspace_id, "first"),
-        await _seed_page(blob, workspace_id, "second"),
+        sources.add("first"),
+        sources.add("second"),
     ]
     _TAKER.reset(refuses_batches=True)
     manifest = Manifest(
@@ -504,7 +478,7 @@ async def test_a_batch_scoped_handler_retries_then_narrows(
             ),
         ),
     )
-    runner = _runner(blob, manifests=(manifest,))
+    runner = _runner(sources, manifests=(manifest,))
     (consumer,) = runner.consumers()
     reader = InMemoryMetricReader()
     monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
@@ -514,7 +488,7 @@ async def test_a_batch_scoped_handler_retries_then_narrows(
     for n in range(PAGE_CHANGE_PARK_STRIKES - 1):
         with pytest.raises(RuntimeError), ws(workspace_id):
             await runner.drive(consumer)
-        pages.append(await _seed_page(blob, workspace_id, f"new {n}"))
+        pages.append(sources.add(f"new {n}"))
 
     with caplog.at_level(logging.WARNING, logger="ufo"), ws(workspace_id):
         await runner.drive(consumer)
@@ -538,19 +512,19 @@ async def test_a_batch_scoped_handler_retries_then_narrows(
 
 
 async def test_a_page_the_handler_never_takes_is_parked_and_the_rest_move_past_it(
-    db: None, tmp_path: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    db: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """One page the handler can never accept used to hold every later page in the workspace
     behind it, replayed every tick forever."""
     workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    pages = [await _seed_page(blob, workspace_id, f"page {n}") for n in range(3)]
+    sources = _Sources()
+    pages = [sources.add(f"page {n}") for n in range(3)]
     _TAKER.reset(refused=[pages[1]])
     reader = InMemoryMetricReader()
     monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
     monkeypatch.setattr(o11y, "_counters", {})
     monkeypatch.setattr(o11y, "_histograms", {})
-    runner = _runner(blob, manifests=(_taker_manifest(),))
+    runner = _runner(sources, manifests=(_taker_manifest(),))
     (consumer,) = runner.consumers()
 
     for _ in range(PAGE_CHANGE_PARK_STRIKES - 1):
@@ -577,16 +551,14 @@ async def test_a_page_the_handler_never_takes_is_parked_and_the_rest_move_past_i
     assert _counted(reader, "ufo.page_change_stalled_total") == PAGE_CHANGE_PARK_STRIKES - 1
 
 
-async def test_a_parked_page_waits_its_hour_then_lands_on_its_own(
-    db: None, tmp_path: object
-) -> None:
+async def test_a_parked_page_waits_its_hour_then_lands_on_its_own(db: None) -> None:
     """A parked page is retried off the main line, so whatever refused it — fixed — indexes it
     without anyone rewinding a cursor. Until its hour is up it costs the tick nothing."""
     workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    pages = [await _seed_page(blob, workspace_id, f"page {n}") for n in range(2)]
+    sources = _Sources()
+    pages = [sources.add(f"page {n}") for n in range(2)]
     _TAKER.reset(refused=[pages[0]])
-    runner = _runner(blob, manifests=(_taker_manifest(),))
+    runner = _runner(sources, manifests=(_taker_manifest(),))
     (consumer,) = runner.consumers()
     parked_key = f"{PAGE_CHANGE_PARKED_KEY}:{consumer.discriminator}"
 
@@ -614,12 +586,12 @@ async def test_a_parked_page_waits_its_hour_then_lands_on_its_own(
 
 
 async def test_a_consumer_refusing_every_page_stops_at_its_cursor_and_counts(
-    db: None, tmp_path: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    db: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Parking is for a page, not for a consumer."""
     workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    await _seed_page(blob, workspace_id, "a page the handler will never accept")
+    sources = _Sources()
+    sources.add("a page the handler will never accept")
     reader = InMemoryMetricReader()
     monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
     monkeypatch.setattr(o11y, "_counters", {})
@@ -627,7 +599,7 @@ async def test_a_consumer_refusing_every_page_stops_at_its_cursor_and_counts(
     boom = Manifest(
         name="boom_ext", version="0", hooks=(HookSpec(event="page_change", handler=_raise),)
     )
-    runner = _runner(blob, manifests=(boom,))
+    runner = _runner(sources, manifests=(boom,))
     (consumer,) = runner.consumers()
     store = ScopedStore(extension="boom_ext")
     parked_key = f"{PAGE_CHANGE_PARKED_KEY}:{consumer.discriminator}"
@@ -678,39 +650,6 @@ def _counted(reader: InMemoryMetricReader, name: str) -> float:
     )
 
 
-@dataclass(frozen=True)
-class _SyntheticPages:
-    revisions: int
-
-    async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch:
-        after = 0 if cursor is None else page_cursor(cursor)[0]
-        window = tuple(
-            self._page(revision)
-            for revision in range(after + 1, min(after + limit, self.revisions) + 1)
-        )
-        if not window:
-            return PageBatch(changes=(), next_cursor=None)
-        return PageBatch(changes=window, next_cursor=f"{window[-1].revision}|{window[-1].page_id}")
-
-    def _page(self, revision: int) -> PageChange:
-        when = datetime(2026, 8, 1, tzinfo=UTC)
-        return PageChange(
-            page_id=UUID(int=revision),
-            source_id=UUID(int=0),
-            subject=SHARED_SUBJECT,
-            stream="pages",
-            title=f"page {revision}",
-            body=f"the body of page {revision}",
-            digest=f"sha256:{revision:064x}",
-            revision=revision,
-            tombstone=False,
-            indexed=True,
-            created_at=when,
-            as_of=when,
-            changed_at=when,
-        )
-
-
 async def _advance_the_cursor_then_record(ctx: HookContext) -> HookOutcome:
     match ctx.payload:
         case PageChangeBatch(changes=changes):
@@ -730,9 +669,10 @@ async def test_a_cursor_another_writer_advanced_is_not_rewound_by_the_drive(db: 
         version="0",
         hooks=(HookSpec(event="page_change", handler=_advance_the_cursor_then_record),),
     )
-    runner = PageChangeRunner(
-        manifests=(racer,), pages=_SyntheticPages(revisions=PAGE_CHANGE_BATCH + 1)
-    )
+    sources = _Sources()
+    for revision in range(PAGE_CHANGE_BATCH + 1):
+        sources.add(f"the body of page {revision}")
+    runner = PageChangeRunner(manifests=(racer,), pages=sources.feed())
     (consumer,) = runner.consumers()
 
     with ws(workspace_id):

@@ -416,6 +416,8 @@ def _change(
     return PageChange(
         page_id=page_id or uuid4(),
         source_id=source_id,
+        connection_id=uuid4(),
+        provider="github",
         subject=subject,
         stream=stream,
         title=title or body.removeprefix("# ")[:40],

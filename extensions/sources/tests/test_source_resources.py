@@ -84,6 +84,8 @@ def _page(body: str, stream: str = "pull_requests") -> PageChange:
     return PageChange(
         page_id=uuid4(),
         source_id=uuid4(),
+        connection_id=uuid4(),
+        provider="github",
         subject="shared",
         stream=stream,
         title="a page",

@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import sqlalchemy as sa
+import ufo_ext_sample.manifest as sample
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, ConfigDict
 from starlette.applications import Starlette
@@ -344,6 +345,23 @@ def test_boot_fails_when_a_cloud_client_loads_without_api_url_or_proxy_credentia
         _require_cloud(configured, (client,))
     _require_cloud(configured, (client, DECLARING))
     _require_cloud(base, (DECLARING,))
+
+
+def test_boot_fails_when_a_page_change_hook_loads_without_api_url_or_proxy_credentials() -> None:
+    base = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db"),
+        blob=BlobConfig(backend="filesystem", root="/tmp/blobs"),
+    )
+    configured = base.model_copy(update={"cloud": CloudConfig(api_url=API_URL)})
+    consumer = sample.manifest()
+
+    with pytest.raises(RuntimeError, match=r"'sample' registers a page_change hook, so \[cloud\]"):
+        _require_cloud(base, (consumer, DECLARING))
+    with pytest.raises(
+        RuntimeError, match="'sample' registers a page_change hook, so an extension"
+    ):
+        _require_cloud(configured, (consumer,))
+    _require_cloud(configured, (consumer, DECLARING))
 
 
 async def test_cloud_apis_for_serves_every_apps_routes() -> None:

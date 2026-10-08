@@ -212,12 +212,12 @@ from ufo.runtime.search import SearchProvider
 from ufo.runtime.skills.runtime import RuntimeSkill, SkillRegistry, SystemSkillBundle
 from ufo.runtime.sources.sync import (
     FOLDER_BACKEND,
-    CorePageFeed,
     FolderSource,
     SourceBackend,
     SyncDriver,
     register_sources,
 )
+from ufo.runtime.sources_api import SourceLinks, SourcesFeed
 from ufo.runtime.steps import DurableTurnSteps
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.surfaces.admission import (
@@ -622,8 +622,7 @@ def run(fleet: Fleet) -> None:
     if unknown_backends:
         raise RuntimeError(f"[[sources]] names unknown backends: {', '.join(unknown_backends)}")
     app.state.configured_sources = config.sources
-    page_feed = CorePageFeed(blob=blob)
-    _launch_jobs(runtime, invoker_for, sync_driver, page_feed, probes, cloud, self_user_ids)
+    _launch_jobs(runtime, invoker_for, sync_driver, probes, cloud, self_user_ids)
     _mount_ext_routes(
         app,
         manifests,
@@ -762,11 +761,11 @@ def _launch_jobs(
     runtime: Runtime,
     invoker_for: InvokerFactory,
     sync_driver: SyncDriver,
-    page_feed: CorePageFeed,
     probes: ConversationProbes,
     cloud: CloudApis | None,
     self_user_ids: Mapping[str, SelfUserIdResolver],
 ) -> None:
+    page_feed = None if cloud is None else SourcesFeed(apis=cloud, links=SourceLinks(entries={}))
     page_change_runner = PageChangeRunner(
         manifests=runtime.manifests,
         pages=page_feed,
@@ -936,19 +935,24 @@ def _validate_requires(
 
 
 def _require_cloud(config: Config, manifests: tuple[Manifest, ...]) -> None:
-    """A `cloud_client` extension calls the cloud API under `[cloud] api_url` with the bearer the
-    extension declaring `proxy_credentials` answers, so it boots only where both are present."""
-    clients = sorted(manifest.name for manifest in manifests if manifest.cloud_client)
+    """A `cloud_client` extension and a `page_change` hook (the sources feed) call the cloud API
+    with the bearer `proxy_credentials` answers, so each boots only where both are present."""
+    clients = sorted(
+        (
+            manifest.name,
+            "declares cloud_client" if manifest.cloud_client else "registers a page_change hook",
+        )
+        for manifest in manifests
+        if manifest.cloud_client or any(spec.event == "page_change" for spec in manifest.hooks)
+    )
     if not clients:
         return
+    name, reason = clients[0]
     if config.cloud.api_url is None:
-        raise RuntimeError(
-            f"The extension {clients[0]!r} declares cloud_client, so [cloud] api_url must be set."
-        )
+        raise RuntimeError(f"The extension {name!r} {reason}, so [cloud] api_url must be set.")
     if not any(manifest.proxy_credentials is not None for manifest in manifests):
         raise RuntimeError(
-            f"The extension {clients[0]!r} declares cloud_client, so an extension must declare "
-            "proxy_credentials."
+            f"The extension {name!r} {reason}, so an extension must declare proxy_credentials."
         )
 
 

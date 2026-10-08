@@ -96,7 +96,9 @@ from ufo.runtime.gravatar import (
 )
 from ufo.runtime.indexing import OWNER_KIND_PAGE, EmbedClient, IndexBackend, IndexScope
 from ufo.runtime.kinds.provisioning import AgentProvisioning
+from ufo.runtime.knowledge_import import sources_imported
 from ufo.runtime.media.preview_renderer import PreviewRenderer
+from ufo.runtime.pages import PageChange, PageFeed, page_cursor
 from ufo.runtime.seats import Seats
 from ufo.runtime.signin_photo import (
     SIGNIN_PHOTO_JOB,
@@ -104,14 +106,7 @@ from ufo.runtime.signin_photo import (
     SigninPhotos,
     unfetched_signin_photo_workspaces,
 )
-from ufo.runtime.sources.sync import (
-    SOURCE_SYNC_JOB,
-    SOURCE_SYNC_SCHEDULE,
-    PageChange,
-    PageFeed,
-    SyncDriver,
-    page_cursor,
-)
+from ufo.runtime.sources.sync import SOURCE_SYNC_JOB, SOURCE_SYNC_SCHEDULE, SyncDriver
 from ufo.runtime.turns.audience import SHARED_AUDIENCE
 from ufo.runtime.turns.dispatch import dispatch_wait_ms
 from ufo.runtime.turns.record import subagent_activity
@@ -177,6 +172,7 @@ CHANGE_LOG_PRUNE_SCHEDULE = "0 * * * * *"
 CHANGE_LOG_RETENTION = timedelta(hours=24)
 INDEX_REAP_BATCH = 50
 PAGE_CHANGE_BATCH = 50
+PAGE_FEED_UNSET = "A page_change hook reads the sources service, so [cloud] api_url must be set."
 PAGE_CHANGE_PARKED_KEY = "page_change_parked"
 PAGE_CHANGE_REFUSED_KEY = "page_change_refused"
 PAGE_CHANGE_BATCH_REFUSED_KEY = "page_change_batch_refused"
@@ -411,14 +407,6 @@ class TurnDispatcher:
         )
 
 
-def _page_beyond_cursor(revision: int, page_id: UUID, cursor: object) -> bool:
-    """Whether a page at `(revision, page_id)` lies past a `page_change` cursor."""
-    if cursor is None:
-        return True
-    boundary_revision, boundary_id = page_cursor(cursor)
-    return revision > boundary_revision or (revision == boundary_revision and page_id > boundary_id)
-
-
 @dataclass(frozen=True)
 class PageChangeConsumer:
     """One registered `page_change` hook and where its cursor and context are scoped: the declaring
@@ -500,17 +488,15 @@ class PageChangeRunner:
     Batch-at-interval and fed only by the source pipeline, so it can never fire on the derived rows
     a handler writes.
 
-    A selective cross-workspace sweep: the dispatcher names the candidate workspaces through
-    `workspaces_with_changes` (one `owner_tx` read, pinned to no workspace and run as the owner role
-    RLS policies exempt, taking only those whose high-water page lies beyond this consumer's cursor)
-    and binds each, so `drive` runs that consumer's cursor loop scoped to the bound workspace — the
-    page feed reads that workspace's pages, the cursor lives in that workspace's ScopedStore, so one
-    consumer's per-minute workflow replays the fleet with each workspace resuming independently. A
-    workspace with nothing changed since its cursor is never bound. On a per-tenant deploy
-    `owner_tx` resolves to the single workspace, unchanged."""
+    A cross-workspace sweep: the dispatcher names the candidate workspaces through
+    `workspaces_with_changes` and binds each, so `drive` runs that consumer's cursor loop scoped to
+    the bound workspace — the page feed reads that workspace's changes, the cursor lives in that
+    workspace's ScopedStore, so one consumer's per-minute workflow replays the fleet with each
+    workspace resuming independently. On a per-tenant deploy `owner_tx` resolves to the single
+    workspace, unchanged."""
 
     manifests: tuple[Manifest, ...]
-    pages: PageFeed
+    pages: PageFeed | None
     invoker_factory: InvokerFactory | None = None
     index: IndexBackend | None = None
     embed: EmbedClient | None = None
@@ -553,74 +539,31 @@ class PageChangeRunner:
         return tuple(consumers)
 
     async def workspaces_with_changes(self, consumer: PageChangeConsumer) -> tuple[UUID, ...]:
-        """The workspaces this consumer has actual pending work in — those whose newest page lies
-        beyond the consumer's own stored cursor. One `owner_tx` read, pinned to no workspace and run
-        as the owner role RLS policies exempt, takes each workspace's high-water page as a pair of
-        correlated probes down the `page_feed` index (the maximum in the feed's `(revision, id)`
-        order — one probe per workspace, never a scan of the page table) and each workspace's cursor
-        for this consumer from `ext_store`; a workspace whose high-water page is at or before its
-        cursor has nothing changed since it last drained and is never opened, while a workspace with
-        no cursor yet (never driven) has every page pending. So a page-holding but change-free
-        workspace runs no per-tick transaction. A workspace whose stored cursor fails to parse
-        counts as pending rather than aborting this fleet-wide read — one workspace's unparseable
-        cursor stays that workspace's `drive` failure, never blocking every other workspace's tick.
-        A workspace the spend gates hold (`SpendGates.admitting`) is not a candidate however far its
-        pages run past the cursor: the gates would refuse every call a consumer makes, and the
-        cursor would stay put through a stall logged every tick. On a per-tenant deploy `owner_tx`
-        resolves to the single workspace, unchanged."""
-        cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
-        of_workspace = tables.page.c.workspace_id == tables.workspace.c.id
-        newest_first = (tables.page.c.revision.desc(), tables.page.c.uid.desc())
-        newest_revision = (
-            sa.select(tables.page.c.revision)
-            .where(of_workspace)
-            .order_by(*newest_first)
-            .limit(1)
-            .scalar_subquery()
-        )
-        newest_id = (
-            sa.select(tables.page.c.uid)
-            .where(of_workspace)
-            .order_by(*newest_first)
-            .limit(1)
-            .scalar_subquery()
-        )
+        """The workspaces this consumer is driven in: every workspace holding a connection that
+        the spend gates admit (`SpendGates.admitting`) and whose sources import is done. Every
+        connected, imported workspace is driven each tick, and an unchanged one costs one feed
+        call. A workspace with nothing connected has nothing to feed it; one the gates hold would
+        see every call a consumer makes refused; one still importing would replay a feed whose
+        older pages are still arriving. One `owner_tx` read, pinned to no workspace and run as the
+        owner role RLS policies exempt, then the import gate's own read."""
         async with owner_tx() as connection:
-            cursor_rows = (
-                await connection.execute(
-                    sa.select(tables.ext_store.c.workspace_id, tables.ext_store.c.value).where(
-                        tables.ext_store.c.extension == consumer.extension,
-                        tables.ext_store.c.key == cursor_key,
+            connected = (
+                (
+                    await connection.execute(
+                        sa.select(tables.connection.c.workspace_id)
+                        .distinct()
+                        .join(
+                            tables.workspace,
+                            tables.workspace.c.id == tables.connection.c.workspace_id,
+                        )
+                        .where(self.spend.admitting(tables.workspace.c.id))
                     )
                 )
-            ).all()
-            page_rows = (
-                await connection.execute(
-                    sa.select(
-                        tables.workspace.c.id.label("workspace_id"),
-                        newest_revision.label("revision"),
-                        newest_id.label("id"),
-                    ).where(self.spend.admitting(tables.workspace.c.id))
-                )
-            ).all()
-        cursors = {row.workspace_id: row.value for row in cursor_rows}
-        pending: list[UUID] = []
-        for row in page_rows:
-            if row.revision is None:
-                continue
-            try:
-                beyond = _page_beyond_cursor(row.revision, row.id, cursors.get(row.workspace_id))
-            except ValueError:
-                warn(
-                    "jobs.page_change_cursor_invalid",
-                    workspace_id=str(row.workspace_id),
-                    extension=consumer.extension,
-                    discriminator=consumer.discriminator,
-                )
-                beyond = True
-            if beyond:
-                pending.append(row.workspace_id)
-        return tuple(pending)
+                .scalars()
+                .all()
+            )
+        imported = await sources_imported(connected)
+        return tuple(sorted(workspace_id for workspace_id in connected if workspace_id in imported))
 
     async def drive(self, consumer: PageChangeConsumer) -> None:
         """Replay the workspace's pages changed since this consumer's cursor to its handler and
@@ -644,8 +587,11 @@ class PageChangeRunner:
         page's, so the drive stops at its cursor and says which consumer stopped and where, and
         counts. The counter is what a monitor reads: a fault that passes shows up once or twice, and
         one that does not keeps the count at the tick rate until somebody looks."""
+        if self.pages is None:
+            raise RuntimeError(PAGE_FEED_UNSET)
+        feed = self.pages
         context = self._context_for(consumer)
-        parked = await self._retry_parked(consumer, context)
+        parked = await self._retry_parked(consumer, context, feed)
         cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
         stored = await context.store.get(cursor_key)
         if stored is not None and not isinstance(stored, str):
@@ -653,10 +599,12 @@ class PageChangeRunner:
         cursor = stored
         narrowed_through: str | None = None
         while True:
-            batch = await self.pages.pages_changed_since(
+            batch = await feed.pages_changed_since(
                 cursor, 1 if narrowed_through is not None else PAGE_CHANGE_BATCH
             )
             if not batch.changes:
+                if batch.next_cursor is not None and batch.next_cursor != cursor:
+                    await context.store.put_if(cursor_key, batch.next_cursor, expected=cursor)
                 return
             try:
                 await consumer.spec.handler(
@@ -689,12 +637,15 @@ class PageChangeRunner:
                 parked = await self._refuse(
                     consumer, context, cursor, batch.changes[0], parked, error
                 )
-            if not await context.store.put_if(cursor_key, batch.next_cursor, expected=cursor):
+            if batch.next_cursor is None or not await context.store.put_if(
+                cursor_key, batch.next_cursor, expected=cursor
+            ):
                 return
             cursor = batch.next_cursor
-            if cursor == narrowed_through:
-                narrowed_through = None
-            elif narrowed_through is None and len(batch.changes) < PAGE_CHANGE_BATCH:
+            if narrowed_through is not None:
+                if page_cursor(cursor) >= page_cursor(narrowed_through):
+                    narrowed_through = None
+            elif len(batch.changes) < PAGE_CHANGE_BATCH:
                 return
 
     async def _hold_batch(
@@ -746,7 +697,7 @@ class PageChangeRunner:
         )
 
     async def _retry_parked(
-        self, consumer: PageChangeConsumer, context: ExtensionContext
+        self, consumer: PageChangeConsumer, context: ExtensionContext, feed: PageFeed
     ) -> list[ParkedPage]:
         key = f"{PAGE_CHANGE_PARKED_KEY}:{consumer.discriminator}"
         stored = await context.store.get(key)
@@ -761,7 +712,7 @@ class PageChangeRunner:
             if page.tried_at > due:
                 kept.append(page)
                 continue
-            batch = await self.pages.pages_changed_since(page.cursor, 1)
+            batch = await feed.pages_changed_since(page.cursor, 1)
             if not batch.changes or batch.changes[0].page_id != page.page_id:
                 continue
             try:

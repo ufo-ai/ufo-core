@@ -51,7 +51,8 @@ from ufo.runtime.indexing import (
     TextChunker,
 )
 from ufo.runtime.jobs import JobRunner, bindings_from
-from ufo.runtime.sources.sync import PageChange, feed_handle_for
+from ufo.runtime.pages import PageChange
+from ufo.runtime.sources.sync import feed_handle_for
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
@@ -947,6 +948,8 @@ async def test_page_indexer_writes_the_contexts_workspace_id(db: None) -> None:
     change = PageChange(
         page_id=uuid4(),
         source_id=uuid4(),
+        connection_id=uuid4(),
+        provider="folder",
         subject=SHARED_SUBJECT,
         stream="notes",
         title="Merger timing",
@@ -1004,6 +1007,8 @@ async def test_page_index_write_is_deleted_when_the_subject_changes_during_embed
                 PageChange(
                     page_id=page_id,
                     source_id=source_id,
+                    connection_id=uuid4(),
+                    provider="folder",
                     subject=SHARED_SUBJECT,
                     stream="notes",
                     title="Stale page",
@@ -1061,6 +1066,8 @@ async def test_stale_private_payload_is_never_indexed_after_a_shared_sanitized_e
     stale = PageChange(
         page_id=page_id,
         source_id=source_id,
+        connection_id=uuid4(),
+        provider="folder",
         subject=member_subject(member_id),
         stream="notes",
         title="Private plan",
@@ -1151,6 +1158,8 @@ async def test_same_subject_redaction_hides_stale_facts_and_no_page_pass_removes
                 PageChange(
                     page_id=page_id,
                     source_id=source_id,
+                    connection_id=uuid4(),
+                    provider="folder",
                     subject=SHARED_SUBJECT,
                     stream="notes",
                     title="Redacted plan",
@@ -1400,6 +1409,8 @@ async def test_a_narrowed_pages_wider_fact_is_never_published_and_is_removed(
                 PageChange(
                     page_id=page_id,
                     source_id=source_id,
+                    connection_id=uuid4(),
+                    provider="folder",
                     subject=subject,
                     stream="messages",
                     title="Private mailbox",
@@ -1530,6 +1541,8 @@ async def test_page_tombstone_drops_the_pages_own_chunks_and_mirror_only(db: Non
     live = PageChange(
         page_id=page_id,
         source_id=source_id,
+        connection_id=uuid4(),
+        provider="folder",
         subject=SHARED_SUBJECT,
         stream="notes",
         title="Retired page",
@@ -1655,6 +1668,8 @@ async def test_a_change_on_a_stream_that_does_not_reach_memory_drops_the_page_an
     live = PageChange(
         page_id=page_id,
         source_id=source_id,
+        connection_id=uuid4(),
+        provider="folder",
         subject=SHARED_SUBJECT,
         stream="workflow_runs",
         title="ci #41",
@@ -1921,6 +1936,8 @@ async def test_a_page_that_moved_subject_leaves_no_fact_behind(db: None) -> None
                 PageChange(
                     page_id=page_id,
                     source_id=source_id,
+                    connection_id=uuid4(),
+                    provider="folder",
                     subject=moved.subject,
                     stream="notes",
                     title="Page",
@@ -1992,6 +2009,8 @@ async def test_a_stranded_page_row_repoints_what_pointed_at_it(db: None) -> None
                 PageChange(
                     page_id=page_id,
                     source_id=source_id,
+                    connection_id=uuid4(),
+                    provider="folder",
                     subject=moved.subject,
                     stream="notes",
                     title="Page",

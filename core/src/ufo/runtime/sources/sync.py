@@ -68,6 +68,7 @@ from ufo.harness.o11y import (
 )
 from ufo.runtime.access.connectors import AuthProxy, SourceCredentialResolver
 from ufo.runtime.billing.spend import NO_SPEND_GATES, SpendGates
+from ufo.runtime.pages import PAGE_FEED_BATCH_MAX, PageBatch, PageChange, page_cursor
 from ufo.runtime.sources.connector import (
     FieldValue,
     ParentPages,
@@ -1602,59 +1603,6 @@ class SyncDriver:
             emit_metric(SOURCE_SYNC_PARKED_METRIC, **tags)
 
 
-PAGE_FEED_BATCH_MAX = 50
-
-
-@dataclass(frozen=True)
-class PageChange:
-    """One page's current state as the feed replays it: the source row it belongs to, the provider
-    `stream` and `title` the sync driver landed it under, the inlined body (empty when tombstoned),
-    the content digest, monotonic revision, and `as_of` — the provider's update or creation time,
-    falling back to ingestion time. `created_at == changed_at` marks a page this replay adds rather
-    than updates. `indexed` is the stream's declaration of whether the page reaches memory."""
-
-    page_id: UUID
-    source_id: UUID
-    subject: str
-    stream: str
-    title: str
-    body: str
-    digest: str
-    revision: int
-    tombstone: bool
-    indexed: bool
-    created_at: datetime
-    as_of: datetime
-    changed_at: datetime
-
-
-@dataclass(frozen=True)
-class PageBatch:
-    changes: tuple[PageChange, ...]
-    next_cursor: str | None
-
-
-class PageFeed(Protocol):
-    """The page-substrate seam an indexer reads through `ExtensionContext.pages`: replay every page
-    changed since a `revision|page_id` cursor, bodies inlined, in a bounded batch and total order
-    (`ORDER BY revision, uid`) — dialect-neutral and replay-safe, so a single-owner cursor advances
-    monotonically and a restart resumes where it left off."""
-
-    async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch: ...
-
-
-def page_cursor(cursor: object) -> tuple[int, UUID]:
-    if not isinstance(cursor, str):
-        raise ValueError("page cursor must be a string")
-    revision, separator, page_id = cursor.partition("|")
-    if not separator or not revision.isdecimal():
-        raise ValueError(f"invalid page cursor {cursor!r}")
-    try:
-        return int(revision), UUID(page_id)
-    except ValueError as error:
-        raise ValueError(f"invalid page cursor {cursor!r}") from error
-
-
 @dataclass(frozen=True)
 class CorePageFeed:
     """The core `PageFeed`: reads the bound workspace's `page` rows in `(revision, uid)` order after
@@ -1669,6 +1617,8 @@ class CorePageFeed:
             sa.select(
                 tables.page.c.uid,
                 tables.page.c.source_uid,
+                tables.source.c.connection_id,
+                tables.connection.c.provider,
                 tables.page.c.subject,
                 tables.page.c.stream,
                 tables.page.c.title,
@@ -1681,6 +1631,14 @@ class CorePageFeed:
                 tables.page.c.record_updated_at,
                 tables.page.c.created_at,
                 tables.page.c.updated_at,
+            )
+            .join(tables.source, tables.source.c.uid == tables.page.c.source_uid)
+            .join(
+                tables.connection,
+                sa.and_(
+                    tables.connection.c.workspace_id == tables.source.c.workspace_id,
+                    tables.connection.c.id == tables.source.c.connection_id,
+                ),
             )
             .where(tables.page.c.workspace_id == ws_current().workspace_id)
             .order_by(tables.page.c.revision, tables.page.c.uid)
@@ -1707,6 +1665,8 @@ class CorePageFeed:
                 PageChange(
                     page_id=row["uid"],
                     source_id=row["source_uid"],
+                    connection_id=row["connection_id"],
+                    provider=row["provider"],
                     subject=row["subject"],
                     stream=row["stream"],
                     title=row["title"],
