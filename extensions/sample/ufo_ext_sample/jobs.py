@@ -16,7 +16,8 @@ PROPOSAL_SUFFIX = "\nBe concise."
 
 
 async def tick(ctx: ExtensionContext) -> None:
-    await ctx.store.put(JOB_KEY, {"ran": True, "home_url": ctx.home_url()})
+    minted: list[JsonValue] = [slot for slot in sorted(ctx.credentials.minted)]
+    await ctx.store.put(JOB_KEY, {"ran": True, "home_url": ctx.home_url(), "minted": minted})
     linked = await ctx.installations.linked_members(SURFACE_NAME)
     links: list[JsonValue] = [link for link in sorted(linked.values())]
     await ctx.store.put(JOB_SURFACE_KEY, {"linked": links})

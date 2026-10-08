@@ -1,12 +1,13 @@
 """The conformance sample: a real installed extension that exercises the whole public seam.
 
 It imports only `ufo.sdk` — the surface a CI gate pins — and its entry point returns a Manifest
-declaring exactly the landed points: one tool, one job, one route, one credential slot carrying a
-wire-injection target, one onboarding step, one typed subagent profile, one hub backend, one
-terminal transport, and one contributed skill (a `SKILL.md` plus a bundled script under `skills/`).
-Each handler records the
+declaring exactly the landed points: one tool, one job, a route a bearer scopes and one that binds
+no workspace, a credential slot carrying a wire-injection target and one the sample mints, one
+onboarding step, one typed subagent profile, one hub backend, one terminal transport, and one
+contributed skill (a `SKILL.md` plus a bundled script under `skills/`). Each handler records the
 call it received through its own `ExtensionContext.store` (durable `ext_store` rows, never a mock
-log), so the tests read those rows back through the same public surfaces core writes them by.
+log), so the tests read those rows back through the same public surfaces core writes them by; the
+route that binds no workspace has no store to write, and says so in its answer.
 `UNDECLARED_SLOT` names a slot the Manifest never declares — the probe that a handler asking for an
 undeclared slot is refused."""
 
@@ -173,7 +174,7 @@ from ufo_ext_sample.objects import (
 from ufo_ext_sample.onboarding import ONBOARDING_NAME, setup
 from ufo_ext_sample.operator import OPERATOR_RULE, SampleOperatorRule
 from ufo_ext_sample.provisioning import record_founding
-from ufo_ext_sample.routes import ROUTE_PATH, hook, resolve_workspace
+from ufo_ext_sample.routes import ROUTE_PATH, UNBOUND_PATH, hook, resolve_workspace, unbound
 from ufo_ext_sample.search import SEARCH_PROVIDER, SampleSearchProvider
 from ufo_ext_sample.sources import SOURCE_BACKEND, SampleSource
 from ufo_ext_sample.spend import SPEND_GATE, SampleGate
@@ -220,6 +221,7 @@ PROVISIONED_AGENT_SCHEDULE = SetupSchedule(
 )
 PROVISIONED_AGENT_SETUP = "Connect the sample account, then add its source for this agent."
 API_SLOT = "sample_api"
+MINTED_SLOT = "sample_minted"
 DEPLOY_TOKEN_ENV = "UFO_SAMPLE_DEPLOY_TOKEN"
 UNDECLARED_SLOT = "sample_unset"
 INJECTION_HOST = "api.sample.test"
@@ -355,6 +357,7 @@ def manifest() -> Manifest:
         ),
         routes=(
             RouteSpec(method="POST", path=ROUTE_PATH, handler=hook, identify=resolve_workspace),
+            RouteSpec(method="GET", path=UNBOUND_PATH, handler=unbound, identify=None),
         ),
         onboarding_steps=(OnboardingStep(name=ONBOARDING_NAME, handler=setup),),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
@@ -404,6 +407,11 @@ def manifest() -> Manifest:
                 injection=InjectionTarget(
                     host=INJECTION_HOST, header=INJECTION_HEADER, env=INJECTION_ENV
                 ),
+            ),
+            CredentialSlot(
+                name=MINTED_SLOT,
+                description="A token the sample mints and reissues for itself.",
+                minted=True,
             ),
         ),
         connectors=(

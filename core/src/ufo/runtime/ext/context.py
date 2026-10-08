@@ -15,7 +15,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -52,9 +52,13 @@ from ufo.runtime.billing.accounting import (
     SpendRollup,
     SpendTotals,
     UsageExport,
+    UsageLine,
     ack_usage_exports,
     mint_usage_exports,
     read_pending_usage_exports,
+    session_spend,
+    token_spend,
+    usage_lines,
 )
 from ufo.runtime.billing.spend import (
     ALLOW,
@@ -353,10 +357,15 @@ class CredentialAccess:
     slot authored that declaration itself, so gating its own row behind a manifest name it cannot
     write would leave the value reachable by the proxy and the sandbox and by nothing in-process.
     That gap is what forces one fixed slot to hold a map of many secrets, and a map cannot carry a
-    row's owner."""
+    row's owner.
+
+    `minted` names the declared slots the extension mints, the only ones `put` writes: a value the
+    extension creates for itself needs no member to hand it over, and code never overwrites a slot
+    a member fills."""
 
     declared: frozenset[str]
     resolved: Callable[[], Awaitable[frozenset[str]]] | None = None
+    minted: frozenset[str] = frozenset()
 
     @property
     def workspace_id(self) -> UUID:
@@ -392,6 +401,13 @@ class CredentialAccess:
         than asking about one slot it already has in hand. Slots this extension neither declares nor
         resolves never appear, so this discloses no more than `stored` would."""
         return await ws_current().stored_credential_slots() & await self._gated()
+
+    async def put(self, slot: str, plaintext: str) -> None:
+        """Write the bound workspace's value for a slot this extension mints, whether or not one is
+        stored. Any other slot raises, and so does an empty value."""
+        if slot not in self.minted:
+            raise UndeclaredCredentialSlot(slot)
+        await ws_current().put_credential(slot, plaintext)
 
     async def rotate(self, slot: str, expected: str, plaintext: str) -> bool:
         """Compare-and-swap an existing declared slot after an external provider rotates it. This
@@ -1386,16 +1402,26 @@ class ExtensionContext:
     def workspace_id(self) -> UUID:
         return self.store.workspace_id
 
-    async def spend_admitted(self, model: str | None = None) -> SpendDecision:
+    async def spend_admitted(
+        self, model: str | None = None, *, platform_paid: bool = False
+    ) -> SpendDecision:
         """What the spend gates would decide for the bound workspace now, read at the `status`
         moment — whether the workspace may spend, as a handler reporting it states. Caps are not
         asked: what lifts a gate does not lift a cap, and a cap holds the work it bounds at
         admission and at each round. `model` names the model the work would run on; with none, the
-        workspace's own key for any model of the deploy counts as paying its way."""
+        workspace's own key for any model of the deploy counts as paying its way. `platform_paid`
+        names work the platform pays for whatever key the workspace stores, which no own key
+        exempts."""
         if self.spend is None:
             raise RuntimeError("spend_admitted requires the deploy's spend gates; none are wired")
         async with workspace_tx() as connection:
-            return await self.spend.admit(connection, STATUS_MOMENT, self.workspace_id, model=model)
+            return await self.spend.admit(
+                connection,
+                STATUS_MOMENT,
+                self.workspace_id,
+                model=model,
+                self_funded=False if platform_paid else None,
+            )
 
     async def meter_tokens(
         self, call_id: UUID, model: str, usage: Usage, price: ModelPrice, *, byok: bool
@@ -1412,6 +1438,53 @@ class ExtensionContext:
                 pricing_from({model: price}),
                 byok,
                 call_id,
+            )
+
+    async def record_usage(
+        self,
+        service: str,
+        unit: str,
+        backend: str | None,
+        amount: int,
+        *,
+        token_id: UUID | None,
+        session_id: UUID | None,
+        labels: Mapping[str, str],
+        resource_id: str | None,
+        attempt: str,
+        occurred_at: datetime,
+        byok: bool,
+        price_micro_usd: int,
+        price_digest: str,
+        model: str = "",
+        usage: Usage | None = None,
+    ) -> bool:
+        """Book one record a service metered in the bound workspace's ledger, once per
+        `(service, resource_id or session_id, unit, attempt)`: True when this call wrote it, False
+        for a replay of the same record, `TurnUsageConflict` for a replay whose content differs.
+        `unit` is one `SERVICE_UNITS` names for the service; a `tokens` record carries `model` and
+        its six token classes in `usage`, summing to `amount`."""
+        if self.ledger is None:
+            raise RuntimeError("record_usage requires the deploy's ledger; none is wired")
+        async with workspace_tx() as connection:
+            return await self.ledger.record_service_usage(
+                connection,
+                self.workspace_id,
+                service=service,
+                dimension=unit,
+                backend=backend,
+                amount=amount,
+                token_id=token_id,
+                session_id=session_id,
+                labels=labels,
+                resource_id=resource_id,
+                attempt=attempt,
+                occurred_at=occurred_at,
+                byok=byok,
+                priced_micro_usd=price_micro_usd,
+                price_digest=price_digest,
+                model=model,
+                usage=usage,
             )
 
     def image_preview_url(self, blob_key: str, size_bytes: int) -> str | None:
@@ -1834,6 +1907,46 @@ class ExtensionContext:
         service. It names no member or agent, so it is not gated on `member_context_read`."""
         async with workspace_tx() as connection:
             return await SpendRollup(self.workspace_id).read_totals(connection, window_seconds)
+
+    async def usage_lines(
+        self,
+        since: datetime,
+        until: datetime,
+        *,
+        keys: frozenset[str],
+        label_keys: frozenset[str] = frozenset(),
+        backend: str | None = None,
+        byok: bool | None = None,
+        labels: Mapping[str, str] = {},
+    ) -> tuple[UsageLine, ...]:
+        """The bound workspace's usage in `[since, until)` per UTC day, grouped by `keys`
+        (`USAGE_KEYS`) and by the labels `label_keys` names, filtered to `backend`, `byok` and the
+        label values `labels` names. A read grouped or filtered by a label covers turn rows and the
+        days the nightly fold has not closed."""
+        async with workspace_tx() as connection:
+            return await usage_lines(
+                connection,
+                self.workspace_id,
+                since,
+                until,
+                keys=keys,
+                label_keys=label_keys,
+                backend=backend,
+                byok=byok,
+                labels=labels,
+            )
+
+    async def token_spend(self, token_id: UUID, window_seconds: int) -> int:
+        """What the platform paid for a token's records in the bound workspace over the last
+        `window_seconds`, in micro-USD; a day the nightly fold closed counts whole."""
+        since = datetime.now(UTC) - timedelta(seconds=window_seconds)
+        async with workspace_tx() as connection:
+            return await token_spend(connection, self.workspace_id, token_id, since)
+
+    async def session_spend(self, session_id: UUID) -> int:
+        """What the platform paid for a session's records in the bound workspace, in micro-USD."""
+        async with workspace_tx() as connection:
+            return await session_spend(connection, self.workspace_id, session_id)
 
     async def pending_usage_exports(self, floor: datetime, limit: int) -> tuple[UsageExport, ...]:
         """This extension's settled, unacknowledged usage deltas, at most `limit`, minting new
@@ -2809,6 +2922,7 @@ def context_for(
     home_surface: str | None = None,
     deploy_credentials: DeployCredentials = NO_DEPLOY_CREDENTIALS,
     workspace_credentials: Callable[[], Awaitable[frozenset[str]]] | None = None,
+    minted: frozenset[str] = frozenset(),
     spend: SpendGates | None = None,
     ledger: Ledger | None = None,
     vault_read: bool = False,
@@ -2816,11 +2930,11 @@ def context_for(
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
-    workspace is bound when a handler runs. `declared` gates credential slots and `surfaces` gates
-    installation registration; a `model_resolver` wires the metered model seam, keyed and billed
-    to that same workspace, and `model_job` is the job key that seam's spend and latency are
-    attributed to — required wherever a resolver is wired, so a metered call can never reach the
-    `ufo.model_*` series unattributed.
+    workspace is bound when a handler runs. `declared` gates credential slots, `minted` names the
+    declared ones the handler writes itself, and `surfaces` gates installation registration; a
+    `model_resolver` wires the metered model seam, keyed and billed to that same workspace, and
+    `model_job` is the job key that seam's spend and latency are attributed to — required wherever
+    a resolver is wired, so a metered call can never reach the `ufo.model_*` series unattributed.
     `public_base_url` is the deploy's externally reachable base, which a
     kind listing rows a member opens needs and cannot reach any other way, and
     `artifact_token_secret` is what a link into the artifact namespace is signed with — a kind whose
@@ -2840,7 +2954,9 @@ def context_for(
         raise ValueError("a wired model_resolver needs the deploy's spend gates and ledger")
     return ExtensionContext(
         store=ScopedStore(extension=extension),
-        credentials=CredentialAccess(declared=declared, resolved=workspace_credentials),
+        credentials=CredentialAccess(
+            declared=declared, resolved=workspace_credentials, minted=minted
+        ),
         audience=audience,
         installations=SurfaceInstallationAccess(declared=surfaces, addressed=addressed_surfaces),
         index=index,

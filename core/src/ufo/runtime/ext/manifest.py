@@ -110,11 +110,21 @@ class CredentialSlot:
     """A named secret an extension needs. With an InjectionTarget the proxy swaps it onto the
     wire so the sandbox never holds it; without one it is readable only in-process.
 
-    A slot holds one secret, and its fill state is the whole of what a read can say."""
+    A slot holds one secret, and its fill state is the whole of what a read can say. A `minted`
+    slot holds a value the extension mints and reissues itself through `credentials.put`: no member
+    hands it over, so no member-facing projection offers it, and the proxy never injects it. Only a
+    first-party distribution declares one."""
 
     name: str
     description: str
     injection: InjectionTarget | None = None
+    minted: bool = False
+
+    def __post_init__(self) -> None:
+        if self.minted and self.injection is not None:
+            raise ValueError(
+                f"Minted credential slot {self.name!r} cannot carry an injection target."
+            )
 
 
 JOB_FAULT_MAX_CHARS = 500
@@ -175,13 +185,15 @@ class RouteSpec:
     """An HTTP endpoint an extension serves. The app mounts `handler` for `method` at
     `/ext/<name>/<path>`; each request is handed the extension's scoped ExtensionContext and the
     incoming Request, and the handler returns the Response. `identify` verifies and returns a
-    request's workspace, which core binds for the handler; it is required because the shared fleet
-    is the only runtime and every request must resolve its workspace before touching any data."""
+    request's workspace, which core binds for the handler, and a request it names none for is
+    answered 401. It has no default, because the shared fleet is the only runtime and a request
+    that touches data must resolve its workspace first; a route that touches none — a document
+    every caller reads alike — declares `None` and runs with no workspace bound."""
 
     method: Literal["GET", "POST"]
     path: str
     handler: Callable[[ExtensionContext, Request], Awaitable[Response]]
-    identify: Callable[[Request], UUID | None]
+    identify: Callable[[Request], UUID | None] | None
 
 
 @dataclass(frozen=True)
@@ -1047,12 +1059,20 @@ def declared_slot(slot: CredentialSlot, extension: str) -> DeclaredSlot:
 
 def declared_slots(manifests: tuple[Manifest, ...]) -> tuple[DeclaredSlot, ...]:
     """Every active manifest's declared BYOK slots, the one assembly every projection over the
-    declarations shares — the `credential` object kind and the portal's credentials panel."""
+    declarations shares — the `credential` object kind and the portal's credentials panel. A slot
+    its extension mints is no member's to fill, so none of them offers it."""
     return tuple(
         declared_slot(slot, manifest.name)
         for manifest in manifests
         for slot in manifest.credentials
+        if not slot.minted
     )
+
+
+def minted_slots(manifest: Manifest) -> frozenset[str]:
+    """The slots `manifest` mints: what every context core builds for the extension lets its
+    handlers write through `credentials.put`."""
+    return frozenset(slot.name for slot in manifest.credentials if slot.minted)
 
 
 class NotRegisteredError(RuntimeError):

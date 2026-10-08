@@ -101,6 +101,9 @@ from ufo.runtime.ext.source_reader import (
 from ufo.runtime.ext.surface import (
     SurfaceInstallationAccess as SurfaceInstallationAccess,
 )
+from ufo.runtime.workspace import (
+    WorkspaceUnbound as WorkspaceUnbound,
+)
 from ufo.schema.records import (
     SUBAGENT_SURFACE as SUBAGENT_SURFACE,
 )
