@@ -384,7 +384,10 @@ async def test_a_memory_service_outage_fails_the_batch() -> None:
     assert [body["pages"][0]["page_id"] for body in _mirrored(memory_service)] == [str(page_id)]
 
 
-async def test_index_pages_keeps_the_core_mirror_where_memory_is_not_selected() -> None:
+@pytest.mark.parametrize("cloudless", [False, True])
+async def test_index_pages_keeps_the_core_mirror_where_memory_is_not_selected(
+    cloudless: bool,
+) -> None:
     workspace_id, _, shared_id, _ = await _workspace()
     memory_service, sources = MemoryServiceStandIn(), SourcesServiceStandIn()
     page_id, source_id = uuid4(), uuid4()
@@ -429,7 +432,7 @@ async def test_index_pages_keeps_the_core_mirror_where_memory_is_not_selected() 
         default_index(),
         StubEmbed(vec((7, 1.0))),
         cloud_client=True,
-        cloud=cloud_apis_for(memory_service.app, sources.app),
+        cloud=None if cloudless else cloud_apis_for(memory_service.app, sources.app),
     )
 
     with ws(workspace_id):

@@ -997,15 +997,11 @@ def _sources_service(cloud: CloudApis | None, clients: frozenset[str]) -> Source
 def _require_cloud(
     config: Config, manifests: tuple[Manifest, ...], clients: frozenset[str]
 ) -> None:
-    """A `cloud_client` extension and a selected cloud client call the cloud API with the bearer
-    `proxy_credentials` answers, so each boots only where both are present."""
-    declaring = sorted(manifest.name for manifest in manifests if manifest.cloud_client)
-    if declaring:
-        subject = f"The extension {declaring[0]!r} declares cloud_client"
-    elif clients:
-        subject = f"{CLOUD_CLIENTS_ENV} names {', '.join(sorted(clients))}"
-    else:
+    """A selected cloud client calls the cloud API with the bearer `proxy_credentials` answers,
+    so a selection boots only where both are present."""
+    if not clients:
         return
+    subject = f"{CLOUD_CLIENTS_ENV} names {', '.join(sorted(clients))}"
     if config.cloud.api_url is None:
         raise RuntimeError(f"{subject}, so [cloud] api_url must be set.")
     if not any(manifest.proxy_credentials is not None for manifest in manifests):

@@ -1526,13 +1526,15 @@ class ExtensionContext:
     def cloud_api(self) -> CloudApi:
         """The cloud API's client as the bound workspace, presenting the deploy's bearer for it.
         Only a manifest declaring `cloud_client` asks, and only a deploy that sets `[cloud]
-        api_url` answers."""
+        api_url` and loads a `proxy_credentials` extension answers."""
         if not self.cloud_client_allowed:
             raise PermissionError(
                 f"The extension {self.store.extension!r} does not declare cloud_client."
             )
         if self.cloud is None:
-            raise RuntimeError("[cloud] api_url is unset.")
+            raise RuntimeError(
+                "The cloud API needs [cloud] api_url and a proxy_credentials extension."
+            )
         return self.cloud.bound(self.store.workspace_id)
 
     def cloud_selects(self, service: str) -> bool:

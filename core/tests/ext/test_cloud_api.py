@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import sqlalchemy as sa
+import ufo_ext_memory.manifest as memory
 import ufo_ext_sample.manifest as sample
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, ConfigDict
@@ -335,7 +336,7 @@ def test_cloud_selects_reads_the_deploys_selection(apis: CloudApis) -> None:
 def test_cloud_api_without_a_base_raises() -> None:
     context = context_for("acme", frozenset(), cloud_client=True, cloud=None)
 
-    with pytest.raises(RuntimeError, match=r"\[cloud\] api_url is unset"):
+    with pytest.raises(RuntimeError, match=r"needs \[cloud\] api_url and a proxy_credentials"):
         context.cloud_api()
 
 
@@ -347,20 +348,17 @@ def test_api_url_is_a_scheme_and_a_host_alone(api_url: str) -> None:
     assert CloudConfig(api_url="http://api-router:8080").api_url == "http://api-router:8080"
 
 
-def test_boot_fails_when_a_cloud_client_loads_without_api_url_or_proxy_credentials() -> None:
+def test_a_cloud_client_boots_without_the_cloud_where_nothing_is_selected() -> None:
     base = Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db"),
         blob=BlobConfig(backend="filesystem", root="/tmp/blobs"),
     )
-    configured = base.model_copy(update={"cloud": CloudConfig(api_url=API_URL)})
-    client = Manifest(name="memoryish", version="0", cloud_client=True)
+    loaded = memory.manifest()
 
-    with pytest.raises(RuntimeError, match=r"'memoryish' declares cloud_client, so \[cloud\]"):
-        _require_cloud(base, (client, DECLARING), frozenset())
-    with pytest.raises(RuntimeError, match="'memoryish' declares cloud_client, so an extension"):
-        _require_cloud(configured, (client,), frozenset())
-    _require_cloud(configured, (client, DECLARING), frozenset())
-    _require_cloud(base, (DECLARING,), frozenset())
+    assert loaded.cloud_client
+    _require_cloud(base, (loaded,), frozenset())
+    with pytest.raises(RuntimeError, match=r"UFO_CLOUD_CLIENTS names memory, so \[cloud\]"):
+        _require_cloud(base, (loaded, DECLARING), frozenset({"memory"}))
 
 
 def test_boot_fails_when_a_selected_client_lacks_api_url_or_proxy_credentials() -> None:
