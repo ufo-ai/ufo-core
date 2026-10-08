@@ -285,8 +285,8 @@ the ecosystem reads. A sandbox reaching its own loopback is not egress: the prox
 globally routable addresses, so a proxied loopback request can only 403, and a service the turn
 started inside the container — Chrome's DevTools port, a dev-server preview — would be unreachable
 from inside it. Exempting loopback grants no reach a raw socket does not already have."""
-CA_STAGING_PATH = "/root/.ufo-egress-ca.pem"
-CA_SANDBOX_PATH = "/usr/local/share/ca-certificates/ufo-egress-ca.crt"
+CA_STAGING_PATH = "/root/.ufo-proxy-ca.pem"
+CA_SANDBOX_PATH = "/usr/local/share/ca-certificates/ufo-proxy-ca.crt"
 SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
 PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
