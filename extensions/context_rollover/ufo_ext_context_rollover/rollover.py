@@ -552,8 +552,8 @@ class ContextRollover:
     async def _journal(
         self, messages: tuple[Message, ...], expected: int
     ) -> tuple[int, int, str] | None:
-        """None when no sandbox is reachable: the reset needs none, and the record keeps the previous
-        end line so the next boundary appends where this one would have."""
+        """None when no sandbox is reachable: the reset needs none, and the record keeps the
+        previous end line so the next boundary appends where this one would have."""
         try:
             held, total = await self.journal.append(
                 tuple(
