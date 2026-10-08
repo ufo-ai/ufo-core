@@ -399,9 +399,9 @@ async def test_close_logs_and_never_raises(
     await sessions.reconcile("turn")
     fake.state.fault = 503
 
+    await _commit(seeded, "done")
     with caplog.at_level(logging.WARNING, logger="ufo"):
-        await _commit(seeded, "done")
-    await sessions.close()
+        await sessions.close()
 
     failed = [
         record.ufo
