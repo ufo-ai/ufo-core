@@ -1,7 +1,6 @@
 import asyncio
 from base64 import b64encode
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -98,12 +97,6 @@ from ufo.schema.records import SUBAGENT_SURFACE, Usage
 
 MODEL = "claude-opus-4-8"
 JOB = "memory:memory_consolidate"
-
-
-@contextmanager
-def patch_workspace(workspace_id: UUID) -> Iterator[None]:
-    with ws(workspace_id):
-        yield
 
 
 async def _workspace() -> UUID:

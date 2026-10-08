@@ -10,6 +10,8 @@ import pytest
 import sqlalchemy as sa
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_sample.spend import CHARGE_TABLE, SampleGate
 
@@ -49,6 +51,7 @@ from ufo.runtime.tools.bridge import (
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import TurnRuntimeConfig
+from ufo.serve import WorkspaceScopeBoundary
 
 CONTROL_TOKEN = "egress-control-secret"
 CACHE_TOKEN = "egress-cache-secret"
@@ -883,53 +886,68 @@ async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(
     }
 
 
-async def test_meter_tags_the_sandbox_egress_counter_with_the_loop_global(db, monkeypatch) -> None:
-    """When the meter endpoint runs inside a loop's workspace scope, the ambient scope is what the
-    counter is tagged with — the batch carries no workspace of its own."""
-    calls: list[tuple[str, dict[str, str]]] = []
-    monkeypatch.setattr(
-        "ufo.runtime.access.egress_control.emit_metric",
-        lambda name, amount, **dims: calls.append((name, {**dims, **o11y._ambient_scope()})),
-    )
+async def test_meter_tags_each_workspace_after_the_request_boundary(db, monkeypatch) -> None:
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
     seeded, resolver, _tokens = await _seed_git_cli()
-    with ws(seeded.workspace_id):
-        async with _client(_control(resolver)) as client:
+    other_workspace = uuid4()
+    app = FastAPI()
+    app.include_router(_control(resolver).router())
+    app.add_middleware(WorkspaceScopeBoundary)
+    with ws(uuid4()):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://serve") as client:
             response = await client.post(
                 "/internal/egress/meter",
                 headers=_auth(),
                 json={
                     "records": [
-                        {"kind": "metric", "host": "api.anthropic.com", "dimension": "tokens"},
+                        {"kind": "metric", "host": HOST, "dimension": "requests"},
+                        {
+                            "kind": "metric",
+                            "host": HOST,
+                            "dimension": "requests",
+                            "workspace_id": str(seeded.workspace_id),
+                        },
+                        {
+                            "kind": "metric",
+                            "host": HOST,
+                            "dimension": "requests",
+                            "workspace_id": str(other_workspace),
+                        },
                         {
                             "kind": "egress",
                             "workspace_id": str(seeded.workspace_id),
                             "turn_id": str(seeded.turn_id),
-                            "host": "api.anthropic.com",
                         },
                     ]
                 },
             )
-    assert response.json() == {}
-    assert calls == [
-        (
-            "sandbox_egress_total",
-            {
-                "host": "api.anthropic.com",
-                "dimension": "tokens",
-                "workspace_id": str(seeded.workspace_id),
-            },
-        )
+    assert response.status_code == 200
+    points = [
+        (dict(point.attributes), point.value)
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "ufo.sandbox_egress_total"
+        for point in metric.data.data_points
     ]
-    async with workspace_tx() as connection:
-        rows = (
-            await connection.execute(
-                sa.select(tables.ledger).where(
-                    tables.ledger.c.workspace_id == seeded.workspace_id,
-                    tables.ledger.c.turn_id == seeded.turn_id,
-                    tables.ledger.c.dimension == EGRESS_DIMENSION,
+    assert points == [
+        ({"host": HOST, "dimension": "requests"}, 1),
+        ({"host": HOST, "dimension": "requests", "workspace_id": str(seeded.workspace_id)}, 1),
+        ({"host": HOST, "dimension": "requests", "workspace_id": str(other_workspace)}, 1),
+    ]
+    with ws(seeded.workspace_id):
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.ledger).where(
+                        tables.ledger.c.workspace_id == seeded.workspace_id,
+                        tables.ledger.c.turn_id == seeded.turn_id,
+                        tables.ledger.c.dimension == EGRESS_DIMENSION,
+                    )
                 )
-            )
-        ).fetchall()
+            ).fetchall()
     assert len(rows) == 1
 
 
