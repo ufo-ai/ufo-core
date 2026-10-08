@@ -389,6 +389,7 @@ def _context(memory: MemoryStore, member_id: UUID | None, blob_root: Path) -> To
         frozenset(),
         index=memory.index,
         embed=memory.embed,
+        cloud_client=True,
     )
     return ToolContext(
         sandbox=None,

@@ -2,7 +2,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
-import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory
 import ufo_ext_research.tools as research_tools
@@ -10,17 +9,19 @@ from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_memory.objects import MEMORY_OBJECT, MemoryObjects
 from ufo_ext_memory.store import (
     MemoryIndexer,
-    SourceMatch,
     body_digest,
     mem_page,
     memory_item,
 )
+from ufo_testsupport.cloud import cloud_apis_for
 from ufo_testsupport.index import default_index
+from ufo_testsupport.memory_service import MemoryServiceStandIn
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.billing.accounting import MEMORY_SERVICE
 from ufo.runtime.ext.context import ExtensionContext, context_for
-from ufo.runtime.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
+from ufo.runtime.indexing import OWNER_KIND_PAGE, Chunk, TextChunker, chunk_digest
 from ufo.runtime.objects import (
     ObjectListQuery,
 )
@@ -87,7 +88,14 @@ def _ext(
     audience: Audience = SHARED_AUDIENCE,
     name: str = "memory",
 ) -> ExtensionContext:
-    return context_for(name, frozenset(), index=index, embed=embed, audience=audience)
+    return context_for(
+        name,
+        frozenset(),
+        index=index,
+        embed=embed,
+        audience=audience,
+        cloud_client=name == memory.NAME,
+    )
 
 
 def _tool_ctx(
@@ -192,7 +200,17 @@ async def _seed_page_chunk(
         )
     with ws(workspace_id):
         await default_index().upsert(
-            (Chunk("p-" + page_id.hex, OWNER_KIND_PAGE, str(page_id), subject, 0, body, vector),)
+            (
+                Chunk(
+                    chunk_digest(OWNER_KIND_PAGE, str(page_id), f"sha256:{page_id.hex}", 0, body),
+                    OWNER_KIND_PAGE,
+                    str(page_id),
+                    subject,
+                    0,
+                    body,
+                    vector,
+                ),
+            )
         )
     return connection_id, page_id
 
@@ -442,42 +460,52 @@ async def test_the_internal_vertical_serves_the_page_store_alone(db: None, tmp_p
     assert "owned by finance" in both.content[0].text
 
 
-async def test_search_internal_keeps_each_legs_passage_and_never_recalls(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_the_research_internal_vertical_reads_page_passages_alone(
+    db: None, tmp_path: Path
 ) -> None:
-    """Each query's passage of one document survives the merge, an identical passage collapses, and
-    the recall leg is never asked — a page search costs a page search and nothing else."""
-    page = uuid4()
-
-    def _match(text: str) -> SourceMatch:
-        return SourceMatch(
-            page_id=page, subject="shared", text=text, score=0.5, created_at=datetime.now(UTC)
+    workspace_id = await _workspace()
+    member = uuid4()
+    probe = vec((0, 1.0))
+    _connection, page_id = await _seed_page_chunk(
+        workspace_id, SHARED_SUBJECT, "13.4 Putaway authorisation", probe
+    )
+    template = "Template 24 the post format"
+    with ws(workspace_id):
+        await default_index().upsert(
+            (
+                Chunk(
+                    chunk_digest(
+                        OWNER_KIND_PAGE, str(page_id), f"sha256:{page_id.hex}", 1, template
+                    ),
+                    OWNER_KIND_PAGE,
+                    str(page_id),
+                    SHARED_SUBJECT,
+                    1,
+                    template,
+                    probe,
+                ),
+            )
         )
-
-    legs = {
-        "putaway": (_match("13.4 Putaway authorisation"),),
-        "template": (_match("Template 24 — the post format"),),
-        "formats": (_match("Template 24 — the post format"),),
-    }
-
-    class _Store:
-        async def recall(self, query, subjects, limit, start, end, *, source_reader):
-            raise AssertionError("a page search must not recall memory items")
-
-        async def search_sources(self, query, subjects, limit, start, end, *, source_reader):
-            return legs[query]
-
-    monkeypatch.setattr(memory, "store_for", lambda ext: _Store())
-    ctx = _tool_ctx(_ext(object(), object()), None, tmp_path)
-    with ws(uuid4()):
-        matches = await memory.MemorySearchService(ctx.ext).search_pages(
-            ("putaway", "template", "formats"), ctx.source_reader()
+    stand_in = MemoryServiceStandIn()
+    selected = context_for(
+        memory.NAME,
+        frozenset(),
+        index=default_index(),
+        audience=conversation_audience(member),
+        cloud_client=True,
+        cloud=cloud_apis_for(stand_in.app, clients=frozenset({MEMORY_SERVICE})),
+    )
+    pages_ctx = _research_ctx(workspace_id, member, probe, tmp_path)
+    await _reading_agent(workspace_id, pages_ctx.turn.agent_id)
+    reader = pages_ctx.source_reader()
+    with ws(workspace_id):
+        matches = await memory.MemorySearchService(selected).search_pages(
+            ("putaway", "template", "post format"), reader
         )
-        found = await _search_internal(ctx, "putaway")
-    text = "\n".join(memory.match_line(match) for match in matches)
-    assert "13.4 Putaway authorisation" in text
-    assert text.count("Template 24 — the post format") == 1
+        found = await _search_internal(pages_ctx, "putaway")
+    assert [match.text for match in matches] == ["13.4 Putaway authorisation", template]
     assert "13.4 Putaway authorisation" in found.content[0].text
+    assert stand_in.sent == []
 
 
 MEMORY_TOOLS = {tool.name: tool for tool in memory.manifest().tools}

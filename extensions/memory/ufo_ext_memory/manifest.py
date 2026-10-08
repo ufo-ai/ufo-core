@@ -75,7 +75,14 @@ from ufo.sdk.tools import (
     ToolDef,
     ToolResult,
 )
-from ufo_ext_memory.client import MemoryApi
+from ufo_ext_memory.client import (
+    ConversationSource,
+    Memory,
+    MemoryApi,
+    PageSource,
+    Reach,
+    Search,
+)
 from ufo_ext_memory.condenser import (
     DEDUP_MIN_AGE,
     MIN_CLUSTER_FACTS,
@@ -100,15 +107,17 @@ from ufo_ext_memory.events import (
     MAX_RECALLED_MEMORY_IDS,
     MEMORY_RECALL_EVENT,
 )
+from ufo_ext_memory.heads import Heads, topic_pointer
 from ufo_ext_memory.objects import (
     MEMORY_KIND,
     MEMORY_OBJECT,
     PAGE_OBJECT_KIND,
     PROFILE_OBJECT,
 )
-from ufo_ext_memory.pages import PageIndex
+from ufo_ext_memory.pages import PageIndex, PagePassages
 from ufo_ext_memory.store import (
     DEFAULT_CONFIDENCE,
+    EPISODIC,
     FACT,
     KIND_FACT,
     MAX_CONFIDENCE,
@@ -116,6 +125,7 @@ from ufo_ext_memory.store import (
     OVERVIEW,
     RECALL_ITEM_MAX_CHARS,
     SECTION,
+    SEMANTIC,
     ItemClass,
     MemoryIndexer,
     MemoryKind,
@@ -143,6 +153,7 @@ MAX_MEMORY_QUERIES = 3
 DERIVED_SOURCES_MAX = 12
 """The most sources one condensed row names: an overview stands over up to OVERVIEW_FACTS_MAX
 facts, and a surface checks each conversation it would link."""
+CONDENSED_CLASSES = frozenset({SEMANTIC, SECTION, OVERVIEW})
 MEMORY_UPDATE_TOOL = "memory_update"
 MEMORY_UPDATE_ACTIVITY = "Updating memory"
 RECORD_CORRECTION_ACTION = "record_correction"
@@ -378,12 +389,21 @@ class MemorySearchService:
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
-        """Every query's recall and source legs run under one gather, so a leg that raises reaches
-        this caller: a gather awaited only after a prior one has already raised is abandoned with
-        its exception unretrieved, and a search that loses a leg answers from a thinner index with
-        no signal that it did."""
+        """Where the deploy selects the memory service, one search there carries every query
+        beside the page passages; otherwise every query's recall and source legs run over the
+        store. Either way the legs run under one gather, so a leg that raises reaches this
+        caller: a gather awaited only after a prior one has already raised is abandoned with its
+        exception unretrieved, and a search that loses a leg answers from a thinner index with no
+        signal that it did."""
         if not 1 <= len(queries) <= MAX_MEMORY_QUERIES:
             raise ValueError(f"memory search requires 1-{MAX_MEMORY_QUERIES} queries")
+        if self.ctx.cloud_selects(MEMORY_SERVICE):
+            memory = MemoryApi(cloud=self.ctx.cloud_api())
+            served, passages = await asyncio.gather(
+                self._served(memory, queries, reader, start, end),
+                self._passages().search(queries, reader, MEMORY_SEARCH_LIMIT, start=start, end=end),
+            )
+            return served + passages
         store = store_for(self.ctx)
         subjects = reader.subjects
         recalled_legs: list[tuple[Recalled, ...]]
@@ -447,6 +467,43 @@ class MemorySearchService:
         )
         return matches + self._pages(source_legs)
 
+    async def _served(
+        self,
+        memory: MemoryApi,
+        queries: tuple[str, ...],
+        reader: SourceReader,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> tuple[MemoryMatch, ...]:
+        if not reader.subjects:
+            return ()
+        matches = await memory.search(
+            Search(
+                queries=list(queries),
+                subjects=sorted(reader.subjects),
+                start=start,
+                end=end,
+                limit=MEMORY_SEARCH_LIMIT,
+                reach=Reach(agent_id=reader.agent_id, member_id=reader.requesting_member_id),
+            )
+        )
+        heads = await Heads(memory).of(matches, reader)
+        return tuple(
+            _served_match(
+                match,
+                _quoted(
+                    topic_pointer(rank, match.id) if match.item_class == EPISODIC else match.body,
+                    heads.get(match.id),
+                ),
+            )
+            for rank, match in enumerate(matches, start=1)
+        )
+
+    def _passages(self) -> PagePassages:
+        if self.ctx.index is None:
+            raise RuntimeError("page search requires the index backend; none is wired")
+        return PagePassages(index=self.ctx.index, embed=self.ctx.embed, ctx=self.ctx)
+
     async def _derived(
         self, rows: tuple[Condensed, ...], subjects: frozenset[str]
     ) -> dict[UUID, tuple[Derivation, ...]]:
@@ -508,26 +565,14 @@ class MemorySearchService:
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
-        """The source half of `search` on its own: every query's page leg over the same index,
-        merged the same way, with no recall leg — what the research extension's `page` search
-        vertical answers from."""
+        """The page passages a reader may read, every query's merged the way `search` merges
+        them, with no memory leg — what the research extension's `page` search vertical answers
+        from, over whichever extension's context asks."""
         if not 1 <= len(queries) <= MAX_MEMORY_QUERIES:
             raise ValueError(f"page search requires 1-{MAX_MEMORY_QUERIES} queries")
-        store = store_for(self.ctx)
-        legs = await asyncio.gather(
-            *(
-                store.search_sources(
-                    query,
-                    reader.subjects,
-                    MEMORY_SEARCH_LIMIT,
-                    start,
-                    end,
-                    source_reader=reader,
-                )
-                for query in queries
-            )
+        return await self._passages().search(
+            queries, reader, MEMORY_SEARCH_LIMIT, start=start, end=end
         )
-        return self._pages(list(legs))
 
     def listable_kinds(self) -> tuple[str, ...]:
         """The item classes this store writes, read off `ItemClass` itself so a class added there
@@ -650,6 +695,45 @@ class MemorySearchService:
         )
 
 
+def _served_match(memory: Memory, text: str) -> MemoryMatch:
+    condensed = memory.item_class in CONDENSED_CLASSES
+    own_page = (
+        None
+        if condensed
+        else next((source for source in memory.sources if isinstance(source, PageSource)), None)
+    )
+    return MemoryMatch(
+        kind=memory.item_class,
+        text=text,
+        ref=ObjectRef(kind=MEMORY_KIND, name=str(memory.id)),
+        created_at=memory.created_at,
+        subject=memory.subject,
+        page_provider=None if own_page is None else own_page.provider,
+        page_title=None if own_page is None else own_page.title,
+        created_from_conversation_id=memory.conversation_id,
+        created_from_page_id=None if own_page is None else own_page.page_id,
+        derived_from=(
+            tuple(_named_source(source) for source in memory.sources)[:DERIVED_SOURCES_MAX]
+            if condensed
+            else ()
+        ),
+    )
+
+
+def _named_source(source: PageSource | ConversationSource) -> MemorySource:
+    match source:
+        case PageSource():
+            return MemorySource(
+                ObjectRef(kind=PAGE_SOURCE_KIND, name=str(source.page_id)),
+                source.provider,
+                source.title,
+            )
+        case ConversationSource():
+            return MemorySource(
+                ObjectRef(kind=CONVERSATION_SOURCE_KIND, name=str(source.conversation_id))
+            )
+
+
 def _quoted(body: str, head: str | None) -> str:
     """A served row's text, with what is true now in parentheses where the row has been overtaken:
     the one shape search and the listing both hand the reader."""
@@ -758,8 +842,36 @@ async def record_first_run_handler(ctx: ToolContext, args: RecordFirstRunInput) 
     return ToolResult(content=(TextContent(text=f"Remembered ({subject})."),))
 
 
+@dataclass(frozen=True)
+class _Recall:
+    memory_id: UUID
+    body: str
+    head: str | None
+
+
+async def _served_recall(
+    ext: ExtensionContext, text: str, reader: SourceReader
+) -> tuple[_Recall, ...]:
+    memory = MemoryApi(cloud=ext.cloud_api())
+    matches = tuple(
+        match
+        for match in await memory.search(
+            Search(
+                queries=[text],
+                subjects=sorted(reader.subjects),
+                limit=RECALL_LIMIT,
+                reach=Reach(agent_id=reader.agent_id, member_id=reader.requesting_member_id),
+            )
+        )
+        if match.item_class != EPISODIC
+    )
+    heads = await Heads(memory).of(matches, reader)
+    return tuple(_Recall(match.id, match.body, heads.get(match.id)) for match in matches)
+
+
 async def recall_hook(ctx: HookContext) -> HookOutcome:
-    """Auto-inject memory relevant to the inbound after the submitted message in the model context.
+    """Auto-inject memory relevant to the inbound after the submitted message in the model context,
+    recalled from the memory service where the deploy selects it and from the store otherwise.
     Recall's user_prompt_submit spec is best effort: this handler's soft timeout records recall
     failures, and the hook chain logs and drops the injection if its outer deadline or another fault
     escapes the handler. A missing result never denies the turn.
@@ -800,22 +912,29 @@ async def recall_hook(ctx: HookContext) -> HookOutcome:
         requesting_member_id=None,
         subjects=subjects,
     )
-    recalled: tuple[Recalled, ...] = ()
+    served = ctx.ext.cloud_selects(MEMORY_SERVICE)
+    injected: tuple[_Recall, ...] = ()
     error_class: str | None = None
     try:
         async with asyncio.timeout(RECALL_SOFT_TIMEOUT_SECONDS):
-            recalled = await store_for(ctx.ext).recall(
-                ctx.payload.text,
-                subjects,
-                RECALL_LIMIT,
-                source_reader=reader,
-            )
+            if served:
+                injected = await _served_recall(ctx.ext, ctx.payload.text, reader)
+            else:
+                injected = tuple(
+                    _Recall(item.memory_id, item.body, item.head)
+                    for item in await store_for(ctx.ext).recall(
+                        ctx.payload.text,
+                        subjects,
+                        RECALL_LIMIT,
+                        source_reader=reader,
+                    )
+                    if item.recall_mode != "topic"
+                )
     except Exception as error:
         error_class = type(error).__name__[:MAX_RECALL_ERROR_CLASS_CHARS]
         logger.warning("memory.recall_hook.degraded", exc_info=True)
-    injected = tuple(item for item in recalled if item.recall_mode != "topic")
     lines: list[str] = []
-    kept: list[Recalled] = []
+    kept: list[_Recall] = []
     total = 0
     for item in injected:
         body = item.body

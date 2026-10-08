@@ -331,7 +331,9 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
         source_uid = await _seed_source(workspace_id, owner_id)
         page_id = await _seed_page(workspace_id, source_uid, blob)
 
-        memory_ext = context_for("memory", frozenset(), index=default_index(), embed=_StubEmbed())
+        memory_ext = context_for(
+            "memory", frozenset(), index=default_index(), embed=_StubEmbed(), cloud_client=True
+        )
         await FactDeriver(store=store_for(memory_ext), model=_ExtractionModel(page_id)).apply(
             (
                 PageChange(
@@ -556,7 +558,9 @@ async def test_superseded_memory_leaves_search_and_links_to_its_replacement(
     blob = FilesystemBlobStore(root=tmp_path)
     tools = _verbs()
     with ws(workspace_id):
-        memory_ext = context_for("memory", frozenset(), index=default_index(), embed=_StubEmbed())
+        memory_ext = context_for(
+            "memory", frozenset(), index=default_index(), embed=_StubEmbed(), cloud_client=True
+        )
         old_id, new_id = uuid4(), uuid4()
         async with workspace_tx() as connection:
             await connection.execute(

@@ -261,7 +261,9 @@ async def _sync_and_search(
         result = await search.handler(
             replace(
                 context,
-                ext=context_for(memory.name, frozenset(), index=index, embed=embed),
+                ext=context_for(
+                    memory.name, frozenset(), index=index, embed=embed, cloud_client=True
+                ),
             ),
             search.input_model.model_validate({"queries": [query]}),
         )

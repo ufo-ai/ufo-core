@@ -56,6 +56,7 @@ from ufo.sdk.index import (
 from ufo.sdk.sources import PageChange
 from ufo.sdk.subjects import member_subject
 from ufo_ext_memory.client import ItemClass, MemoryKind
+from ufo_ext_memory.heads import HEAD_WALK_MAX, topic_pointer
 from ufo_ext_memory.pages import (
     RECALL_CANDIDATE_POOL,
     RECALL_COSINE_FLOOR,
@@ -74,10 +75,6 @@ narrowest name that is not one. On the largest workspace measured `metalcraftai/
 rows and `Datadog` 664, while `Alex` named 2,833, `ufo` 3,798 and `Slack` 4,332 — a member, a
 product and a surface, none of which one correction makes out of date."""
 EMBED_CLAIM_LEASE_SECONDS = 300
-HEAD_WALK_MAX = 8
-"""How many pointers recall follows from an overtaken row to the live head it quotes. A chain grows
-by one per change of the world the row names, so eight is years of moves; a longer walk is a cycle
-the stamp rule forbids, and stops here rather than looping."""
 
 TYPE_DIVERSITY_RATIO = 0.6
 MAX_CONFIDENCE = 10
@@ -720,7 +717,7 @@ def as_topic_pointer(item: Recalled, index: int) -> Recalled:
         return item
     return replace(
         item,
-        body=f"Memory topic {index + 1} (item {item.memory_id})",
+        body=topic_pointer(index + 1, item.memory_id),
         recall_mode="topic",
     )
 

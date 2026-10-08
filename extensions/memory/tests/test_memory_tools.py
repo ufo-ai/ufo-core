@@ -137,7 +137,14 @@ def _ext(
     audience: Audience = SHARED_AUDIENCE,
     name: str = "memory",
 ) -> ExtensionContext:
-    return context_for(name, frozenset(), index=index, embed=embed, audience=audience)
+    return context_for(
+        name,
+        frozenset(),
+        index=index,
+        embed=embed,
+        audience=audience,
+        cloud_client=name == memory.NAME,
+    )
 
 
 def _indexer(embed: object) -> MemoryIndexer:
