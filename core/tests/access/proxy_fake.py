@@ -13,7 +13,7 @@ from starlette.routing import Route
 
 FAKE_CA_PEM = "-----BEGIN CERTIFICATE-----\nproxy-fake-ca\n-----END CERTIFICATE-----\n"
 SESSION_TOKEN_PREFIX = "ufo-session-"
-SENTINEL_PREFIX = "ufo-sentinel-"
+SENTINEL_HEAD = "ufo-sentinel-"
 NO_PROXY = "localhost,127.0.0.1,::1"
 PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 CREATE_FIELDS = frozenset({"ttl_s", "labels", "budget", "policy"})
@@ -275,7 +275,7 @@ def _ended(session: Session) -> Response | None:
 
 def _sentinels(policy: dict[str, Any], held: dict[str, str]) -> dict[str, str]:
     return {
-        env: held.get(env) or f"{SENTINEL_PREFIX}{secrets.token_hex(16)}"
+        env: held.get(env) or f"{SENTINEL_HEAD}{secrets.token_hex(16)}"
         for env in sorted({bind["env"] for bind in policy.get("bind", [])})
     }
 

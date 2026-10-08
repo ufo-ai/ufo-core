@@ -33,6 +33,7 @@ EGRESS_DIMENSION = "egress"
 SANDBOX_TOKENS_DIMENSION = "sandbox_tokens"
 IMAGES_DIMENSION = "images"
 VIDEOS_DIMENSION = "videos"
+TURN_LABEL = "turn"
 UNCACHED_PROMPT_WARN_TOKENS = 20_000
 """Where a turn that cached nothing stops being a small cold prompt and starts being a fault. Well
 past every supported provider's minimum cacheable prefix, the largest of which is 2,048."""

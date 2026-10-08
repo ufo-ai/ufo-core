@@ -45,7 +45,8 @@ from ufo.runtime.access.credentials import (
     declared_slot_fingerprint,
     open_credential_request,
 )
-from ufo.runtime.access.egress_rules import Bind, derive_credential_binds
+from ufo.runtime.access.egress_resolver import PerAgentRules
+from ufo.runtime.access.egress_rules import Bind, PolicyScope, derive_credential_binds
 from ufo.runtime.access.workspace_slots import SlotProvider, WorkspaceSlots
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.ext.manifest import (
@@ -89,9 +90,7 @@ DEPLOY_SLOT = CredentialSlot(
     injection=InjectionTarget(
         host=DEPLOY_HOST,
         header="authorization",
-        sentinel="SENTINEL_PPLX",
         env="PPLX_API_KEY",
-        dimension="requests",
     ),
 )
 PROBE = Manifest(
@@ -104,7 +103,6 @@ PROBE = Manifest(
             injection=InjectionTarget(
                 host="api.probe.test",
                 header="X-Probe-Key",
-                sentinel="S_PROBE",
                 env="PROBE_KEY",
             ),
         ),
@@ -282,9 +280,7 @@ def test_a_declaration_projects_the_slot_shape_a_manifest_carries() -> None:
         injection=InjectionTarget(
             host=ACME_HOST,
             header="X-Acme-Key",
-            sentinel="UFO_SENTINEL_WORKSPACE_ACME_API_KEY",
             env="ACME_API_KEY",
-            dimension="requests",
         ),
     )
     declared = declared_slot(ACME.credential_slot(), NAME)
@@ -377,20 +373,32 @@ async def test_a_new_deploy_declaration_cannot_claim_a_workspace_slot(db: None) 
             await slots.workspace(workspace_id)
 
 
-async def test_the_sandbox_exports_the_sentinel_and_never_the_secret(db: None) -> None:
-    """What the agent's own client reads: the declared variable holding the slot's sentinel,
-    which the proxy swaps for the secret on the wire to the declared host alone."""
+async def test_a_filled_slot_binds_by_name_and_the_sandbox_holds_no_secret(db: None) -> None:
+    """What the agent's own client reads: the declared variable holding the sentinel the session
+    mints for the slot, which the proxy service swaps for the secret on the declared host alone."""
     workspace_id = await _workspace()
     store = _store()
+    scope = PolicyScope(
+        workspace_id=workspace_id,
+        member_id=None,
+        internet_access_allowed=False,
+        running=False,
+        run_token=None,
+    )
+    rules = PerAgentRules(credentials=store, slots=_slots())
     with ws(workspace_id):
         await put_slot(_ext(), workspace_id, ACME)
-        probe = ProbeEnv(credentials=store, slots=_slots())
-        unfilled = await probe.exports(uuid4(), uuid4())
+        unfilled = await rules.session_policy(scope)
         await store.put(workspace_id, ACME.slot, SECRET)
-        exports = await probe.exports(uuid4(), uuid4())
+        filled = await rules.session_policy(scope)
+        exports = await ProbeEnv(credentials=store, slots=_slots()).exports(uuid4(), uuid4())
 
-    assert ACME.env not in unfilled
-    assert exports[ACME.env] == "UFO_SENTINEL_WORKSPACE_ACME_API_KEY"
+    assert unfilled.bind == ()
+    assert filled.bind == (
+        Bind(host=ACME_HOST, header="x-acme-key", secret=ACME.slot, env=ACME.env),
+    )
+    assert SECRET not in filled.model_dump_json()
+    assert ACME.env not in exports
     assert SECRET not in exports.values()
     assert CONVERSATION_ID_ENV in exports
 
@@ -568,8 +576,8 @@ async def test_a_declaration_refuses_what_the_deploy_already_claims(db: None) ->
 
 
 def test_the_deploys_claim_reserves_the_variables_core_exports_to_a_sandbox() -> None:
-    """The sandbox's namespace is wider than what manifests declare: core exports the model-key
-    sentinels, the proxy URLs and the CA paths on every open."""
+    """The sandbox's namespace is wider than what manifests declare: a session exports the
+    model-key sentinels and the proxy URLs, and an open the CA paths."""
     claimed = deploy_claims((manifest(), PROBE)).env
     assert sandbox_exported_env({}) <= claimed
     for env in (

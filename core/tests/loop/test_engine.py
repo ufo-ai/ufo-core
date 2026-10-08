@@ -3988,6 +3988,40 @@ async def test_a_sandbox_provider_outage_parks_the_turn_after_the_tool_call(
     assert loaded.external_retry_count == retry_count
 
 
+async def test_a_proxy_outage_at_authorization_parks_the_turn(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
+    ran: list[str] = []
+
+    async def rank(context: ToolContext, args: BaseModel) -> ToolResult:
+        ran.append("rank")
+        return ToolResult(content=(TextContent(text="ranked"),))
+
+    async def sandbox_for(member_id: UUID | None) -> Sandbox:
+        raise SandboxProviderUnavailable("the proxy service answered 503")
+
+    engine = replace(
+        _engine(turn, FindCallingModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="rank", description="d", input_model=_NoArgs, handler=rank),)
+        ),
+        sandbox_for=sandbox_for,
+    )
+
+    with pytest.raises(TurnParked) as raised:
+        await engine.run()
+
+    assert ran == []
+    assert raised.value.external_retry_count == 1
+    assert raised.value.message.startswith("The sandbox provider is unavailable.")
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert status == PARKED
+
+
 async def test_a_sandbox_provider_park_keeps_prior_tool_results(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn("queued", None)
     effects: list[str] = []

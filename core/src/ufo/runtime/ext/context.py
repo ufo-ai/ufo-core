@@ -42,7 +42,7 @@ from ufo.harness.models.interface import (
 from ufo.harness.models.pricing import ModelPrice, Pricing, pricing_from
 from ufo.harness.o11y import BACKGROUND_PROFILE, emit_histogram, emit_metric, log
 from ufo.harness.sandbox.conversation import ConversationSandbox
-from ufo.harness.sandbox.session import ExecResult, ProbeToken, ProbeTokenCodec
+from ufo.harness.sandbox.session import ExecResult
 from ufo.runtime.agent_scope import agent, agent_current
 from ufo.runtime.billing.accounting import (
     UNGATED_LEDGER,
@@ -128,6 +128,8 @@ from ufo.schema.records import (
 )
 
 if TYPE_CHECKING:
+    from ufo.runtime.access.proxy_sessions import SessionCreated
+    from ufo.runtime.access.turn_sessions import ProbeSessions
     from ufo.runtime.access.vault import SecretValue, VaultReads
 
 CORE_EXTENSION = "core"
@@ -556,30 +558,39 @@ class ConversationFiles:
         await self._sandboxes.prune_runtime(conversation_id, category, rel_prefix, keep)
 
 
-async def conversation_agent_id(workspace_id: UUID, conversation_id: UUID) -> UUID | None:
-    """The agent a conversation is permanently bound to, or None when the id names no conversation
-    in this workspace. One read behind both askers: the handler resolving an opaque id to an agent
-    wall, and an off-turn exec deciding whose scope it runs under."""
+async def conversation_agent(workspace_id: UUID, conversation_id: UUID) -> tuple[UUID, bool] | None:
+    """The agent a conversation is permanently bound to and whether that agent allows the internet,
+    or None when the id names no conversation in this workspace. One read behind every asker: the
+    handler resolving an opaque id to an agent wall, and an off-turn exec deciding whose scope it
+    runs under."""
     async with workspace_tx() as connection:
         found = (
             await connection.execute(
-                sa.select(tables.conversation.c.agent_id).where(
+                sa.select(tables.agent.c.id, tables.agent.c.internet_access_allowed)
+                .select_from(
+                    tables.conversation.join(
+                        tables.agent, tables.agent.c.id == tables.conversation.c.agent_id
+                    )
+                )
+                .where(
                     tables.conversation.c.workspace_id == workspace_id,
                     tables.conversation.c.id == conversation_id,
+                    tables.agent.c.workspace_id == workspace_id,
                 )
             )
         ).one_or_none()
-    return None if found is None else found.agent_id
+    return None if found is None else (found.id, bool(found.internet_access_allowed))
 
 
 PROBE_TIMEOUT_SECONDS = 60
 PROBE_TIMEOUT_MAX_SECONDS = 120
 
 ProbeEnvironment = Callable[[UUID, UUID, UUID | None], Awaitable[dict[str, str]]]
-"""What a probe's sandbox open exports, answered for one conversation, one probe id, and the
-member the probe acts for: git proxy-auth and credential config, that member's connector CLI
-sentinels, and the conversation id. The derivation reads the deploy's declared credential slots,
-so it is wired in by the deploy that holds them rather than reached from here."""
+"""What a probe's sandbox open exports beside its session, answered for one conversation, one probe
+id, and the member the probe acts for: git's config channel, that member's committer identity, the
+selected hosts of the workspace's keyed slots, and the conversation id. The derivation reads the
+deploy's declared credential slots, so it is wired in by the deploy that holds them rather than
+reached from here."""
 
 
 @dataclass(frozen=True)
@@ -592,17 +603,18 @@ class ConversationProbes:
     conversation's own sandbox — the same `/workspace` the agent's files live in, resumed on touch —
     and hands back what the command reported.
 
-    Its capability is the conversation's agent, that agent's snapshotted internet policy, the
-    workspace's keyed credentials, and the connector grants of the member the caller acts for.
-    The one thing it deliberately lacks is the deployment's model key: none is exported to it, so
-    an unattended exec cannot spend the deployment's model budget.
+    Where the sandbox egresses through the proxy service, the exec runs under a session of its own,
+    revoked when the exec ends: the conversation's agent, that agent's internet policy, the
+    workspace's keyed credentials, and the connections of the member the caller acts for. The one
+    thing it deliberately lacks is the deployment's model key, which its policy never binds, so an
+    unattended exec cannot spend the deployment's model budget.
 
     A conversation bound to a member's terminal raises `TerminalGone` when that terminal is not
     connected. That reaches the caller rather than reading as an empty result: a probe that could
     not run is not a probe that found nothing."""
 
     _sandboxes: ConversationSandbox
-    _probe_tokens: ProbeTokenCodec
+    _sessions: "ProbeSessions | None"
     _env: ProbeEnvironment
 
     async def run(
@@ -620,7 +632,8 @@ class ConversationProbes:
 
         `acting_member_id` names the member the exec acts for — the creator of the watch that runs
         it — so that member's private connections reach it beside the shared ones; None reaches the
-        shared ones alone. `internet_access=False` preserves a caller's narrower internet policy.
+        shared ones alone. `internet_access=False` narrows the agent's internet policy for the
+        exec.
 
         The exec runs bound to the conversation's own agent. A job binds a workspace and no agent —
         nothing has an agent to bind, since a probe answers to no turn — yet the environment is
@@ -635,24 +648,41 @@ class ConversationProbes:
                 f"a probe timeout of {timeout_s}s is outside 1..{PROBE_TIMEOUT_MAX_SECONDS}s"
             )
         workspace_id = ws_current().workspace_id
-        agent_id = await conversation_agent_id(workspace_id, conversation_id)
-        if agent_id is None:
+        found = await conversation_agent(workspace_id, conversation_id)
+        if found is None:
             raise ValueError(f"conversation {conversation_id} is not in this workspace")
-        probe = ProbeToken(
-            workspace_id=workspace_id,
-            conversation_id=conversation_id,
-            probe_id=uuid4(),
-            expires_at=int(datetime.now(UTC).timestamp()) + timeout_s,
-            member_id=acting_member_id,
-            internet_access=internet_access,
-        )
-        with agent(agent_id):
-            session = await self._sandboxes.open(
+        agent_id, internet_access_allowed = found
+        probe_id = uuid4()
+        sessions = self._sessions
+        opened: set[UUID] = set()
+
+        async def proxied() -> "SessionCreated | None":
+            if sessions is None:
+                return None
+            session = await sessions.open(
+                probe_id,
                 conversation_id,
-                None,
-                await self._env(conversation_id, probe.probe_id, probe.member_id),
+                agent_id,
+                acting_member_id,
+                internet_access_allowed and internet_access is None,
+                timeout_s,
             )
-            return await session.bash(command, timeout_s=timeout_s)
+            opened.add(session.id)
+            return session
+
+        with agent(agent_id):
+            try:
+                session = await self._sandboxes.open(
+                    conversation_id,
+                    None,
+                    await self._env(conversation_id, probe_id, acting_member_id),
+                    proxied=None if sessions is None else proxied,
+                )
+                return await session.bash(command, timeout_s=timeout_s)
+            finally:
+                if sessions is not None:
+                    for session_id in opened:
+                        await sessions.revoke(workspace_id, session_id)
 
 
 def trajectory_workspaces() -> WorkspaceCandidates:
@@ -1955,7 +1985,8 @@ class ExtensionContext:
         """The agent this workspace's conversation is permanently bound to, or None when the id
         names no conversation here — how a handler resolves an opaque conversation id to the agent
         wall a member-facing link addresses."""
-        return await conversation_agent_id(self.workspace_id, conversation_id)
+        found = await conversation_agent(self.workspace_id, conversation_id)
+        return None if found is None else found[0]
 
     async def conversation_facts(
         self, conversation_ids: tuple[UUID, ...]

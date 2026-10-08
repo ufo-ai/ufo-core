@@ -123,11 +123,14 @@ class ProxyError(BaseModel):
 
 
 class ProxyRefused(RuntimeError):
-    """A 4xx from the proxy service: `status` and the envelope's `error`. A replay of a revoked
-    session raises the `409 session_revoked` that every write to it answers."""
+    """A 4xx from the proxy service: `status` and the envelope's `error`. A replayed create that
+    answers a revoked session raises the `409 session_revoked` a patch or a renew of that session
+    answers; the create itself answers 200, as a revoke of it does."""
 
-    def __init__(self, status: int, error: ProxyError) -> None:
-        super().__init__(f"the proxy service answered {status} {error.code}: {error.message}")
+    def __init__(self, status: int, error: ProxyError, summary: str | None = None) -> None:
+        super().__init__(
+            summary or f"the proxy service answered {status} {error.code}: {error.message}"
+        )
         self.status = status
         self.error = error
 
@@ -167,7 +170,11 @@ class ProxySessions:
                 return created
             if created.revoked_at is not None:
                 revoked = ProxyError(code=SESSION_REVOKED_CODE, message="The session was revoked.")
-                raise ProxyRefused(httpx.codes.CONFLICT, revoked)
+                raise ProxyRefused(
+                    httpx.codes.CONFLICT,
+                    revoked,
+                    f"the session under key {attempt!r} was revoked, so it is not reopened",
+                )
             remaining = (created.expires_at - datetime.now(UTC)).total_seconds()
             if remaining > PROXY_CALL_TIMEOUT_SECONDS:
                 break
@@ -197,8 +204,8 @@ class ProxySessions:
         await self._revoke(await self._bearer(workspace_id), session_id)
 
     async def revoke_labelled(self, workspace_id: UUID, label: str, value: str) -> int:
-        """End every live session whose `label` holds `value` and answer how many. A listing
-        filters on one label, the most the session API takes."""
+        """Revoke every unrevoked session whose `label` holds `value`, expired ones included, and
+        answer how many. A listing filters on one label, the most the session API takes."""
         bearer = await self._bearer(workspace_id)
         params: dict[str, str | int] = {
             f"labels.{label}": value,

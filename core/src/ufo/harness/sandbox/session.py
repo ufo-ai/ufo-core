@@ -329,10 +329,6 @@ command's env instead — and that difference is the point, because a shell that
 itself moves only its own descendants, leaving every other exec on the tmpfs."""
 
 
-PROBE_TOKEN_KIND = "ufo-probe"
-OUTGOING_PROBE_MEMBER_FIELD = "connections"
-
-
 def _basic_username(header: str) -> str:
     """The username inside a `Proxy-Authorization: Basic` header, where every token class rides: a
     sandbox client is handed a proxy URL and nothing else, so userinfo is the only channel."""
@@ -343,6 +339,12 @@ def _basic_username(header: str) -> str:
 
 
 RunActor = UUID | Literal["turn", "nobody"]
+
+
+def actor_wire(actor: RunActor) -> str:
+    """How a run token and a session key spell whom a run acts for: `-` for the turn's own member,
+    `~` for nobody, else the member id."""
+    return "-" if actor == "turn" else "~" if actor == "nobody" else str(actor)
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,14 +372,7 @@ class RunTokenCodec:
         return cls(secret=value.encode())
 
     def encode(self, run: RunToken) -> str:
-        actor = (
-            "-"
-            if run.acts_for == "turn"
-            else "~"
-            if run.acts_for == "nobody"
-            else str(run.acts_for)
-        )
-        payload = f"ufo-run/{run.workspace_id}/{run.turn_id}/{actor}".encode()
+        payload = f"ufo-run/{run.workspace_id}/{run.turn_id}/{actor_wire(run.acts_for)}".encode()
         return sign_token(self.secret, payload)
 
     def from_proxy_auth(self, header: str) -> RunToken:
@@ -394,68 +389,6 @@ class RunTokenCodec:
             )
         except (UnicodeDecodeError, SignedTokenError, ValueError) as error:
             raise ValueError("invalid signed run token") from error
-
-
-@dataclass(frozen=True, slots=True)
-class ProbeToken:
-    """The conversation and member attributed to one off-turn sandbox exec, until it expires.
-
-    A turn's egress is authorized by the turn: the proxy admits a CONNECT while the DB still reports
-    that turn running. A probe runs off every turn, so there is no row whose status answers whether
-    it is still live — the token carries its own deadline, minted per exec for that exec's timeout,
-    and the proxy compares it fresh per CONNECT. `probe_id` names the one exec.
-
-    `member_id` is the member the exec acts for — the creator of the watch that runs it — whose
-    private connections reach it beside the shared ones; None reaches the shared ones alone.
-    `internet_access` preserves a caller's narrowed internet policy."""
-
-    workspace_id: UUID
-    conversation_id: UUID
-    probe_id: UUID
-    expires_at: int
-    member_id: UUID | None = None
-    internet_access: Literal[False] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ProbeTokenCodec:
-    """Sign the per-probe proxy username and recover only probes minted by this deployment. It holds
-    the same deploy secret `RunTokenCodec` does, and each class names its own domain inside the
-    signed payload — so a run token presented as a probe (or the reverse) is refused as firmly as a
-    forgery, and neither codec can be made to read the other's token as its own. Eight fields ride
-    the wire: the image a deploy replaces reads a connection list in the seventh, `-` here, and
-    writes the word `connections` where the member goes; both decode."""
-
-    secret: bytes
-
-    def encode(self, probe: ProbeToken) -> str:
-        member = "-" if probe.member_id is None else str(probe.member_id)
-        internet = "0" if probe.internet_access is False else "-"
-        payload = (
-            f"{PROBE_TOKEN_KIND}/{probe.workspace_id}/{probe.conversation_id}"
-            f"/{probe.probe_id}/{member}/{probe.expires_at}/-/{internet}"
-        ).encode()
-        return sign_token(self.secret, payload)
-
-    def from_proxy_auth(self, header: str) -> ProbeToken:
-        username = _basic_username(header)
-        try:
-            fields = verify_token(username, self.secret).decode().split("/")
-            kind, workspace, conversation, probe, member, expires, _, internet = fields
-            if kind != PROBE_TOKEN_KIND:
-                raise ValueError("invalid probe token domain")
-            if internet not in {"-", "0"}:
-                raise ValueError("invalid probe internet scope")
-            return ProbeToken(
-                workspace_id=UUID(workspace),
-                conversation_id=UUID(conversation),
-                probe_id=UUID(probe),
-                expires_at=int(expires),
-                member_id=(None if member in ("-", OUTGOING_PROBE_MEMBER_FIELD) else UUID(member)),
-                internet_access=False if internet == "0" else None,
-            )
-        except (UnicodeDecodeError, SignedTokenError, ValueError) as error:
-            raise ValueError("invalid signed probe token") from error
 
 
 SANDBOX_SIZES: tuple[str, ...] = ("small", "medium", "large")

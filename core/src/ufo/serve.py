@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
+import httpx
 import uvicorn
 from cryptography.fernet import Fernet
 from dbos import DBOS, DBOSClient
@@ -57,7 +58,7 @@ from ufo.harness.sandbox.conversation import ConversationSandbox
 from ufo.harness.sandbox.exec_env import ProbeEnv
 from ufo.harness.sandbox.preview import parse_preview_service
 from ufo.harness.sandbox.select import select_carriers
-from ufo.harness.sandbox.session import ProbeTokenCodec, RunTokenCodec
+from ufo.harness.sandbox.session import RunTokenCodec
 from ufo.harness.sandbox.site_report import SiteReports
 from ufo.harness.sandbox.terminal import Terminals, TerminalTransport
 from ufo.host.assemble import HostEnvironment
@@ -76,6 +77,7 @@ from ufo.host.ext.loader import (
     member_object_registry,
     member_skill_listing,
     memory_search,
+    proxy_credentials,
     skill_registry,
     turn_subagent_grants,
     turn_subagents,
@@ -102,6 +104,8 @@ from ufo.runtime.access.egress_rules import (
     derive_manifest_internet,
 )
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
+from ufo.runtime.access.proxy_sessions import PROXY_CALL_TIMEOUT_SECONDS, ProxySessions
+from ufo.runtime.access.turn_sessions import ProbeSessions
 from ufo.runtime.access.vault import VaultReads
 from ufo.runtime.background_tasks import BackgroundTaskSweep
 from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger
@@ -420,7 +424,9 @@ def run(fleet: Fleet) -> None:
         subagent_grants=subagent_grants,
         actions=deploy_actions,
     )
-    _proxy_control(app, config, manifests, credentials, run_tokens, blob_backend, tool_bridge)
+    _, rules, proxy_sessions = _proxy_control(
+        app, config, manifests, credentials, run_tokens, blob_backend, tool_bridge
+    )
     sandboxes = ConversationSandbox(
         carrier=carrier,
         backend=config.sandbox.backend,
@@ -434,7 +440,7 @@ def run(fleet: Fleet) -> None:
     )
     probes = ConversationProbes(
         sandboxes,
-        ProbeTokenCodec(secret=run_tokens.secret),
+        None if proxy_sessions is None else ProbeSessions(proxy_sessions, rules),
         ProbeEnv(
             grants=GrantStore() if credentials is not None else None,
             clis=connector_clis(manifests),
@@ -493,6 +499,8 @@ def run(fleet: Fleet) -> None:
         ledger=ledger,
         home_surface=browser_home,
         tailer=tailer,
+        rules=rules,
+        sessions=proxy_sessions,
     )
     init_runtime(runtime)
     install_connect_flow(
@@ -718,7 +726,7 @@ def _launch_jobs(
             TurnDispatcher(client=runtime.dbos, spend=runtime.spend),
             page_change_runner,
             DeliverySweep(invoker_for=invoker_for, registry=runtime.subagents),
-            BackgroundTaskSweep(probes=probes, invoker_for=invoker_for),
+            BackgroundTaskSweep(probes=probes, invoker_for=invoker_for, sessions=runtime.sessions),
             preview_renderer,
             ProductCensus(
                 contributions=tuple(
@@ -1505,7 +1513,7 @@ def _proxy_control(
     run_tokens: RunTokenCodec,
     blob: FilesystemBlobStore | S3BlobStore,
     bridge: ToolBridge | None,
-) -> EgressControl:
+) -> tuple[EgressControl, PerAgentRules, ProxySessions | None]:
     preview = _preview_settings(config)
     model_hosts, model_binds = model_bindings(config)
     public_base_url = config.connect.public_base_url
@@ -1533,7 +1541,17 @@ def _proxy_control(
     )
     app.include_router(control.router())
     app.include_router(control.git_credential_router())
-    return control
+    proxy_url = config.sandbox.proxy_url
+    sessions = (
+        None
+        if proxy_url is None
+        else ProxySessions(
+            proxy_url.rstrip("/"),
+            proxy_credentials(manifests),
+            httpx.AsyncClient(timeout=PROXY_CALL_TIMEOUT_SECONDS),
+        )
+    )
+    return control, resolver, sessions
 
 
 WILDCARD_BINDS = frozenset({"0.0.0.0", "::"})

@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -89,9 +88,7 @@ def _keyed_manifest() -> Manifest:
                 injection=InjectionTarget(
                     host=DATADOG_SITES,
                     header="DD-API-KEY",
-                    sentinel="SENTINEL_DD_API",
                     env="DD_API_KEY",
-                    dimension="requests",
                 ),
             ),
             CredentialSlot(
@@ -100,9 +97,7 @@ def _keyed_manifest() -> Manifest:
                 injection=InjectionTarget(
                     host=DATADOG_SITES,
                     header="DD-APPLICATION-KEY",
-                    sentinel="SENTINEL_DD_APP",
                     env="DD_APP_KEY",
-                    dimension="requests",
                 ),
             ),
             CredentialSlot(name="datadog_api_host", description="site host"),
@@ -458,7 +453,7 @@ def test_a_host_choice_must_name_a_declared_slot() -> None:
     keyed = CredentialSlot(
         name="dd_key",
         description="k",
-        injection=InjectionTarget(host=DATADOG_SITES, header="DD-API-KEY", sentinel="S_DD"),
+        injection=InjectionTarget(host=DATADOG_SITES, header="DD-API-KEY", env="DD_API_KEY"),
     )
     typo = replace(
         keyed,
@@ -471,7 +466,7 @@ def test_a_host_choice_must_name_a_declared_slot() -> None:
     assert injecting_slots((Manifest(name="k", version="1", credentials=(keyed,)), elsewhere))
 
 
-def test_two_slots_claiming_one_sentinel_or_env_fail_loud() -> None:
+def test_two_slots_claiming_one_env_fail_loud() -> None:
     first = Manifest(
         name="a",
         version="1",
@@ -479,27 +474,10 @@ def test_two_slots_claiming_one_sentinel_or_env_fail_loud() -> None:
             CredentialSlot(
                 name="a_key",
                 description="key",
-                injection=InjectionTarget(
-                    host="api.a.test", header="x-key", sentinel="SHARED", env="A_KEY"
-                ),
+                injection=InjectionTarget(host="api.a.test", header="x-key", env="A_KEY"),
             ),
         ),
     )
-    same_sentinel = Manifest(
-        name="b",
-        version="1",
-        credentials=(
-            CredentialSlot(
-                name="b_key",
-                description="key",
-                injection=InjectionTarget(
-                    host="api.b.test", header="x-key", sentinel="SHARED", env="B_KEY"
-                ),
-            ),
-        ),
-    )
-    with pytest.raises(RuntimeError, match="sentinel"):
-        injecting_slots((first, same_sentinel))
     same_env = Manifest(
         name="c",
         version="1",
@@ -507,14 +485,13 @@ def test_two_slots_claiming_one_sentinel_or_env_fail_loud() -> None:
             CredentialSlot(
                 name="c_key",
                 description="key",
-                injection=InjectionTarget(
-                    host="api.c.test", header="x-key", sentinel="OWN", env="A_KEY"
-                ),
+                injection=InjectionTarget(host="api.c.test", header="x-key", env="A_KEY"),
             ),
         ),
     )
-    with pytest.raises(RuntimeError, match="env"):
+    with pytest.raises(RuntimeError, match="env 'A_KEY'"):
         injecting_slots((first, same_env))
+    assert len(injecting_slots((first,))) == 1
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -547,63 +524,6 @@ async def test_the_policy_binds_nothing_for_a_selection_the_row_does_not_offer(
     assert {bind.host for bind in await derive_credential_binds(slots, workspace_id, store)} == {
         US5_HOST
     }
-
-
-def test_slots_reaching_one_host_must_meter_it_the_same_way() -> None:
-    """A host is metered once however many keys reach it, so the derivation emits one meter per
-    host — and a second dimension would simply be dropped."""
-
-    def keyed(name: str, dimension: str) -> CredentialSlot:
-        return CredentialSlot(
-            name=name,
-            description="key",
-            injection=InjectionTarget(
-                host="api.one.test",
-                header=f"X-{name}",
-                sentinel=f"S_{name}",
-                dimension=dimension,
-            ),
-        )
-
-    agreed = Manifest(
-        name="agreed",
-        version="1",
-        credentials=(keyed("a_key", "requests"), keyed("b_key", "requests")),
-    )
-    assert len(injecting_slots((agreed,))) == 2
-    diverged = Manifest(
-        name="diverged",
-        version="1",
-        credentials=(keyed("c_key", "requests"), keyed("d_key", "tokens")),
-    )
-    with pytest.raises(RuntimeError, match="metered once"):
-        injecting_slots((diverged,))
-
-    aliased = Manifest(
-        name="aliased",
-        version="1",
-        credentials=(
-            CredentialSlot(
-                name="e_key",
-                description="key",
-                injection=InjectionTarget(
-                    host=HostChoice(
-                        slot="e_host",
-                        description="site",
-                        hosts=("api.one.test", "api.other.test"),
-                        default="api.other.test",
-                        env="E_HOST",
-                    ),
-                    header="X-E",
-                    sentinel="S_E",
-                    dimension="tokens",
-                ),
-            ),
-            CredentialSlot(name="e_host", description="site"),
-        ),
-    )
-    with pytest.raises(RuntimeError, match=re.escape("api.one.test")):
-        injecting_slots((agreed, aliased))
 
 
 def _connector_grant(
@@ -659,9 +579,7 @@ async def test_a_slot_fault_withholds_its_own_host_and_leaves_the_rest_deriving(
                 injection=InjectionTarget(
                     host=PERPLEXITY_HOST,
                     header="authorization",
-                    sentinel="SENTINEL_PPLX",
                     env="PPLX_API_KEY",
-                    dimension="requests",
                 ),
             ),
         ),
@@ -708,9 +626,7 @@ async def test_a_secret_row_this_deploy_cannot_decrypt_still_binds_by_name(
                 injection=InjectionTarget(
                     host=PERPLEXITY_HOST,
                     header="authorization",
-                    sentinel="SENTINEL_PPLX",
                     env="PPLX_API_KEY",
-                    dimension="requests",
                 ),
             ),
         ),

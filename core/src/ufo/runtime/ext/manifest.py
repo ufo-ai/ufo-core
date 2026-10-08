@@ -75,23 +75,20 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class InjectionTarget:
-    """The wire-injection descriptor a credential slot may carry: on the wire to `host`, the proxy
-    swaps the `sentinel` value of `header` for the real secret, per workspace and only for a live
-    turn. A set `dimension` also meters the host.
+    """The bind a credential slot may declare: on the wire to `host`, the proxy service puts the
+    slot's secret into `header` where the sandbox sent the sentinel the session minted for `env`.
 
-    `env` is the sandbox variable the sentinel is exported as, so the agent's own HTTP client
+    `env` is the sandbox variable that sentinel is exported as, so the agent's own HTTP client
     authenticates the provider by sending it as ordinary auth — the GitHub `GH_TOKEN` pattern, for a
     key this deploy holds rather than a broker. `host` is a fixed hostname, or a `HostChoice` for a
     provider that pins its API host per account (a Datadog site, an OpsGenie region): the member
     selects from the closed set the declaration offers, so what reaches the wire is always a literal
-    the row wrote. Two slots naming one host each inject their own header, which is how a provider
+    the row wrote. Two slots naming one host each bind their own header, which is how a provider
     taking more than one key on the wire is expressed."""
 
     host: str | HostChoice
     header: str
-    sentinel: str
-    env: str | None = None
-    dimension: str | None = None
+    env: str
 
 
 @dataclass(frozen=True)
@@ -1043,7 +1040,7 @@ def declared_slot(slot: CredentialSlot, extension: str) -> DeclaredSlot:
         description=slot.description,
         extension=extension,
         host=None if slot.injection is None else slot.injection.host,
-        env="" if slot.injection is None else slot.injection.env or "",
+        env="" if slot.injection is None else slot.injection.env,
         header="" if slot.injection is None else slot.injection.header,
     )
 

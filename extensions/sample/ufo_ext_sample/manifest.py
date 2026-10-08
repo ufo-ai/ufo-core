@@ -224,8 +224,7 @@ DEPLOY_TOKEN_ENV = "UFO_SAMPLE_DEPLOY_TOKEN"
 UNDECLARED_SLOT = "sample_unset"
 INJECTION_HOST = "api.sample.test"
 INJECTION_HEADER = "authorization"
-INJECTION_SENTINEL = "Bearer sentinel-sample-key"
-INJECTION_DIMENSION = "requests"
+INJECTION_ENV = "SAMPLE_API_KEY"
 HUB_BACKEND = "sample_hub"
 TERMINAL_BACKEND = "sample_terminal"
 SECTION_NAME = "sample_capability"
@@ -401,12 +400,9 @@ def manifest() -> Manifest:
         credentials=(
             CredentialSlot(
                 name=API_SLOT,
-                description="BYOK key the egress proxy swaps onto the sample host.",
+                description="BYOK key the proxy service binds on the sample host.",
                 injection=InjectionTarget(
-                    host=INJECTION_HOST,
-                    header=INJECTION_HEADER,
-                    sentinel=INJECTION_SENTINEL,
-                    dimension=INJECTION_DIMENSION,
+                    host=INJECTION_HOST, header=INJECTION_HEADER, env=INJECTION_ENV
                 ),
             ),
         ),

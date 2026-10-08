@@ -254,6 +254,7 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
         credentials=None,
         spend=object(),
         ledger=object(),
+        sessions=None,
     )
 
     def page_change_runner(**kwargs: object) -> object:
@@ -318,6 +319,7 @@ def test_launch_jobs_hands_both_runners_the_background_jobs_model(
         credentials=None,
         spend=object(),
         ledger=object(),
+        sessions=None,
     )
 
     class Runner:
@@ -659,9 +661,15 @@ def test_proxy_control_mounts_the_git_credential_route(monkeypatch: pytest.Monke
     monkeypatch.setenv(CACHE_CONTROL_TOKEN_ENV, "cache-control-secret")
     app = FastAPI()
 
-    control = serve._proxy_control(app, _hosted_config(), (), None, RUN_TOKENS, _blob(), None)
+    control, rules, sessions = serve._proxy_control(
+        app, _hosted_config(), (), None, RUN_TOKENS, _blob(), None
+    )
 
     client = TestClient(app)
+    assert control.resolver is rules
+    assert sessions is not None
+    assert sessions.base_url == _hosted_config().sandbox.proxy_url.rstrip("/")
+    assert sessions.credentials is None
     assert control.cache_control_token == "cache-control-secret"
     assert client.post("/internal/git-credential", json={}).status_code == 401
     answered = client.post(
@@ -706,8 +714,11 @@ def test_proxy_control_boots_a_local_serve_with_no_proxy_url(
     monkeypatch.delenv(CACHE_CONTROL_TOKEN_ENV, raising=False)
     app = FastAPI()
 
-    control = serve._proxy_control(app, _local_config(), (), None, RUN_TOKENS, _blob(), None)
+    control, _, sessions = serve._proxy_control(
+        app, _local_config(), (), None, RUN_TOKENS, _blob(), None
+    )
 
+    assert sessions is None
     assert control.cache_control_token
     assert TestClient(app).post("/internal/git-credential", json={}).status_code == 401
 
@@ -763,9 +774,7 @@ async def test_the_proxy_resolver_reads_keyed_slots_per_workspace(
     slot = CredentialSlot(
         name="byok",
         description="a workspace key the proxy swaps onto the wire",
-        injection=InjectionTarget(
-            host="api.inj.test", header="authorization", sentinel="S", env="BYOK_KEY"
-        ),
+        injection=InjectionTarget(host="api.inj.test", header="authorization", env="BYOK_KEY"),
     )
     manifest = Manifest(name="inj", version="1", credentials=(slot,))
     built = _captured_rules(monkeypatch)

@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from starlette.applications import Starlette
 
-from core.tests.access.proxy_fake import FAKE_CA_PEM, SENTINEL_PREFIX, proxy_app
+from core.tests.access.proxy_fake import FAKE_CA_PEM, SENTINEL_HEAD, proxy_app
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import SandboxProviderUnavailable
 from ufo.host.ext.loader import proxy_credentials
@@ -137,7 +137,7 @@ async def test_open_sends_the_bearer_the_key_and_the_policy_and_parses_the_sessi
     assert created.proxy_url == PROXY_URL
     assert created.env["HTTPS_PROXY"].startswith(f"https://{created.token}:")
     assert created.env["HTTPS_PROXY"].startswith("https://ufo-session-")
-    assert created.env["ACME_KEY"].startswith(SENTINEL_PREFIX)
+    assert created.env["ACME_KEY"].startswith(SENTINEL_HEAD)
     assert created.ca_pem == FAKE_CA_PEM
 
 
@@ -411,7 +411,7 @@ async def test_nothing_secret_reaches_a_log_record(
     held = {
         BEARER,
         created.token,
-        *(value for value in created.env.values() if value.startswith(SENTINEL_PREFIX)),
+        *(value for value in created.env.values() if value.startswith(SENTINEL_HEAD)),
     }
     logged = "\n".join(repr(vars(record)) for record in caplog.records)
     assert caplog.records

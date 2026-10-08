@@ -1,7 +1,6 @@
 import base64
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -11,7 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
-from ufo.harness.sandbox.session import ProbeToken, ProbeTokenCodec, RunToken, RunTokenCodec
+from ufo.harness.sandbox.session import RunToken, RunTokenCodec
 from ufo.runtime.access.connectors import CliCredential, GitWire, GrantUnusable
 from ufo.runtime.access.egress_control import EgressControl
 from ufo.runtime.access.egress_resolver import PerAgentRules
@@ -25,7 +24,7 @@ from ufo.schema import tables
 CONTROL_TOKEN = "egress-control-secret"
 CACHE_TOKEN = "egress-cache-secret"
 RUN_TOKENS = RunTokenCodec(b"egress-control-test-token-secret")
-PROBE_TOKENS = ProbeTokenCodec(secret=RUN_TOKENS.secret)
+FORGED_TOKENS = RunTokenCodec(secret=b"another-deploy-secret")
 PROVIDER = "sampleprov"
 HOST = "api.sample.test"
 ACCOUNT = "acct-9f3c"
@@ -162,19 +161,12 @@ async def _seed_turn(connection: AsyncConnection) -> _Seeded:
     return _Seeded(workspace_id, turn_id, agent_id, member_id, conversation_id)
 
 
-async def test_tool_bridge_passes_only_a_run_principal_to_the_bridge(db: None) -> None:
+async def test_tool_bridge_passes_only_this_deploys_run_principal_to_the_bridge(db: None) -> None:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
     bridge = _Bridge()
     resolver = PerAgentRules()
     run = RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
-    probe = ProbeToken(
-        seeded.workspace_id,
-        seeded.conversation_id,
-        uuid4(),
-        int(datetime.now(UTC).timestamp()) + 300,
-        member_id=seeded.member_id,
-    )
     async with _client(_control(resolver, bridge=bridge)) as client:
         admitted = await client.post(
             "/internal/egress/tool-bridge",
@@ -184,7 +176,7 @@ async def test_tool_bridge_passes_only_a_run_principal_to_the_bridge(db: None) -
         refused = await client.post(
             "/internal/egress/tool-bridge",
             headers=_auth(),
-            json={"proxy_auth": _basic(PROBE_TOKENS.encode(probe)), "request": BRIDGE_REQUEST},
+            json={"proxy_auth": _basic(FORGED_TOKENS.encode(run)), "request": BRIDGE_REQUEST},
         )
     assert admitted.json() == {"ok": True, "result": {"name": "object_list"}}
     assert refused.status_code == 403
@@ -382,7 +374,7 @@ async def test_session_binds_and_git_credentials_prefer_the_members_private_acco
     assert nobody_credential == (GIT, "token-acct-other", "acct-other")
 
 
-async def test_a_probe_acting_for_a_member_loses_a_disconnected_grant(db: None) -> None:
+async def test_a_run_acting_for_a_member_loses_a_disconnected_grant(db: None) -> None:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
     store = GrantStore()
@@ -394,23 +386,17 @@ async def test_a_probe_acting_for_a_member_loses_a_disconnected_grant(db: None) 
             grantor_member_id=seeded.member_id,
             shared=False,
         )
-    probe = ProbeToken(
-        seeded.workspace_id,
-        seeded.conversation_id,
-        uuid4(),
-        int(datetime.now(UTC).timestamp()) + 300,
-        member_id=seeded.member_id,
-    )
+    run = RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
     tokens = _Tokens()
     clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, secret=tokens, git=GIT)}
     resolver = PerAgentRules(grants=store, clis=clis)
 
     granted = await _bound(resolver, seeded, seeded.member_id)
-    granted_credential = await resolver.git_credential(probe, GIT.host)
+    granted_credential = await resolver.git_credential(run, GIT.host)
     with ws(seeded.workspace_id), agent(seeded.agent_id):
         assert await store.disconnect(connection_id, actor_member_id=seeded.member_id) is True
     removed = await _bound(resolver, seeded, seeded.member_id)
-    removed_credential = await resolver.git_credential(probe, GIT.host)
+    removed_credential = await resolver.git_credential(run, GIT.host)
 
     assert granted == {f"{CONNECTION_SECRET_PREFIX}{connection_id}"}
     assert granted_credential == (GIT, f"token-{ACCOUNT}", ACCOUNT)

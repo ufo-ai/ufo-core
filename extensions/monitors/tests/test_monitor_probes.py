@@ -29,11 +29,11 @@ from ufo.db import workspace_tx
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.exec_env import ProbeEnv
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import SANDBOX_HANDLE_SEP, ProbeTokenCodec
+from ufo.harness.sandbox.session import SANDBOX_HANDLE_SEP
 from ufo.harness.sandbox.terminal import CLIENT_BACKEND
 from ufo.harness.untrusted import UNTRUSTED_OPEN
-from ufo.runtime.access.connectors import CliCredential
-from ufo.runtime.access.grants import GrantStore, grant_sentinel
+from ufo.runtime.access.connectors import CliCredential, GitWire
+from ufo.runtime.access.grants import CommitIdentity, GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, context_for
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
@@ -55,7 +55,7 @@ PROBE = f"cat {MARKER}"
 @dataclass(frozen=True)
 class _NeverSecret:
     async def secret(self, workspace_id: UUID, account_id: str) -> str:
-        raise AssertionError("the probe environment exports a sentinel, not the account token")
+        raise AssertionError("the probe environment never reads an account token")
 
 
 @dataclass
@@ -137,6 +137,8 @@ async def _connection(
             host="api.hub.test",
             grantor_member_id=owner,
             shared=shared,
+            account_label=account,
+            commit=CommitIdentity(name=account, email=f"{account}@work.com"),
         )
 
 
@@ -158,9 +160,7 @@ def _probing_ctx(invoker: AdmissionInvoker, root: Path) -> ExtensionContext:
         frozenset(),
         invoker=invoker,
         sandboxes=sandboxes,
-        probes=ConversationProbes(
-            sandboxes, ProbeTokenCodec(secret=b"probe-test-secret"), ProbeEnv().exports
-        ),
+        probes=ConversationProbes(sandboxes, None, ProbeEnv().exports),
     )
 
 
@@ -269,7 +269,16 @@ async def test_a_probe_acts_for_the_monitors_creator(
     creator = member_id if armed_by_a_member else None
     env = ProbeEnv(
         grants=GrantStore(),
-        clis={"hub": CliCredential(env="HUB_TOKEN", header="authorization", secret=_NeverSecret())},
+        clis={
+            "hub": CliCredential(
+                env="HUB_TOKEN",
+                header="authorization",
+                secret=_NeverSecret(),
+                git=GitWire(
+                    host="hub.test", basic_user="x-access-token", helper="!hub git-credential"
+                ),
+            )
+        },
     )
     asked: list[UUID | None] = []
 
@@ -283,9 +292,7 @@ async def test_a_probe_acts_for_the_monitors_creator(
         frozenset(),
         invoker=_invoker(workspace_id, StubDbos()),
         sandboxes=sandboxes,
-        probes=ConversationProbes(
-            sandboxes, ProbeTokenCodec(secret=b"probe-test-secret"), recording
-        ),
+        probes=ConversationProbes(sandboxes, None, recording),
     )
     with ws(workspace_id), agent(agent_id):
         armed = await _arm(
@@ -293,8 +300,8 @@ async def test_a_probe_acts_for_the_monitors_creator(
             conversation_id,
             agent_id,
             creator,
-            baseline=grant_sentinel("acct-own" if armed_by_a_member else "acct-shared"),
-            command='printf "$HUB_TOKEN"',
+            baseline=f"{'acct-own' if armed_by_a_member else 'acct-shared'}@work.com",
+            command='printf "$GIT_AUTHOR_EMAIL"',
             internet_access=False,
         )
         await MonitorRunner(ctx=ext).run()

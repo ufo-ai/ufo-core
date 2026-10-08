@@ -56,9 +56,7 @@ ACME_SLOT = CredentialSlot(
     injection=InjectionTarget(
         host=ACME_HOST,
         header="x-api-key",
-        sentinel="UFO_SENTINEL_KEYED_ACME_API_KEY",
         env="ACME_KEY",
-        dimension="requests",
     ),
 )
 ACME_SECRET = "acme-real-secret"
@@ -344,9 +342,7 @@ async def test_a_slot_whose_host_choice_is_unoffered_binds_nothing(
     keyed = CredentialSlot(
         name="acme_api_key",
         description="Acme key.",
-        injection=InjectionTarget(
-            host=sites, header="x-api-key", sentinel="S_ACME", env="ACME_KEY"
-        ),
+        injection=InjectionTarget(host=sites, header="x-api-key", env="ACME_KEY"),
     )
     companion = CredentialSlot(name=sites.slot, description=sites.description)
     rules = PerAgentRules(credentials=store, slots=WorkspaceSlots(deploy=(keyed, companion)))
@@ -388,7 +384,7 @@ async def test_the_model_key_holds_its_host_and_header_against_a_slot_while_the_
         name="own_openai_key",
         description="The workspace's own OpenAI key.",
         injection=InjectionTarget(
-            host="api.openai.com", header="Authorization", sentinel="S_OWN", env="OWN_OPENAI_KEY"
+            host="api.openai.com", header="Authorization", env="OWN_OPENAI_KEY"
         ),
     )
     store = _store()
@@ -423,16 +419,12 @@ async def test_two_slots_on_one_host_and_header_bind_the_one_listed_first(
     staging = CredentialSlot(
         name="acme_staging_key",
         description="Acme staging key.",
-        injection=InjectionTarget(
-            host=ACME_HOST, header="X-Acme-Key", sentinel="S_STAGING", env="ACME_STAGING_KEY"
-        ),
+        injection=InjectionTarget(host=ACME_HOST, header="X-Acme-Key", env="ACME_STAGING_KEY"),
     )
     prod = CredentialSlot(
         name="acme_prod_key",
         description="Acme production key.",
-        injection=InjectionTarget(
-            host=ACME_HOST, header="x-acme-key", sentinel="S_PROD", env="ACME_PROD_KEY"
-        ),
+        injection=InjectionTarget(host=ACME_HOST, header="x-acme-key", env="ACME_PROD_KEY"),
     )
     await _seed()
     store = _store()
@@ -456,9 +448,7 @@ async def test_a_slot_holds_a_cli_accounts_api_host_and_its_git_host_stays_bound
     bot = CredentialSlot(
         name="github_bot_token",
         description="A GitHub bot token.",
-        injection=InjectionTarget(
-            host=GITHUB_HOST, header="Authorization", sentinel="S_BOT", env="GITHUB_BOT_TOKEN"
-        ),
+        injection=InjectionTarget(host=GITHUB_HOST, header="Authorization", env="GITHUB_BOT_TOKEN"),
     )
     await _seed()
     await _seed_github_connection()

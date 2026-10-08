@@ -45,9 +45,7 @@ GIT = GitWire(host="github.com", basic_user="x-access-token", helper="!gh auth g
 ACME_SLOT = CredentialSlot(
     name="acme_api_key",
     description="Acme's API key.",
-    injection=InjectionTarget(
-        host=ACME_HOST, header="x-api-key", sentinel="UFO_SENTINEL_ACME_API_KEY", env="ACME_KEY"
-    ),
+    injection=InjectionTarget(host=ACME_HOST, header="x-api-key", env="ACME_KEY"),
 )
 SITE_SLOT = CredentialSlot(name="acme_site", description="The Acme site the account lives on.")
 REGIONAL_SLOT = CredentialSlot(
@@ -61,7 +59,6 @@ REGIONAL_SLOT = CredentialSlot(
             default=US_HOST,
         ),
         header="x-api-key",
-        sentinel="UFO_SENTINEL_ACME_REGIONAL_KEY",
         env="ACME_REGIONAL_KEY",
     ),
 )
@@ -74,7 +71,6 @@ DECLARED_SLOT = CredentialSlot(
     injection=InjectionTarget(
         host=DECLARED_HOST,
         header="authorization",
-        sentinel="UFO_SENTINEL_ACME_DECLARED_KEY",
         env="ACME_DECLARED_KEY",
     ),
 )

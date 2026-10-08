@@ -63,7 +63,8 @@ WORKSPACE_LISTING_EXCLUDE_NAMES = (".git",)
 
 type SessionOpener = Callable[[], Awaitable[SessionCreated | None]]
 """Opens the proxy session an enforced open egresses under, or answers None where no proxy service
-is configured."""
+is configured. One open may ask it once per claim attempt, a terminal open before its terminal is
+confirmed, so asking again answers the session it opened."""
 
 
 class WorkspaceFile(BaseModel):

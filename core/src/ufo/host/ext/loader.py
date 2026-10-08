@@ -373,9 +373,9 @@ def _pack_manifests(pack: str, active: dict[str, Manifest]) -> tuple[Manifest, .
 
 
 def connector_clis(manifests: tuple[Manifest, ...]) -> dict[str, CliCredential]:
-    """Each installed connector's declared CLI credential, keyed by provider — the map the engine
-    reads to export each usable grant's sentinel env and git helper, and the egress proxy's per-turn
-    resolver folds into its injection rules, both live from the current deploy's manifests."""
+    """Each installed connector's declared CLI credential, keyed by provider — the map the session
+    policy binds each usable grant's connection under and the sandbox's git helper config reads,
+    both live from the current deploy's manifests."""
     return {
         connector.oauth.provider: connector.cli
         for manifest in manifests
@@ -385,44 +385,40 @@ def connector_clis(manifests: tuple[Manifest, ...]) -> dict[str, CliCredential]:
 
 
 def exported_env(manifests: tuple[Manifest, ...]) -> frozenset[str]:
-    """Every sandbox variable this deploy exports — each connector CLI's, each injecting slot's
-    sentinel, each host choice's resolved host, and the ones core itself exports on every open
-    (the model-key sentinels, the proxy and CA variables, git's config channel). An extension
-    resolving a slot per workspace may claim none of them, since one variable carries one value
-    and the later export wins the merge."""
+    """Every sandbox variable this deploy exports — each connector CLI's, each injecting slot's,
+    each host choice's resolved host, and the ones core itself exports on every open (the model
+    keys a session binds, the proxy and CA variables, git's config channel). An extension resolving
+    a slot per workspace may claim none of them, since one variable carries one value and the later
+    export wins the merge."""
     clis = connector_clis(manifests)
-    names: set[str | None] = {cli.env for cli in clis.values()}
+    names: set[str] = {cli.env for cli in clis.values()}
     names |= set(sandbox_exported_env(clis))
     for manifest in manifests:
         for slot in manifest.credentials:
             if slot.injection is None:
                 continue
             names.add(slot.injection.env)
-            if isinstance(slot.injection.host, HostChoice):
+            if isinstance(slot.injection.host, HostChoice) and slot.injection.host.env is not None:
                 names.add(slot.injection.host.env)
-    return frozenset(name for name in names if name is not None)
+    return frozenset(names)
 
 
 def injecting_slots(manifests: tuple[Manifest, ...]) -> tuple[CredentialSlot, ...]:
-    """Every declared slot the egress proxy swaps onto the wire — the deploy's keyed providers, read
-    live from the current manifests by the proxy's rule resolver and by the engine that exports each
-    filled slot's sentinel into the sandbox. Both roles collect them through here, so what would
-    silently mis-authenticate is refused in one place, because a row is meant to cost no code and no
-    test: nothing else would stop the next one from taking a name already in use.
+    """Every declared slot a session binds — the deploy's keyed providers, read live from the
+    current manifests by the session policy and by the sandbox open that exports each filled slot's
+    host. Both roles collect them through here, so what would silently mis-authenticate is refused
+    in one place, because a row is meant to cost no code and no test: nothing else would stop the
+    next one from taking a name already in use.
 
-    A `sentinel` two slots share draws whichever secret matches first. **One sandbox variable
-    carries one value**, so every exported name — a slot's `env`, a host choice's `env`, and a
-    connector's `CliCredential.env`, all merged into one dict per sandbox — is claimed in a single
-    namespace beside what it carries; a second claimant carrying anything else is refused, since the
-    later export silently wins the merge. Claims carrying the *same* value stay legal, which is what
-    lets both Datadog keys export `DD_HOST`: they name one `HostChoice`, and a frozen value object
-    compares by every field it has rather than by a tuple someone listed. A host choice must also
-    name a slot some installed extension declares, since no writer fills an undeclared slot — every
-    one gates on the declared set — so a typo would pin the host to the default forever. A host is
-    metered once however many keys reach it, so slots that can reach one host must agree on the
-    dimension. The claim spans every host a declaration could resolve to — a fixed host, or every
-    host in a choice — because the derivation groups by the host it *resolved*: two rows aliasing
-    one literal through different declarations would otherwise drop the later dimension silently."""
+    **One sandbox variable carries one value**, so every exported name — a slot's `env`, a host
+    choice's `env`, and a connector's `CliCredential.env`, all merged into one dict per sandbox — is
+    claimed in a single namespace beside what it carries; a second claimant carrying anything else
+    is refused, since the later export silently wins the merge. A slot's `env` carries that slot's
+    own secret, so two slots never share one. Claims carrying the *same* value stay legal, which is
+    what lets both Datadog keys export `DD_HOST`: they name one `HostChoice`, and a frozen value
+    object compares by every field it has rather than by a tuple someone listed. A host choice must
+    also name a slot some installed extension declares, since no writer fills an undeclared slot —
+    every one gates on the declared set — so a typo would pin the host to the default forever."""
     slots = tuple(
         slot
         for manifest in manifests
@@ -431,34 +427,14 @@ def injecting_slots(manifests: tuple[Manifest, ...]) -> tuple[CredentialSlot, ..
     )
     declared = {slot.name for manifest in manifests for slot in manifest.credentials}
     exported: dict[str, tuple[str, object]] = {
-        cli.env: (f"connector {provider!r}'s CLI credential", f"the {provider!r} grant sentinel")
+        cli.env: (f"connector {provider!r}'s CLI credential", f"the {provider!r} connection")
         for provider, cli in connector_clis(manifests).items()
     }
-    sentinels: dict[str, str] = {}
-    dimensions: dict[str, tuple[str, str]] = {}
     for slot in slots:
         target = slot.injection
         if target is None:
             continue
-        owner = sentinels.setdefault(target.sentinel, slot.name)
-        if owner != slot.name:
-            raise RuntimeError(
-                f"credential slots {owner!r} and {slot.name!r} both declare sentinel "
-                f"{target.sentinel!r}; a shared sentinel draws whichever secret matches first"
-            )
-        if target.dimension is not None:
-            reachable = (target.host,) if isinstance(target.host, str) else target.host.hosts
-            for host in reachable:
-                metered = dimensions.setdefault(host, (slot.name, target.dimension))
-                if metered[1] != target.dimension:
-                    raise RuntimeError(
-                        f"credential slots {metered[0]!r} and {slot.name!r} can both reach "
-                        f"{host!r} but meter it as {metered[1]!r} and {target.dimension!r}; a host "
-                        "is metered once, so the later dimension would be dropped"
-                    )
-        claims: list[tuple[str, object]] = []
-        if target.env is not None:
-            claims.append((target.env, f"the sentinel of slot {slot.name!r}"))
+        claims: list[tuple[str, object]] = [(target.env, f"the secret of slot {slot.name!r}")]
         if isinstance(target.host, HostChoice):
             if target.host.slot not in declared:
                 raise RuntimeError(

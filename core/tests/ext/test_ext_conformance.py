@@ -133,7 +133,6 @@ from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.select import select_carriers
 from ufo.harness.sandbox.session import (
     ExecResult,
-    ProbeTokenCodec,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
@@ -347,9 +346,7 @@ def _sandboxes(root: Path) -> ConversationSandbox:
 
 
 def _probes(sandboxes: ConversationSandbox) -> ConversationProbes:
-    return ConversationProbes(
-        sandboxes, ProbeTokenCodec(b"conformance-probe-secret"), ProbeEnv().exports
-    )
+    return ConversationProbes(sandboxes, None, ProbeEnv().exports)
 
 
 def _tool_context(workspace_id: UUID, ext: ExtensionContext, tmp_path: Path) -> ToolContext:

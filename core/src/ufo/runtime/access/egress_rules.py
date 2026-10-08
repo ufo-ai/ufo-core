@@ -138,7 +138,7 @@ async def derive_credential_binds(
     binds: list[Bind] = []
     for slot in await slots.all(workspace_id):
         target = slot.injection
-        if target is None or target.env is None or slot.name not in stored:
+        if target is None or slot.name not in stored:
             continue
         try:
             host = await credential_host(store, workspace_id, target.host)

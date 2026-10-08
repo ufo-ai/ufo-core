@@ -203,6 +203,7 @@ def _served_jobs(
         subagents=None,
         spend=spend,
         ledger=ledger,
+        sessions=None,
     )
     serve._launch_jobs(
         runtime,

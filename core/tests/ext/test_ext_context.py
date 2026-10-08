@@ -1,10 +1,13 @@
 import asyncio
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
@@ -16,6 +19,7 @@ from opentelemetry.sdk.metrics.export import (
 )
 from ufo_ext_sample.spend import CHARGE_TABLE, SampleGate, allow
 
+from core.tests.access.proxy_fake import SENTINEL_HEAD, proxy_app
 from ufo.db import workspace_tx
 from ufo.harness import o11y
 from ufo.harness.models.catalog import ANTHROPIC_KEY_ENV, CORE_PRICING, OPENAI_KEY_ENV
@@ -42,14 +46,35 @@ from ufo.harness.sandbox.exec_env import CONVERSATION_ID_ENV, ProbeEnv
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     PROXY_SESSION_ENV_NAMES,
-    ProbeTokenCodec,
+    Carrier,
+    DialTarget,
+    ExecResult,
     SandboxHandle,
     SandboxSpec,
 )
 from ufo.harness.sandbox.terminal import TerminalGone
-from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.connectors import CliCredential
+from ufo.runtime.access.credentials import CredentialStore, HostChoice
+from ufo.runtime.access.egress_resolver import PerAgentRules
+from ufo.runtime.access.egress_rules import (
+    CONNECTION_SECRET_PREFIX,
+    UFO_MODELS_SECRET,
+    Bind,
+    PolicyScope,
+)
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.access.proxy_sessions import (
+    AGENT_LABEL,
+    CONVERSATION_LABEL,
+    IDEMPOTENCY_HEADER,
+    MEMBER_LABEL,
+    PROBE_LABEL,
+    ProxySessions,
+)
+from ufo.runtime.access.turn_sessions import PROBE_SESSION_MARGIN_SECONDS, ProbeSessions
 from ufo.runtime.access.vault import SecretValue, VaultReads
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
+from ufo.runtime.agent_scope import agent
 from ufo.runtime.billing.accounting import (
     EGRESS_DIMENSION,
     UNGATED_LEDGER,
@@ -63,6 +88,7 @@ from ufo.runtime.billing.spend import NO_SPEND_GATES, PARK, GateDeploy, SpendDec
 from ufo.runtime.ext.context import (
     CORE_EXTENSION,
     PROBE_TIMEOUT_MAX_SECONDS,
+    PROBE_TIMEOUT_SECONDS,
     ConversationFacts,
     ConversationFiles,
     ConversationProbes,
@@ -886,9 +912,7 @@ def _sandboxes(root: Path, carrier: LocalCarrier | None = None) -> ConversationS
 
 
 def _probes(sandboxes: ConversationSandbox) -> ConversationProbes:
-    return ConversationProbes(
-        sandboxes, ProbeTokenCodec(b"probe-token-test-secret"), ProbeEnv().exports
-    )
+    return ConversationProbes(sandboxes, None, ProbeEnv().exports)
 
 
 def _files(sandboxes: ConversationSandbox) -> ConversationFiles:
@@ -925,11 +949,7 @@ async def test_a_probes_acting_member_reaches_its_environment(db: None, tmp_path
     member_id = uuid4()
     with ws(workspace_id):
         conversation_id = await _conversation(workspace_id)
-        probes = ConversationProbes(
-            _sandboxes(tmp_path / "workspaces", carrier),
-            ProbeTokenCodec(b"probe-token-test-secret"),
-            env,
-        )
+        probes = ConversationProbes(_sandboxes(tmp_path / "workspaces", carrier), None, env)
         await probes.run(
             conversation_id,
             "true",
@@ -946,6 +966,149 @@ async def test_a_probes_acting_member_reaches_its_environment(db: None, tmp_path
     assert all(PROXY_SESSION_ENV_NAMES.isdisjoint(spec.env) for spec in carrier.specs)
 
 
+PROBE_BEARER = "ufo_probe-system-token"
+PROBE_MODEL_BIND = Bind(
+    host="api.anthropic.com", header="x-api-key", secret=UFO_MODELS_SECRET, env="ANTHROPIC_API_KEY"
+)
+
+
+@dataclass(frozen=True)
+class _ProbeBearer:
+    async def bearer(self) -> str:
+        return PROBE_BEARER
+
+
+@dataclass(frozen=True)
+class _NoToken:
+    async def secret(self, workspace_id: UUID, account_id: str) -> str:
+        raise AssertionError("a session names a connection and never reads its token")
+
+
+@dataclass
+class _OffClusterCarrier:
+    envs: list[dict[str, str]] = field(default_factory=list)
+    refuses: bool = False
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        return SandboxHandle(
+            conversation_id=spec.conversation_id, container_id="sbx-probe", egress_env=spec.env
+        )
+
+    async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
+        return None
+
+    async def exec(
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
+    ) -> ExecResult:
+        self.envs.append(dict(handle.egress_env))
+        if self.refuses:
+            raise RuntimeError("The sandbox refused the command.")
+        return ExecResult(stdout="ok\n", stderr="", exit_code=0)
+
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        raise AssertionError("a probe never writes")
+
+    def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
+        raise AssertionError("a probe never reads")
+
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        raise AssertionError("a probe never dials a port")
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_probe_egresses_under_its_own_session_revoked_after_the_exec(
+    db: None, tmp_path: Path
+) -> None:
+    fake = proxy_app(PROBE_BEARER)
+    carrier = _OffClusterCarrier()
+    workspace_id = await _workspace()
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="watcher@work.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    rules = PerAgentRules(
+        binds=(PROBE_MODEL_BIND,),
+        grants=GrantStore(),
+        internet=True,
+        clis={"hub": CliCredential(env="HUB_TOKEN", header="authorization", secret=_NoToken())},
+        bridge_upstream="https://serve.test/internal/egress/tool-bridge",
+    )
+    sandboxes = ConversationSandbox(
+        carrier=cast(Carrier, carrier),
+        backend="remote",
+        off_cluster=True,
+        image_ref=SANDBOX_IMAGE_REF,
+        workspace_root=tmp_path / "workspaces",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=fake), base_url="https://proxy.test"
+    ) as http:
+        probes = ConversationProbes(
+            sandboxes,
+            ProbeSessions(ProxySessions("https://proxy.test", _ProbeBearer(), http), rules),
+            ProbeEnv().exports,
+        )
+        with ws(workspace_id):
+            with agent(agent_id):
+                connection_id = await GrantStore().record(
+                    provider="hub",
+                    account_id="acct-watcher",
+                    host="api.hub.test",
+                    grantor_member_id=member_id,
+                    shared=False,
+                )
+            conversation_id = await _conversation(workspace_id)
+            result = await probes.run(conversation_id, "true", acting_member_id=member_id)
+            carrier.refuses = True
+            with pytest.raises(RuntimeError, match="refused"):
+                await probes.run(conversation_id, "true", internet_access=False)
+
+    created = [
+        (headers[IDEMPOTENCY_HEADER.lower()], json.loads(body))
+        for method, target, headers, body in fake.state.calls
+        if (method, target) == ("POST", "/v1/sessions")
+    ]
+    (watched_key, watched), (narrowed_key, narrowed) = created
+    probe_id = watched_key.removeprefix("probe:")
+    assert narrowed_key.startswith("probe:") and narrowed_key != watched_key
+    assert watched["labels"] == {
+        CONVERSATION_LABEL: str(conversation_id),
+        AGENT_LABEL: str(agent_id),
+        PROBE_LABEL: probe_id,
+        MEMBER_LABEL: str(member_id),
+    }
+    assert MEMBER_LABEL not in narrowed["labels"]
+    assert watched["ttl_s"] == PROBE_TIMEOUT_SECONDS + PROBE_SESSION_MARGIN_SECONDS
+    assert watched["policy"]["routes"] == narrowed["policy"]["routes"] == []
+    assert [bind["secret"] for bind in watched["policy"]["bind"]] == [
+        f"{CONNECTION_SECRET_PREFIX}{connection_id}"
+    ]
+    assert narrowed["policy"]["bind"] == []
+    assert (watched["policy"]["internet"], narrowed["policy"]["internet"]) == (True, False)
+    sessions = list(fake.state.sessions.values())
+    assert [held["revoked_at"] is not None for held in sessions] == [True, True]
+    assert carrier.envs[0]["HTTPS_PROXY"].startswith(f"https://{sessions[0]['token']}:")
+    assert carrier.envs[0]["HUB_TOKEN"].startswith(SENTINEL_HEAD)
+    assert carrier.envs[1]["HTTPS_PROXY"].startswith(f"https://{sessions[1]['token']}:")
+    assert (result.stdout, result.exit_code) == ("ok\n", 0)
+
+
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_probe_environment_exports_keyed_connectors_but_never_a_model_key(
     db: None,
@@ -953,27 +1116,46 @@ async def test_the_probe_environment_exports_keyed_connectors_but_never_a_model_
     workspace_id = await _workspace()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     await store.put(workspace_id, "datadog_api_key", "dd-real")
-    slots = (
-        CredentialSlot(
-            name="datadog_api_key",
-            description="datadog key",
-            injection=InjectionTarget(
-                host="api.datadoghq.com",
-                header="dd-api-key",
-                sentinel="UFO_SENTINEL_DATADOG_API_KEY",
-                env="DD_API_KEY",
+    await store.put(workspace_id, "datadog_api_host", "api.us5.datadoghq.com")
+    slots = WorkspaceSlots(
+        deploy=(
+            CredentialSlot(
+                name="datadog_api_key",
+                description="datadog key",
+                injection=InjectionTarget(
+                    host=HostChoice(
+                        slot="datadog_api_host",
+                        description="Datadog site.",
+                        hosts=("api.datadoghq.com", "api.us5.datadoghq.com"),
+                        default="api.datadoghq.com",
+                        env="DD_HOST",
+                    ),
+                    header="dd-api-key",
+                    env="DD_API_KEY",
+                ),
             ),
-        ),
+            CredentialSlot(name="datadog_api_host", description="Datadog site."),
+        )
     )
     with ws(workspace_id):
-        exports = await ProbeEnv(credentials=store, slots=WorkspaceSlots(deploy=slots)).exports(
-            uuid4(), uuid4()
+        exports = await ProbeEnv(credentials=store, slots=slots).exports(uuid4(), uuid4())
+        policy = await PerAgentRules(
+            binds=(PROBE_MODEL_BIND,), credentials=store, slots=slots
+        ).session_policy(
+            PolicyScope(
+                workspace_id=workspace_id,
+                member_id=None,
+                internet_access_allowed=False,
+                running=False,
+                run_token=None,
+            )
         )
         bare = await ProbeEnv().exports(uuid4(), uuid4())
 
-    assert exports["DD_API_KEY"] == "UFO_SENTINEL_DATADOG_API_KEY"
+    assert exports["DD_HOST"] == "api.us5.datadoghq.com"
     assert "dd-real" not in exports.values()
-    assert {ANTHROPIC_KEY_ENV, OPENAI_KEY_ENV}.isdisjoint(exports)
+    assert {"DD_API_KEY", ANTHROPIC_KEY_ENV, OPENAI_KEY_ENV}.isdisjoint(exports)
+    assert [(bind.secret, bind.env) for bind in policy.bind] == [("datadog_api_key", "DD_API_KEY")]
     assert set(bare) == {
         CONVERSATION_ID_ENV,
         "GIT_CONFIG_COUNT",
@@ -1367,7 +1549,6 @@ async def test_only_a_vault_read_context_wired_with_the_vault_resolves_a_secret(
         injection=InjectionTarget(
             host="api.acmekeys.com",
             header="x-api-key",
-            sentinel="UFO_SENTINEL_ACME_API_KEY",
             env="ACME_KEY",
         ),
     )

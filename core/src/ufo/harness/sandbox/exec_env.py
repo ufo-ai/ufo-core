@@ -1,14 +1,14 @@
-"""The environment a sandbox open exports, derived from the workspace's credentials and grants.
+"""The environment a sandbox open exports beside its proxy session, derived from the workspace's
+credentials and grants.
 
 Two callers open a conversation's sandbox to run a command in it: the turn opener and an off-turn
 probe. Both need the same derivations — git's proxy-auth and credential-helper config, the
-connector CLI sentinels, the conversation's own id — so they live here rather than in either
-caller. What a probe deliberately does not export is the keyed
-provider environment: those variables carry a model key's sentinel, and an unattended exec is not
-the workspace's model spend to make.
+committer identity of the acting member's cloning account, each filled keyed slot's selected host,
+the conversation's own id — so they live here rather than in either caller.
 
-Nothing here holds a secret. Every value is a sentinel the egress proxy swaps for the real
-credential on the wire, so the sandbox never sees a key even for a host it authenticates to."""
+Nothing here holds a secret, and nothing here is a sentinel: the proxy session carries every
+sentinel in the env it answers, one per secret its policy binds by name, and the proxy service puts
+the real value in its place on the wire."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -18,13 +18,8 @@ from ufo.harness.models.catalog import ANTHROPIC_KEY_ENV, OPENAI_KEY_ENV
 from ufo.harness.o11y import log, warn
 from ufo.harness.sandbox.session import PROXY_SESSION_ENV_NAMES
 from ufo.runtime.access.connectors import CliCredential
-from ufo.runtime.access.credentials import (
-    CredentialSlotUnset,
-    CredentialStore,
-    HostChoice,
-    credential_host,
-)
-from ufo.runtime.access.grants import Grant, GrantStore, cli_accounts, grant_sentinel
+from ufo.runtime.access.credentials import CredentialStore, HostChoice, credential_host
+from ufo.runtime.access.grants import Grant, GrantStore, cli_accounts
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.tools.bridge import TOOL_BRIDGE_URL_ENV
 from ufo.runtime.workspace import ws_current
@@ -40,22 +35,14 @@ the CLI variables, so a scope holding no such grant commits under no stale ident
 
 @dataclass(frozen=True)
 class ProbeEnv:
-    """What an off-turn probe's sandbox open exports — `ConversationProbes`' environment seam, held
-    here because the derivation reads the deploy's declared credential slots and the capability that
-    consumes it cannot reach them.
+    """What an off-turn probe's sandbox open exports beside its session — `ConversationProbes`'
+    environment seam, held here because the derivation reads the deploy's declared credential slots
+    and the capability that consumes it cannot reach them.
 
-    It is the turn opener's environment. Every sentinel a turn's own open exports is exported here
-    too, keyed connectors included: a watch on a keyed provider — "is this Datadog monitor
-    alerting?" — needs its `DD_API_KEY` sentinel, and the proxy holds the matching injection rule
-    either way, so withholding the variable would leave that rule inert and 401 every probe.
-
-    The deployment's own model key is the one thing an off-turn exec may not spend: a probe's
-    session policy binds no `ufo/models` (`PolicyScope.running`). A workspace's BYOK model key needs
-    nothing here either — those slots declare no injection target at all and are read in-process by
-    the model registry, never exported to a sandbox.
-
-    The member the probe acts for selects connector CLI sentinels exactly as a turn's
-    re-authorization does."""
+    It is the turn opener's environment: the conversation id, git's config channel, each filled
+    keyed slot's selected host, and the committer identity of the acting member's cloning account.
+    What a probe may reach is its session's policy, compiled for a scope that is not running, so it
+    binds no `ufo/models` and an unattended exec cannot spend the deployment's model key."""
 
     grants: GrantStore | None = None
     clis: Mapping[str, CliCredential] = field(default_factory=dict)
@@ -72,8 +59,8 @@ class ProbeEnv:
         return {
             CONVERSATION_ID_ENV: str(conversation_id),
             **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cli_git_config(self.clis))),
-            **await _grant_cli_env(self.grants, self.clis, probe_id, member_id),
-            **await _keyed_provider_env(self.credentials, self.slots, workspace_id),
+            **await git_identity_env(self.grants, self.clis, probe_id, member_id),
+            **await keyed_host_env(self.credentials, self.slots, workspace_id),
         }
 
 
@@ -135,27 +122,30 @@ def sandbox_exported_env(clis: Mapping[str, CliCredential]) -> frozenset[str]:
     )
 
 
-async def _keyed_provider_env(
+async def keyed_host_env(
     credentials: CredentialStore | None,
     slots: WorkspaceSlots,
     workspace_id: UUID,
 ) -> dict[str, str]:
-    """The sandbox sees only the sentinel; the egress proxy swaps the secret in on the wire."""
+    """Each filled keyed slot whose declaration lets the member select its host exports the host it
+    resolves to under the choice's `env`, so the agent addresses the site its key belongs to. The
+    key itself reaches the sandbox only as the sentinel its session binds. Which slots hold a value
+    is one read; no value is read, and a slot whose selection will not resolve is withheld alone."""
     if credentials is None:
         return {}
+    stored = await credentials.stored_slots(workspace_id)
     env: dict[str, str] = {}
     for slot in await slots.all(workspace_id):
         target = slot.injection
-        if target is None:
-            continue
-        host_env = target.host.env if isinstance(target.host, HostChoice) else None
-        if target.env is None and host_env is None:
+        if (
+            target is None
+            or slot.name not in stored
+            or not isinstance(target.host, HostChoice)
+            or target.host.env is None
+        ):
             continue
         try:
-            await credentials.get(workspace_id, slot.name)
             host = await credential_host(credentials, workspace_id, target.host)
-        except CredentialSlotUnset:
-            continue
         except Exception as error:
             warn(
                 "sandbox.credential_slot_failed",
@@ -167,21 +157,20 @@ async def _keyed_provider_env(
         if host is None:
             warn("sandbox.keyed_host_unavailable", slot=slot.name)
             continue
-        if target.env is not None:
-            env[target.env] = target.sentinel
-        if host_env is not None:
-            env[host_env] = host
+        env[target.host.env] = host
     return env
 
 
-async def _grant_cli_env(
+async def git_identity_env(
     grants: GrantStore | None,
     clis: Mapping[str, CliCredential],
     run_id: UUID,
     member_id: UUID | None,
 ) -> dict[str, str]:
-    """The proxy swaps the account's token in by the same sentinel. git reads one identity pair per
-    sandbox however many hosts it clones from, so a second claimant withdraws it."""
+    """The committer identity of the one account the acting member's tier resolves to for a CLI that
+    clones, the tier the session policy binds that CLI's connection from. A tier holding several
+    accounts exports nothing for that CLI, and git reads one identity pair per sandbox however many
+    hosts it clones from, so a second claimant withdraws it."""
     if grants is None or not clis:
         return {}
     granted = await grants.active_grants()
@@ -196,19 +185,13 @@ async def _grant_cli_env(
                 accounts=len(accounts),
             )
             continue
-        if accounts:
-            env[cli.env] = grant_sentinel(accounts[0])
-            if cli.git is None:
-                continue
-            identity = _git_identity_env(granted, provider, accounts[0])
-            if identity and GIT_IDENTITY_ENV & set(env):
-                log(
-                    "sandbox.git_identity_ambiguous",
-                    provider=provider,
-                    run_id=str(run_id),
-                )
-                return {name: value for name, value in env.items() if name not in GIT_IDENTITY_ENV}
-            env.update(identity)
+        if not accounts or cli.git is None:
+            continue
+        identity = _git_identity_env(granted, provider, accounts[0])
+        if identity and GIT_IDENTITY_ENV & set(env):
+            log("sandbox.git_identity_ambiguous", provider=provider, run_id=str(run_id))
+            return {}
+        env.update(identity)
     return env
 
 

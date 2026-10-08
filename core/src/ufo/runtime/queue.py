@@ -5,13 +5,14 @@ import json
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
 
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient
+from dbos._error import DBOSWorkflowCancelledError
 from pydantic import BaseModel
 
 from ufo.blob import WorkspaceBlobStore
@@ -34,12 +35,10 @@ from ufo.harness.o11y import (
 from ufo.harness.sandbox.conversation import ConversationSandbox
 from ufo.harness.sandbox.exec_env import (
     CONVERSATION_ID_ENV,
-    GIT_IDENTITY_ENV,
     GIT_PROXY_AUTH_CONFIG,
     _git_config_env,
-    _grant_cli_env,
-    _keyed_provider_env,
     cli_git_config,
+    keyed_host_env,
 )
 from ufo.harness.sandbox.session import (
     RunTokenCodec,
@@ -54,12 +53,15 @@ from ufo.runtime.access.credentials import (
     CredentialRequests,
     CredentialStore,
 )
+from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.access.member_authorization import (
     MEMBER_AUTHORIZATION_JOB,
     MEMBER_AUTHORIZATION_MODEL,
     MemberAuthorization,
 )
+from ufo.runtime.access.proxy_sessions import ProxySessions
+from ufo.runtime.access.turn_sessions import SandboxAuthorizer, TurnSessions
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger
@@ -677,6 +679,8 @@ class Runtime:
     home_surface: str | None = None
     tailer: TurnTailer | None = None
     memory: MemorySearch | None = None
+    rules: PerAgentRules = field(default_factory=PerAgentRules)
+    sessions: ProxySessions | None = None
 
 
 _runtime: Runtime | None = None
@@ -1054,11 +1058,20 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             connector_read_only = profile.connector_read_only
         grants = GrantStore() if runtime.credentials is not None else None
         clis = runtime.environment.clis()
+        sessions = TurnSessions(
+            proxy=runtime.sessions,
+            rules=runtime.rules,
+            run_tokens=runtime.run_tokens,
+            turn=turn,
+            agent_id=turn.agent_id,
+            internet_access_allowed=internet_access_allowed,
+        )
         sandbox = _LateSandbox(
             conversation_id=turn.sandbox_conversation_id or turn.conversation_id,
             turn_id=turn.id,
             open=lambda: _open_sandbox(
                 runtime.sandboxes,
+                sessions,
                 turn,
                 clis,
                 runtime.credentials,
@@ -1070,6 +1083,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         )
         sandbox_authorizer = SandboxAuthorizer(
             sandbox=sandbox,
+            sessions=sessions,
             grants=grants,
             clis=clis,
             turn=turn,
@@ -1172,8 +1186,21 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             granted_actions=assembled.granted_actions,
         )
         run = engine.run_intent if turn.admission_source == INTENT_ADMISSION else engine.run
-        frame = await run()
-        return "superseded" if frame is None else frame.status
+        try:
+            frame = await run()
+        except TurnParked:
+            return "parked"
+        except DBOSWorkflowCancelledError:
+            await sessions.close()
+            raise
+        except Exception as error:
+            await _commit_failed_terminal(runtime.hub, UUID(turn_id), attempt, error)
+            await sessions.close()
+            return "failed"
+        if frame is None:
+            return "superseded"
+        await sessions.close()
+        return frame.status
     except TurnParked:
         return "parked"
     except asyncio.CancelledError:
@@ -1479,6 +1506,7 @@ async def _frozen_byok(turn_id: UUID, decided: bool, attempt: str) -> bool:
 
 async def _open_sandbox(
     sandboxes: ConversationSandbox,
+    sessions: TurnSessions,
     turn: Turn,
     clis: Mapping[str, CliCredential],
     credentials: CredentialStore | None,
@@ -1492,22 +1520,9 @@ async def _open_sandbox(
             turn.id,
             {
                 CONVERSATION_ID_ENV: str(turn.conversation_id),
-                TOOL_BRIDGE_URL_ENV: TOOL_BRIDGE_URL,
+                **({TOOL_BRIDGE_URL_ENV: TOOL_BRIDGE_URL} if sessions.proxy is not None else {}),
                 **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cli_git_config(clis))),
-                **await _keyed_provider_env(credentials, slots, turn.workspace_id),
+                **await keyed_host_env(credentials, slots, turn.workspace_id),
             },
-        )
-
-
-@dataclass(frozen=True)
-class SandboxAuthorizer:
-    sandbox: Sandbox
-    grants: GrantStore | None
-    clis: Mapping[str, CliCredential]
-    turn: Turn
-
-    async def authorize(self, acting_member_id: UUID | None) -> Sandbox:
-        return self.sandbox.authorize(
-            frozenset(cli.env for cli in self.clis.values()) | GIT_IDENTITY_ENV,
-            await _grant_cli_env(self.grants, self.clis, self.turn.id, acting_member_id),
+            proxied=sessions.open,
         )

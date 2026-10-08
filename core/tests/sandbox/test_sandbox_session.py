@@ -6,10 +6,8 @@ import logging
 import subprocess
 import sys
 from collections.abc import AsyncIterator
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
@@ -24,7 +22,6 @@ from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     DOCUMENT_READ_EXEC_TIMEOUT_SECONDS,
-    PROBE_TOKEN_KIND,
     SANDBOX_PYTHON_FLAG,
     SKILL_LOAD_PROG,
     SKILL_STAGING_DIRNAME,
@@ -33,8 +30,6 @@ from ufo.harness.sandbox.session import (
     WORKSPACE_DIR,
     WORKSPACE_SCOPE_HINT,
     ExecResult,
-    ProbeToken,
-    ProbeTokenCodec,
     RunToken,
     RunTokenCodec,
     SandboxHandle,
@@ -62,7 +57,6 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 
 RUN_TOKENS = RunTokenCodec(b"run-token-test-secret")
-PROBE_TOKENS = ProbeTokenCodec(b"run-token-test-secret")
 LARGE_SKILL_BYTES = 1_000_000
 LINUX_MAX_ARG_STRLEN = 131_072
 
@@ -126,78 +120,6 @@ def _check_run_token_rejects_a_valid_shape_signed_by_another_deployment() -> Non
     forged = RunTokenCodec(b"other-deployment").encode(run)
     with pytest.raises(ValueError, match="signed"):
         RUN_TOKENS.from_proxy_auth(_basic(forged))
-
-
-def _probe(
-    expires_at: int = 1_800_000_000,
-    member_id: UUID | None = None,
-    internet_access: Literal[False] | None = None,
-) -> ProbeToken:
-    return ProbeToken(
-        workspace_id=uuid4(),
-        conversation_id=uuid4(),
-        probe_id=uuid4(),
-        expires_at=expires_at,
-        member_id=member_id,
-        internet_access=internet_access,
-    )
-
-
-def _check_probe_token_round_trips_encode_then_proxy_auth() -> None:
-    probe = _probe(member_id=uuid4(), internet_access=False)
-    assert PROBE_TOKENS.from_proxy_auth(_basic(PROBE_TOKENS.encode(probe))) == probe
-
-
-def _check_probe_token_wire_carries_the_member_in_eight_fields() -> None:
-    probe = _probe(member_id=uuid4())
-    head = (
-        f"{PROBE_TOKEN_KIND}/{probe.workspace_id}/{probe.conversation_id}/"
-        f"{probe.probe_id}/{probe.member_id}/{probe.expires_at}"
-    )
-    assert PROBE_TOKENS.encode(probe) == sign_token(PROBE_TOKENS.secret, f"{head}/-/-".encode())
-    with pytest.raises(ValueError):
-        PROBE_TOKENS.from_proxy_auth(_basic(sign_token(PROBE_TOKENS.secret, f"{head}/-".encode())))
-
-
-def _check_probe_token_reads_the_outgoing_images_connection_list_as_no_member() -> None:
-    probe = _probe(member_id=uuid4())
-    outgoing = (
-        f"{PROBE_TOKEN_KIND}/{probe.workspace_id}/{probe.conversation_id}/{probe.probe_id}/"
-        f"connections/{probe.expires_at}/{uuid4().hex},{uuid4().hex}/0"
-    )
-    assert PROBE_TOKENS.from_proxy_auth(
-        _basic(sign_token(PROBE_TOKENS.secret, outgoing.encode()))
-    ) == replace(probe, member_id=None, internet_access=False)
-
-
-def _check_encoded_probe_token_is_url_safe_userinfo() -> None:
-    encoded = PROBE_TOKENS.encode(_probe())
-    assert all(char.isalnum() or char in "-_." for char in encoded)
-
-
-def _check_probe_from_proxy_auth_rejects_non_basic_scheme() -> None:
-    with pytest.raises(ValueError, match="basic"):
-        PROBE_TOKENS.from_proxy_auth("Bearer " + PROBE_TOKENS.encode(_probe()))
-
-
-def _check_probe_from_proxy_auth_rejects_a_malformed_probe_token() -> None:
-    with pytest.raises(ValueError):
-        PROBE_TOKENS.from_proxy_auth(_basic("not-a-probe-token"))
-
-
-def _check_probe_token_rejects_a_valid_shape_signed_by_another_deployment() -> None:
-    forged = ProbeTokenCodec(b"other-deployment").encode(_probe())
-    with pytest.raises(ValueError, match="signed"):
-        PROBE_TOKENS.from_proxy_auth(_basic(forged))
-
-
-def _check_neither_codec_reads_the_other_domain_under_one_secret() -> None:
-    run = RUN_TOKENS.encode(RunToken(uuid4(), uuid4()))
-    probe = PROBE_TOKENS.encode(_probe())
-    with pytest.raises(ValueError, match="probe token"):
-        PROBE_TOKENS.from_proxy_auth(_basic(run))
-    with pytest.raises(ValueError, match="run token"):
-        RUN_TOKENS.from_proxy_auth(_basic(probe))
 
 
 def _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base() -> None:
@@ -1410,14 +1332,6 @@ def test_sandbox_session_sync_contract() -> None:
         _check_from_proxy_auth_rejects_missing_header,
         _check_from_proxy_auth_rejects_a_malformed_run_token,
         _check_run_token_rejects_a_valid_shape_signed_by_another_deployment,
-        _check_probe_token_round_trips_encode_then_proxy_auth,
-        _check_probe_token_wire_carries_the_member_in_eight_fields,
-        _check_probe_token_reads_the_outgoing_images_connection_list_as_no_member,
-        _check_encoded_probe_token_is_url_safe_userinfo,
-        _check_probe_from_proxy_auth_rejects_non_basic_scheme,
-        _check_probe_from_proxy_auth_rejects_a_malformed_probe_token,
-        _check_probe_token_rejects_a_valid_shape_signed_by_another_deployment,
-        _check_neither_codec_reads_the_other_domain_under_one_secret,
         _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base,
         _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to,
         _check_host_argv_names_a_logical_path_under_the_host_root,

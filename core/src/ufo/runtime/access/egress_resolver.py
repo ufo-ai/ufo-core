@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from ufo.db import workspace_tx
 from ufo.harness.o11y import warn
 from ufo.harness.sandbox.preview import PREVIEW_HOST
-from ufo.harness.sandbox.session import ProbeToken, RunToken
+from ufo.harness.sandbox.session import RunToken
 from ufo.runtime.access.connectors import CliCredential, GitWire
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.egress_rules import (
@@ -36,10 +36,6 @@ from ufo.runtime.tools.bridge import TOOL_BRIDGE_HOST, ToolBridgePrincipal
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import RUNNING
-
-EgressPrincipal = RunToken | ProbeToken
-"""What a git-credential call presents: a turn's run token, or one probe exec's own token. Both
-are signed by the one deploy secret and name their own domain, so neither passes as the other."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,14 +129,14 @@ class PerAgentRules:
         return tuple(sorted(routes, key=lambda route: route.host))
 
     async def git_credential(
-        self, principal: EgressPrincipal, host: str
+        self, principal: RunToken, host: str
     ) -> tuple[GitWire, str, str] | None:
         """The git credential the cache daemon fetches `host` with on this principal's behalf: the
         connector git wire it rides, the granted account's token, and the account itself — the
         mirror principal, so every turn reaching one connected account shares one mirror. The
-        account is chosen exactly as the sandbox's own env export chooses it, so the daemon fetches
-        as the account the turn's `GH_TOKEN` names and never as a sibling capability. None for a
-        token that is not live, a host no connector clones through, or a scope with no usable
+        account is chosen exactly as the session policy binds the CLI's connection, so the daemon
+        fetches as the account the turn's `GH_TOKEN` names and never as a sibling capability. None
+        for a token that is not live, a host no connector clones through, or a scope with no usable
         account for it — the daemon then fetches anonymously.
 
         Reading the account's token is a call to the broker, so one account's fault withholds that
@@ -149,11 +145,7 @@ class PerAgentRules:
         answering 500, the daemon answering 502, and a public clone that needs no credential at all
         failing with it."""
         with ws(principal.workspace_id):
-            match principal:
-                case RunToken():
-                    scope = await self._turn_of(principal)
-                case ProbeToken():
-                    scope = await self._conversation_of(principal)
+            scope = await self._turn_of(principal)
             if scope is None or self.grants is None:
                 return None
             with agent(scope.agent_id):
@@ -226,27 +218,3 @@ class PerAgentRules:
             ),
             running=bool(row.running),
         )
-
-    async def _conversation_of(self, probe: ProbeToken) -> _Scope | None:
-        if probe.expires_at <= int(datetime.now(UTC).timestamp()):
-            return None
-        async with workspace_tx() as connection:
-            row = (
-                await connection.execute(
-                    sa.select(tables.conversation.c.agent_id)
-                    .select_from(
-                        tables.conversation.join(
-                            tables.agent,
-                            tables.agent.c.id == tables.conversation.c.agent_id,
-                        )
-                    )
-                    .where(
-                        tables.conversation.c.id == probe.conversation_id,
-                        tables.conversation.c.workspace_id == probe.workspace_id,
-                        tables.agent.c.workspace_id == probe.workspace_id,
-                    )
-                )
-            ).one_or_none()
-        if row is None:
-            return None
-        return _Scope(row.agent_id, probe.member_id, running=False)

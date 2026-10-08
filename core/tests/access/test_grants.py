@@ -45,7 +45,6 @@ from ufo.runtime.access.grants import (
     _tenant_url,
     cli_accounts,
     connection_summaries,
-    grant_sentinel,
     grant_summaries,
     install_connect_flow,
 )
@@ -222,12 +221,6 @@ async def _policy(
 ) -> SessionPolicy:
     with ws(workspace_id), agent(agent_id):
         return await rules.session_policy(PolicyScope(workspace_id, member_id, True, True, None))
-
-
-def test_grant_sentinel_is_deterministic_per_account() -> None:
-    assert grant_sentinel("acct-1") == grant_sentinel("acct-1")
-    assert grant_sentinel("acct-1") != grant_sentinel("acct-2")
-    assert "acct-1" in grant_sentinel("acct-1")
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

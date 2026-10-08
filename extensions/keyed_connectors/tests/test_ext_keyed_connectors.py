@@ -42,14 +42,12 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-def test_every_row_declares_a_distinct_slot_sentinel_and_env() -> None:
-    """A sentinel collision would draw another provider's secret and an env collision would
-    overwrite it in the sandbox, so both are unique across the whole table, as are slot names."""
+def test_every_row_declares_a_distinct_slot_and_env() -> None:
+    """An env collision would overwrite one provider's sentinel with another's in the sandbox, so
+    envs are unique across the whole table, as are slot names."""
     slots = manifest().credentials
-    sentinels = [slot.injection.sentinel for slot in slots if slot.injection]
-    envs = [slot.injection.env for slot in slots if slot.injection and slot.injection.env]
+    envs = [slot.injection.env for slot in slots if slot.injection]
     assert len(set(slot.name for slot in slots)) == len(slots)
-    assert len(set(sentinels)) == len(sentinels)
     assert len(set(envs)) == len(envs)
 
 
