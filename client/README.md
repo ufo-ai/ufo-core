@@ -51,10 +51,10 @@ already has, so file and command requests in it never reach your machine.
 
 `ufo proxy --session TOKEN` puts a program on this machine behind a proxy service session. It reads
 the session's environment from the proxy service, writes `$UFO_HOME/proxy/ca.pem` (this machine's
-roots plus the proxy's CA), starts or reuses a loopback daemon that relays to the proxy over TLS, and
-prints the variables to set: the four proxy variables pointing at the daemon, `NO_PROXY`, each
-binding's sentinel, and the CA bundle for every tool that reads one. `--env` prints them as `export`
-lines for `eval "$(ufo proxy --session TOKEN --env)"`, and `--stop` ends the daemon.
+roots plus the proxy's CA), starts a loopback daemon that relays to the proxy over TLS (reusing one
+that already relays to the same proxy service and replacing one that relays elsewhere), and prints
+the variables to set: the four proxy variables pointing at the daemon, `NO_PROXY`, each binding's
+sentinel, and the CA bundle for every tool that reads one. `--env` prints them as `export` lines for `eval "$(ufo proxy --session TOKEN --env)"`, and `--stop` ends the daemon.
 
 ## Run it in development
 

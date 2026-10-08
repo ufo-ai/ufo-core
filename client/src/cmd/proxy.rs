@@ -19,6 +19,7 @@ const PROXY_URL_ENV: &str = "UFO_PROXY_URL";
 const STATE_DIR: &str = "proxy";
 const PID_FILE: &str = "daemon.pid";
 const PORT_FILE: &str = "daemon.port";
+const UPSTREAM_FILE: &str = "daemon.upstream";
 const LOG_FILE: &str = "daemon.log";
 const CA_FILE: &str = "ca.pem";
 const PROXY_PASSWORD: &str = "ufo";
@@ -44,6 +45,12 @@ pub enum Call {
         host: String,
         port: u16,
     },
+}
+
+struct Daemon {
+    pid: u32,
+    port: u16,
+    upstream: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -159,7 +166,11 @@ fn start(session: &str, export: bool, url_default: Option<&str>) -> Result<(), S
     fs::write(&ca_path, trust::trust_bundle(&ca.ca_pem)?)
         .map_err(|error| format!("could not write {}: {error}", ca_path.display()))?;
     let local = match running(&state) {
-        Some(local) => local,
+        Some(daemon) if daemon.upstream.as_deref() == Some(&relay(&host, port)) => daemon.port,
+        Some(daemon) => {
+            halted(&daemon)?;
+            launched(&state, &host, port)?
+        }
         None => launched(&state, &host, port)?,
     };
     print!("{}", rendered(&view.env, local, session, &ca_path, export));
@@ -213,16 +224,29 @@ fn shell_name(name: &str) -> bool {
         && chars.all(|rest| rest == '_' || rest.is_ascii_alphanumeric())
 }
 
-fn running(state: &Path) -> Option<u16> {
+fn relay(host: &str, port: u16) -> String {
+    format!("{host}:{port}")
+}
+
+fn running(state: &Path) -> Option<Daemon> {
     let pid = read_number::<u32>(&state.join(PID_FILE))?;
     let port = read_number::<u16>(&state.join(PORT_FILE))?;
-    (process_alive(pid) && accepts(port)).then_some(port)
+    let upstream = fs::read_to_string(state.join(UPSTREAM_FILE)).ok();
+    (process_alive(pid) && accepts(port)).then_some(Daemon {
+        pid,
+        port,
+        upstream,
+    })
 }
 
 fn launched(state: &Path, host: &str, port: u16) -> Result<u16, String> {
     let port_path = state.join(PORT_FILE);
     let log_path = state.join(LOG_FILE);
-    for stale in [state.join(PID_FILE), port_path.clone()] {
+    for stale in [
+        state.join(PID_FILE),
+        state.join(UPSTREAM_FILE),
+        port_path.clone(),
+    ] {
         let _ = fs::remove_file(stale);
     }
     let log = OpenOptions::new()
@@ -315,6 +339,7 @@ pub(crate) fn quoted(value: &str) -> String {
 }
 
 fn serve(state: &Path, host: String, port: u16) -> Result<(), String> {
+    let upstream = relay(&host, port);
     let proxy = Proxy {
         tls: true,
         host,
@@ -323,39 +348,50 @@ fn serve(state: &Path, host: String, port: u16) -> Result<(), String> {
     };
     let local = start_loopback_proxy(proxy, tls_config(None)?)?;
     write_atomic(&state.join(PID_FILE), &std::process::id().to_string())?;
+    write_atomic(&state.join(UPSTREAM_FILE), &upstream)?;
     write_atomic(&state.join(PORT_FILE), &local.to_string())?;
     loop {
         thread::park();
     }
 }
 
-#[cfg(unix)]
 fn stop() -> Result<(), String> {
     let state = Home::resolve().root.join(STATE_DIR);
-    if let (Some(port), Some(pid)) = (running(&state), read_number::<i32>(&state.join(PID_FILE))) {
-        if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-            return Err(format!(
-                "could not stop the local proxy: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let started = Instant::now();
-        while accepts(port) {
-            if started.elapsed() >= READY_WAIT {
-                return Err(format!("the local proxy (pid {pid}) did not stop."));
-            }
-            thread::sleep(WAIT_POLL);
-        }
+    if let Some(daemon) = running(&state) {
+        halted(&daemon)?;
     }
-    for name in [PID_FILE, PORT_FILE] {
+    for name in [PID_FILE, PORT_FILE, UPSTREAM_FILE] {
         let _ = fs::remove_file(state.join(name));
     }
     Ok(())
 }
 
+#[cfg(unix)]
+fn halted(daemon: &Daemon) -> Result<(), String> {
+    let pid = i32::try_from(daemon.pid)
+        .map_err(|_| format!("the local proxy's pid {} is out of range.", daemon.pid))?;
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        return Err(format!(
+            "could not stop the local proxy: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let started = Instant::now();
+    while accepts(daemon.port) {
+        if started.elapsed() >= READY_WAIT {
+            return Err(format!("the local proxy (pid {pid}) did not stop."));
+        }
+        thread::sleep(WAIT_POLL);
+    }
+    Ok(())
+}
+
 #[cfg(not(unix))]
-fn stop() -> Result<(), String> {
-    Err("--stop is not available on this platform.".to_string())
+fn halted(daemon: &Daemon) -> Result<(), String> {
+    Err(format!(
+        "stopping the local proxy (pid {}) is not available on this platform.",
+        daemon.pid
+    ))
 }
 
 fn accepts(port: u16) -> bool {

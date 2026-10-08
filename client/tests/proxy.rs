@@ -32,8 +32,6 @@ fn scratch(name: &str) -> PathBuf {
 fn stand_in(root: &Path, refuse: bool) -> StandIn {
     let rcgen::CertifiedKey { cert, key_pair } =
         rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
-    let ca = root.join("stand-in-ca.pem");
-    fs::write(&ca, cert.pem()).unwrap();
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let key = rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der());
     let config = Arc::new(
@@ -46,6 +44,8 @@ fn stand_in(root: &Path, refuse: bool) -> StandIn {
     );
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
+    let ca = root.join(format!("stand-in-ca-{port}.pem"));
+    fs::write(&ca, cert.pem()).unwrap();
     let ca_pem = cert.pem();
     let (sent, connects) = mpsc::channel();
     thread::spawn(move || {
@@ -141,6 +141,24 @@ fn ufo_proxy(home: &Path, stand_in: &StandIn, args: &[&str]) -> Output {
         .unwrap()
 }
 
+fn relayed(port: u16, stand_in: &StandIn) {
+    let mut local = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    local
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    local.write_all(CONNECT_HEAD).unwrap();
+    let mut answer = [0u8; 12];
+    local.read_exact(&mut answer).unwrap();
+    assert_eq!(&answer, b"HTTP/1.1 200");
+    assert_eq!(
+        stand_in
+            .connects
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap(),
+        CONNECT_HEAD
+    );
+}
+
 fn printed_port(output: &Output) -> u16 {
     let stdout = String::from_utf8(output.stdout.clone()).unwrap();
     let prefix = format!("HTTPS_PROXY=http://{TOKEN}:ufo@127.0.0.1:");
@@ -174,21 +192,7 @@ fn start_prints_the_environment_and_leaves_a_daemon_that_relays_connect() {
     assert!(fs::read_to_string(&bundle)
         .unwrap()
         .ends_with(&fs::read_to_string(&stand_in.ca).unwrap()));
-    let mut local = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    local
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    local.write_all(CONNECT_HEAD).unwrap();
-    let mut answer = [0u8; 12];
-    local.read_exact(&mut answer).unwrap();
-    assert_eq!(&answer, b"HTTP/1.1 200");
-    assert_eq!(
-        stand_in
-            .connects
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap(),
-        CONNECT_HEAD
-    );
+    relayed(port, &stand_in);
     assert!(ufo_proxy(&home, &stand_in, &["--stop"]).status.success());
 }
 
@@ -212,6 +216,28 @@ fn a_second_start_reuses_the_daemon() {
 }
 
 #[test]
+fn a_start_against_another_proxy_service_relays_there() {
+    let root = scratch("switch");
+    let home = root.join("home");
+    let first = stand_in(&root, false);
+    let second = stand_in(&root, false);
+    let old = printed_port(&ufo_proxy(&home, &first, &["--session", TOKEN]));
+
+    let output = ufo_proxy(&home, &second, &["--session", TOKEN]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(TcpStream::connect(("127.0.0.1", old)).is_err());
+    relayed(printed_port(&output), &second);
+    assert!(first.connects.try_recv().is_err());
+    assert!(ufo_proxy(&home, &second, &["--stop"]).status.success());
+}
+
+#[test]
 fn stop_ends_the_daemon() {
     let root = scratch("stop");
     let home = root.join("home");
@@ -228,6 +254,7 @@ fn stop_ends_the_daemon() {
     assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
     assert!(!home.join("proxy/daemon.pid").exists());
     assert!(!home.join("proxy/daemon.port").exists());
+    assert!(!home.join("proxy/daemon.upstream").exists());
 }
 
 #[test]
