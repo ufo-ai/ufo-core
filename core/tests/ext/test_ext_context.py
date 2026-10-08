@@ -79,7 +79,6 @@ from ufo.runtime.access.vault import SecretValue, VaultReads
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.billing.accounting import (
-    EGRESS_DIMENSION,
     GIB_DIMENSION,
     PROXY_SERVICE,
     REQUESTS_DIMENSION,
@@ -1636,19 +1635,21 @@ async def test_spend_rollup_reads_the_bound_workspaces_totals_naming_no_member_o
             await UNGATED_LEDGER.record_turn_usage(
                 connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1_000)
             )
-            await connection.execute(
-                sa.insert(tables.ledger).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    turn_id=None,
-                    dimension=EGRESS_DIMENSION,
-                    amount=1,
-                    priced_micro_usd=0,
-                    model="",
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
+        await context.record_usage(
+            PROXY_SERVICE,
+            REQUESTS_DIMENSION,
+            None,
+            1,
+            token_id=None,
+            session_id=uuid4(),
+            labels={},
+            resource_id=None,
+            attempt="flush-1",
+            occurred_at=datetime.now(UTC),
+            byok=False,
+            price_micro_usd=0,
+            price_digest="sha256:card",
+        )
         totals = await context.spend_rollup(None)
         async with workspace_tx() as connection:
             report = await SpendRollup(workspace_id).read(connection, None)

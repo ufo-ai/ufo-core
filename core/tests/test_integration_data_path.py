@@ -6,6 +6,7 @@ asserted: every assertion reads real rows, real recall results, and real spend d
 the real backend. On the sqlite param this runs against the real DefaultIndex over SQLite FTS5; on
 the postgres param against real Postgres + pgvector."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -25,7 +26,16 @@ from ufo_testsupport.index import default_index
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
-from ufo.runtime.billing.accounting import SANDBOX_TOKENS_DIMENSION, SpendEvaluator
+from ufo.harness.models.catalog import PRICE_DIGEST
+from ufo.runtime.billing.accounting import (
+    MODELS_SERVICE,
+    PROXY_VIA,
+    TOKENS_DIMENSION,
+    TURN_LABEL,
+    UNGATED_LEDGER,
+    VIA_LABEL,
+    SpendEvaluator,
+)
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.ext.source_reader import SourceReader
 from ufo.runtime.indexing import TextChunker
@@ -40,8 +50,16 @@ from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.records import Usage
 
 pytestmark = pytest.mark.integration
+
+HEAVY_USAGE = Usage(
+    input_tokens=1000,
+    output_tokens=2000,
+    cache_read_tokens=3000,
+    cache_write_1h_tokens=4000,
+)
 
 
 class StubEmbed:
@@ -305,18 +323,24 @@ async def test_metered_sandbox_tokens_breach_a_member_cap_and_park(db: None) -> 
         turn_id = await _seed_running_turn(
             connection, workspace_id, conversation_id, agent_id, speaker_member_id=member_id
         )
-        await connection.execute(
-            sa.insert(tables.ledger).values(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                turn_id=turn_id,
-                dimension=SANDBOX_TOKENS_DIMENSION,
-                amount=10_000,
-                priced_micro_usd=96_500,
-                model="claude-opus-4-8",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
+        await UNGATED_LEDGER.record_service_usage(
+            connection,
+            workspace_id,
+            service=MODELS_SERVICE,
+            dimension=TOKENS_DIMENSION,
+            backend=None,
+            amount=10_000,
+            token_id=None,
+            session_id=uuid4(),
+            labels={VIA_LABEL: PROXY_VIA, TURN_LABEL: str(turn_id)},
+            resource_id=None,
+            attempt="flush-1",
+            occurred_at=datetime.now(UTC),
+            byok=False,
+            priced_micro_usd=96_500,
+            price_digest=PRICE_DIGEST,
+            model="claude-opus-4-8",
+            usage=HEAVY_USAGE,
         )
         decision = await evaluator.decide(connection, 0)
     assert decision.outcome == "park"

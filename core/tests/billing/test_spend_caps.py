@@ -9,9 +9,14 @@ from dbos import EnqueueOptions
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
+from ufo.harness.models.catalog import PRICE_DIGEST
 from ufo.runtime.billing.accounting import (
-    SANDBOX_TOKENS_DIMENSION,
+    MODELS_SERVICE,
+    PROXY_VIA,
+    TOKENS_DIMENSION,
+    TURN_LABEL,
     UNGATED_LEDGER,
+    VIA_LABEL,
     SpendEvaluator,
 )
 from ufo.runtime.ext.context import ExtensionContext
@@ -393,18 +398,24 @@ async def test_sandbox_tokens_count_toward_a_cap(db: None) -> None:
                 updated_at=sa.func.now(),
             )
         )
-        await connection.execute(
-            sa.insert(tables.ledger).values(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                turn_id=turn_id,
-                dimension=SANDBOX_TOKENS_DIMENSION,
-                amount=3000,
-                priced_micro_usd=55_000,
-                model="claude-opus-4-8",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
+        await UNGATED_LEDGER.record_service_usage(
+            connection,
+            workspace_id,
+            service=MODELS_SERVICE,
+            dimension=TOKENS_DIMENSION,
+            backend=None,
+            amount=3000,
+            token_id=None,
+            session_id=uuid4(),
+            labels={VIA_LABEL: PROXY_VIA, TURN_LABEL: str(turn_id)},
+            resource_id=None,
+            attempt="flush-1",
+            occurred_at=datetime.now(UTC),
+            byok=False,
+            priced_micro_usd=55_000,
+            price_digest=PRICE_DIGEST,
+            model="claude-opus-4-8",
+            usage=Usage(input_tokens=1000, output_tokens=2000),
         )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
         decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)

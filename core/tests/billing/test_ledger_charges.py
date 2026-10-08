@@ -7,13 +7,17 @@ from test_accounting import _seed_turn
 from ufo_ext_sample.spend import ALLOWANCE_TABLE, CHARGE_TABLE, AllowanceRaised, SampleGate, allow
 
 from ufo.db import workspace_tx
-from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT
+from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, CORE_PRICING, PRICE_DIGEST
 from ufo.runtime.billing.accounting import (
     GIB_DIMENSION,
     IMAGES_DIMENSION,
     MODELS_SERVICE,
     PROXY_SERVICE,
+    PROXY_VIA,
+    REQUESTS_DIMENSION,
     TOKENS_DIMENSION,
+    TURN_LABEL,
+    VIA_LABEL,
     VIDEOS_DIMENSION,
     Ledger,
 )
@@ -130,13 +134,54 @@ async def test_a_key_arriving_mid_turn_does_not_make_that_turn_free(db: None) ->
     assert remaining == DOLLAR - priced
 
 
-async def test_media_spend_charges_each_increment(db: None) -> None:
+async def test_in_sandbox_and_media_spend_charge_each_increment_and_egress_charges_nothing(
+    db: None,
+) -> None:
+    usage = Usage(input_tokens=5_000, output_tokens=50)
+    session_id = uuid4()
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await allow(connection, workspace_id, DOLLAR, "park")
-        for _ in range(2):
-            await LEDGER.record_image_usage(connection, workspace_id, turn_id, "image", 1, 40_000)
+        for attempt in ("flush-1", "flush-2"):
+            await LEDGER.record_service_usage(
+                connection,
+                workspace_id,
+                service=MODELS_SERVICE,
+                dimension=TOKENS_DIMENSION,
+                backend=None,
+                amount=5_050,
+                token_id=None,
+                session_id=session_id,
+                labels={VIA_LABEL: PROXY_VIA, TURN_LABEL: str(turn_id)},
+                resource_id=None,
+                attempt=attempt,
+                occurred_at=datetime.now(UTC),
+                byok=False,
+                priced_micro_usd=CORE_PRICING.micro_usd(MODEL, usage),
+                price_digest=PRICE_DIGEST,
+                model=MODEL,
+                usage=usage,
+            )
+        await LEDGER.record_image_usage(connection, workspace_id, turn_id, "image", 1, 40_000)
         await LEDGER.record_video_usage(connection, workspace_id, turn_id, "video", 1, 60_000)
+        for labels in ({TURN_LABEL: str(turn_id)}, {}):
+            await LEDGER.record_service_usage(
+                connection,
+                workspace_id,
+                service=PROXY_SERVICE,
+                dimension=REQUESTS_DIMENSION,
+                backend=None,
+                amount=1,
+                token_id=None,
+                session_id=uuid4(),
+                labels=labels,
+                resource_id=None,
+                attempt="flush-1",
+                occurred_at=datetime.now(UTC),
+                byok=False,
+                priced_micro_usd=0,
+                price_digest="sha256:card",
+            )
         remaining = (
             await connection.execute(
                 sa.select(ALLOWANCE_TABLE.c.remaining_micro_usd).where(
@@ -144,11 +189,17 @@ async def test_media_spend_charges_each_increment(db: None) -> None:
                 )
             )
         ).scalar_one()
-    images = ledger_id_for(workspace_id, turn_id, IMAGES_DIMENSION)
+    sandbox = [
+        service_ledger_id_for(
+            workspace_id, MODELS_SERVICE, str(session_id), TOKENS_DIMENSION, attempt
+        )
+        for attempt in ("flush-1", "flush-2")
+    ]
     charges = await _charges(workspace_id)
     assert [(charge[0], charge[2], charge[4]) for charge in charges] == [
-        (images, IMAGES_DIMENSION, True),
-        (images, IMAGES_DIMENSION, True),
+        (sandbox[0], TOKENS_DIMENSION, True),
+        (sandbox[1], TOKENS_DIMENSION, True),
+        (ledger_id_for(workspace_id, turn_id, IMAGES_DIMENSION), IMAGES_DIMENSION, True),
         (ledger_id_for(workspace_id, turn_id, VIDEOS_DIMENSION), VIDEOS_DIMENSION, True),
     ]
     assert sum(charge[3] for charge in charges) == await _priced(workspace_id)

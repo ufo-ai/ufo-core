@@ -31,6 +31,7 @@ from ufo.runtime.billing.accounting import (
     MEMBER_SCOPE,
     MODELS_SERVICE,
     PROXY_SERVICE,
+    PROXY_VIA,
     REQUESTS_DIMENSION,
     SANDBOX_TOKENS_DIMENSION,
     SERVICE_CLOCK_SKEW_SECONDS,
@@ -40,6 +41,7 @@ from ufo.runtime.billing.accounting import (
     TURN_LABEL,
     UNGATED_LEDGER,
     USAGE_KEYS,
+    VIA_LABEL,
     JobDayRollup,
     Ledger,
     ServiceBackfill,
@@ -256,21 +258,19 @@ async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:
     return workspace_id, turn_id
 
 
-async def _egress_row(
+async def _requests_record(
     connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, amount: int
 ) -> None:
-    await connection.execute(
-        sa.insert(tables.ledger).values(
-            id=uuid4(),
-            workspace_id=workspace_id,
-            turn_id=turn_id,
-            dimension=EGRESS_DIMENSION,
-            amount=amount,
-            priced_micro_usd=0,
-            model="",
-            created_at=sa.func.now(),
-            updated_at=sa.func.now(),
-        )
+    await _record(
+        UNGATED_LEDGER,
+        connection,
+        workspace_id,
+        dimension=REQUESTS_DIMENSION,
+        amount=amount,
+        session_id=uuid4(),
+        resource_id=None,
+        labels={TURN_LABEL: str(turn_id)},
+        priced_micro_usd=0,
     )
 
 
@@ -495,6 +495,152 @@ async def test_replay_leaves_one_row(db: None) -> None:
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_proxy_tokens_record_adds_to_the_host_row_in_the_turn_cost(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await UNGATED_LEDGER.record_turn_usage(
+            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+        )
+        await _record(
+            UNGATED_LEDGER,
+            connection,
+            workspace_id,
+            service=MODELS_SERVICE,
+            dimension=TOKENS_DIMENSION,
+            amount=10_000,
+            labels={VIA_LABEL: PROXY_VIA, TURN_LABEL: str(turn_id)},
+            priced_micro_usd=CORE_PRICING.micro_usd("claude-opus-4-8", FULL_USAGE),
+            price_digest=PRICE_DIGEST,
+            model="claude-opus-4-8",
+            usage=FULL_USAGE,
+        )
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.id,
+                    tables.ledger.c.service,
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.labels,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.price_digest,
+                ).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).all()
+        cost = await read_turn_cost(connection, turn_id, TOKENS_DIMENSION)
+    host = ledger_id_for(workspace_id, turn_id, TOKENS_DIMENSION)
+    proxy = service_ledger_id_for(
+        workspace_id, MODELS_SERVICE, "session/one", TOKENS_DIMENSION, "flush-1"
+    )
+    assert {
+        row.id: (
+            row.service,
+            row.dimension,
+            row.labels,
+            int(row.amount),
+            int(row.priced_micro_usd),
+            row.price_digest,
+        )
+        for row in rows
+    } == {
+        host: ("models", "tokens", {}, 10_000, 96_500, PRICE_DIGEST),
+        proxy: (
+            "models",
+            "tokens",
+            {"via": "proxy", "turn": str(turn_id)},
+            10_000,
+            96_500,
+            PRICE_DIGEST,
+        ),
+    }
+    assert cost == TurnCost(
+        tokens=20_000, micro_usd=193_000, model="claude-opus-4-8", cache_percent=38
+    )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_sandbox_rows_from_both_proxy_shapes_roll_up_and_export_once(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await _record(
+            UNGATED_LEDGER,
+            connection,
+            workspace_id,
+            service=MODELS_SERVICE,
+            dimension=TOKENS_DIMENSION,
+            amount=100,
+            labels={VIA_LABEL: PROXY_VIA, TURN_LABEL: str(turn_id)},
+            priced_micro_usd=CORE_PRICING.micro_usd("claude-opus-4-8", Usage(input_tokens=100)),
+            price_digest=PRICE_DIGEST,
+            model="claude-opus-4-8",
+            usage=Usage(input_tokens=100),
+        )
+        old_id = ledger_id_for(workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION)
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=old_id,
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                dimension=SANDBOX_TOKENS_DIMENSION,
+                amount=50,
+                prompt_tokens=50,
+                priced_micro_usd=0,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.update(tables.ledger)
+            .where(tables.ledger.c.id == old_id)
+            .values(
+                amount=tables.ledger.c.amount + 25,
+                prompt_tokens=tables.ledger.c.prompt_tokens + 25,
+            )
+        )
+        rows = (
+            await connection.execute(
+                sa.select(tables.ledger.c.id, tables.ledger.c.amount, tables.ledger.c.labels).where(
+                    tables.ledger.c.turn_id == turn_id,
+                    tables.ledger.c.dimension.in_((TOKENS_DIMENSION, SANDBOX_TOKENS_DIMENSION)),
+                )
+            )
+        ).all()
+        cost = await read_turn_cost(connection, turn_id, TOKENS_DIMENSION)
+        sandbox_cost = await read_turn_cost(connection, turn_id, SANDBOX_TOKENS_DIMENSION)
+        report = await SpendRollup(workspace_id).read(connection, None)
+        await _settle_turn(connection, turn_id, age_seconds=PAST_EXPORT_MARGIN_SECONDS)
+        await accounting.mint_usage_exports(
+            connection,
+            workspace_id,
+            CONSUMER,
+            datetime.now(UTC) - timedelta(days=7),
+            lambda model: None,
+        )
+        exports = await accounting.read_pending_usage_exports(
+            connection, workspace_id, CONSUMER, 100
+        )
+    assert {row.id for row in rows} == {
+        service_ledger_id_for(
+            workspace_id, MODELS_SERVICE, "session/one", TOKENS_DIMENSION, "flush-1"
+        ),
+        old_id,
+    }
+    assert sum(int(row.amount) for row in rows) == 175
+    assert all(row.labels == {"via": "proxy", "turn": str(turn_id)} for row in rows)
+    assert cost is not None and sandbox_cost is not None
+    assert (cost.tokens, sandbox_cost.tokens) == (100, 75)
+    assert [(total.dimension, total.amount) for total in report.by_dimension] == [
+        ("sandbox_tokens", 75),
+        ("tokens", 100),
+    ]
+    assert [member.tokens for member in report.by_member] == [175]
+    assert sorted(export.amount for export in exports) == [75, 100]
+    assert not any(export.byok for export in exports)
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_generated_images_accumulate_into_one_unstamped_row(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -561,18 +707,19 @@ async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
         await UNGATED_LEDGER.record_turn_usage(
             connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
         )
-        await _egress_row(connection, workspace_id, turn_id, 2)
+        await _requests_record(connection, workspace_id, turn_id, 2)
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, 3600)
     assert report.total_micro_usd == 96_500
     assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
-        "egress": (2, 0),
+        "requests": (2, 0),
         "tokens": (10_000, 96_500),
     }
     assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 96_500)]
     assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 96_500)]
     assert [(p.price_digest, p.priced_micro_usd) for p in report.by_price_digest] == [
-        (PRICE_DIGEST, 96_500)
+        (PRICE_DIGEST, 96_500),
+        (CARD_DIGEST, 0),
     ]
 
 
@@ -580,7 +727,7 @@ async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
 async def test_spend_rollup_totals_each_service_over_the_dimensions_it_meters(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
-        await _egress_row(connection, workspace_id, turn_id, 1)
+        await _requests_record(connection, workspace_id, turn_id, 1)
         await UNGATED_LEDGER.record_turn_usage(
             connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
         )
@@ -1307,12 +1454,12 @@ async def test_usage_lines_filters_backend_and_byok(db: None) -> None:
         workspace_id, turn_id = await _seed_turn(connection)
         await _service_row(connection, workspace_id, now, **_tokens_record("anthropic"))
         await _service_row(connection, workspace_id, now, **_tokens_record("openrouter", byok=True))
-        await _egress_row(connection, workspace_id, turn_id, 1)
+        await _requests_record(connection, workspace_id, turn_id, 1)
     keys = frozenset({"service", "dimension", "backend", "byok"})
     today = now.date()
     own_key = UsageLine(today, "models", "tokens", "openrouter", True, None, {}, 1_000, 5_000)
     platform = UsageLine(today, "models", "tokens", "anthropic", False, None, {}, 1_000, 5_000)
-    egress = UsageLine(today, "proxy", "egress", None, False, None, {}, 1, 0)
+    requests = UsageLine(today, "proxy", "requests", None, False, None, {}, 1, 0)
     since = now - timedelta(hours=1)
     async with workspace_tx() as connection:
         until = datetime.now(UTC) + timedelta(minutes=1)
@@ -1329,7 +1476,7 @@ async def test_usage_lines_filters_backend_and_byok(db: None) -> None:
             connection, workspace_id, since, until, keys=keys, backend="anthropic", byok=True
         )
     assert by_backend == paid_by_key == (own_key,)
-    assert paid_by_us == (platform, egress)
+    assert paid_by_us == (platform, requests)
     assert neither == ()
 
 
@@ -1639,7 +1786,7 @@ async def test_spend_totals_answer_what_the_rollup_reports_for_the_workspace(db:
         await UNGATED_LEDGER.record_image_usage(
             connection, workspace_id, turn_id, "openai/gpt-image-2", 1, 130_000
         )
-        await _egress_row(connection, workspace_id, turn_id, 1)
+        await _requests_record(connection, workspace_id, turn_id, 1)
         await _seed_job_spend(
             connection, workspace_id, now, (timedelta(minutes=90), timedelta(days=2))
         )
@@ -1844,7 +1991,7 @@ async def test_member_spend_reads_only_that_members_turns_and_caps(db: None) -> 
         await UNGATED_LEDGER.record_turn_usage(
             connection, workspace_id, mine, "claude-opus-4-8", FULL_USAGE
         )
-        await _egress_row(connection, workspace_id, mine, 1)
+        await _requests_record(connection, workspace_id, mine, 1)
         await UNGATED_LEDGER.record_turn_usage(
             connection, workspace_id, theirs, "claude-opus-4-8", FULL_USAGE
         )
@@ -1876,7 +2023,7 @@ async def test_member_spend_reads_only_that_members_turns_and_caps(db: None) -> 
         report = await SpendRollup(workspace_id).read_member(connection, member_id, 3600)
         rollup = await SpendRollup(workspace_id).read(connection, 3600)
     assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
-        "egress": (1, 0),
+        "requests": (1, 0),
         "tokens": (10_000, 96_500),
     }
     assert report.total_micro_usd == 96_500
@@ -1950,7 +2097,7 @@ async def test_usage_export_settlement_rules(db: None) -> None:
                 updated_at=sa.func.now(),
             )
         )
-        await _egress_row(connection, workspace_id, turn_id, 1)
+        await _requests_record(connection, workspace_id, turn_id, 1)
         await _record(UNGATED_LEDGER, connection, workspace_id)
         await _record(
             UNGATED_LEDGER,
