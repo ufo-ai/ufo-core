@@ -1,0 +1,712 @@
+{
+  "memory.write": {
+    "method": "POST",
+    "path": "/v1/memory/memories",
+    "query": [],
+    "request": {
+      "subject": "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f",
+      "body": "Alice prefers green tea to coffee.",
+      "kind": "preference",
+      "item_class": "fact",
+      "confidence": 6,
+      "source_ref": "first run",
+      "deprecates": [
+        "green tea"
+      ],
+      "as_of": "2026-10-07T11:30:00Z",
+      "conversation_id": "da2a9c9f-66c8-4138-abda-34de2a7eab6f"
+    },
+    "answer": {
+      "status": 201,
+      "body": {
+        "id": "0192f0c4-7a5e-7c3b-9d2e-5f1a2b3c4d5e",
+        "subject": "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f",
+        "kind": "preference",
+        "item_class": "fact",
+        "body": "Alice prefers green tea to coffee.",
+        "confidence": 6,
+        "source_ref": "first run",
+        "as_of": "2026-10-07T11:30:00Z",
+        "created_at": "2026-10-07T12:00:00Z",
+        "valid_at": "2026-10-07T11:30:00Z",
+        "invalid_at": null,
+        "invalidated_by": null,
+        "superseded_by": null,
+        "retired_at": null,
+        "conversation_id": "da2a9c9f-66c8-4138-abda-34de2a7eab6f",
+        "backend": "ufo",
+        "labels": {},
+        "sources": [
+          {
+            "kind": "conversation",
+            "conversation_id": "da2a9c9f-66c8-4138-abda-34de2a7eab6f"
+          }
+        ]
+      }
+    }
+  },
+  "memory.search": {
+    "method": "POST",
+    "path": "/v1/memory/search",
+    "query": [],
+    "request": {
+      "queries": [
+        "What does Alice drink?",
+        "When does the importer ship?"
+      ],
+      "subjects": [
+        "shared",
+        "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f"
+      ],
+      "start": "2026-09-01T00:00:00Z",
+      "end": "2026-10-08T00:00:00Z",
+      "limit": 8,
+      "reach": {
+        "agent_id": "5b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e",
+        "member_id": "7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f"
+      }
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "matches": [
+          {
+            "id": "0192f0c5-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+            "subject": "shared",
+            "kind": "decision",
+            "item_class": "fact",
+            "body": "The Q3 plan ships the importer in September.",
+            "confidence": 7,
+            "source_ref": null,
+            "as_of": "2026-10-01T09:00:00Z",
+            "created_at": "2026-10-07T12:00:00Z",
+            "valid_at": "2026-10-01T09:00:00Z",
+            "invalid_at": "2026-10-05T09:00:00Z",
+            "invalidated_by": "0192f0c6-2b3c-7d4e-9f5a-6b7c8d9e0f1a",
+            "superseded_by": null,
+            "retired_at": null,
+            "conversation_id": null,
+            "backend": "ufo",
+            "labels": {},
+            "sources": [
+              {
+                "kind": "page",
+                "page_id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+                "title": "Q3 plan",
+                "provider": "notion"
+              }
+            ]
+          },
+          {
+            "id": "0192f0c4-8b6f-7d4c-ae3f-6a2b3c4d5e6f",
+            "subject": "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f",
+            "kind": "event",
+            "item_class": "episodic",
+            "body": "Alice asked which tea the office stocks.",
+            "confidence": 4,
+            "source_ref": null,
+            "as_of": null,
+            "created_at": "2026-10-07T12:00:00Z",
+            "valid_at": "2026-10-07T12:00:00Z",
+            "invalid_at": null,
+            "invalidated_by": null,
+            "superseded_by": null,
+            "retired_at": null,
+            "conversation_id": "da2a9c9f-66c8-4138-abda-34de2a7eab6f",
+            "backend": "ufo",
+            "labels": {},
+            "sources": [
+              {
+                "kind": "conversation",
+                "conversation_id": "da2a9c9f-66c8-4138-abda-34de2a7eab6f"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "memory.list": {
+    "method": "GET",
+    "path": "/v1/memory/memories",
+    "query": [
+      [
+        "subject",
+        "shared"
+      ],
+      [
+        "subject",
+        "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f"
+      ],
+      [
+        "kind",
+        "fact"
+      ],
+      [
+        "kind",
+        "decision"
+      ],
+      [
+        "item_class",
+        "fact"
+      ],
+      [
+        "cursor",
+        "older|2026-10-07T12:10:00+00:00|0192f0d0-4e5f-7a6b-8c7d-8e9f0a1b2c3d"
+      ],
+      [
+        "limit",
+        "200"
+      ],
+      [
+        "reach.agent_id",
+        "5b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e"
+      ],
+      [
+        "reach.member_id",
+        "7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f"
+      ]
+    ],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "id": "0192f0c6-2b3c-7d4e-9f5a-6b7c8d9e0f1a",
+            "subject": "shared",
+            "kind": "decision",
+            "item_class": "fact",
+            "body": "The Q3 plan ships the importer in October.",
+            "confidence": 7,
+            "source_ref": null,
+            "as_of": "2026-10-05T09:00:00Z",
+            "created_at": "2026-10-07T12:00:00Z",
+            "valid_at": "2026-10-05T09:00:00Z",
+            "invalid_at": null,
+            "invalidated_by": null,
+            "superseded_by": null,
+            "retired_at": null,
+            "conversation_id": null,
+            "backend": "ufo",
+            "labels": {},
+            "sources": [
+              {
+                "kind": "page",
+                "page_id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+                "title": "Q3 plan",
+                "provider": "notion"
+              }
+            ]
+          }
+        ],
+        "next_cursor": "older|2026-10-07T12:00:00+00:00|0192f0c6-2b3c-7d4e-9f5a-6b7c8d9e0f1a",
+        "prev_cursor": "newer|2026-10-07T12:00:00+00:00|0192f0c6-2b3c-7d4e-9f5a-6b7c8d9e0f1a"
+      }
+    }
+  },
+  "memory.get": {
+    "method": "GET",
+    "path": "/v1/memory/memories/{id}",
+    "query": [
+      [
+        "subject",
+        "shared"
+      ],
+      [
+        "subject",
+        "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f"
+      ],
+      [
+        "reach.agent_id",
+        "5b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e"
+      ],
+      [
+        "reach.member_id",
+        "7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f"
+      ]
+    ],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "id": "0192f0c6-2b3c-7d4e-9f5a-6b7c8d9e0f1a",
+        "subject": "shared",
+        "kind": "decision",
+        "item_class": "fact",
+        "body": "The Q3 plan ships the importer in October.",
+        "confidence": 7,
+        "source_ref": null,
+        "as_of": "2026-10-05T09:00:00Z",
+        "created_at": "2026-10-07T12:00:00Z",
+        "valid_at": "2026-10-05T09:00:00Z",
+        "invalid_at": null,
+        "invalidated_by": null,
+        "superseded_by": "0192f0d0-4e5f-7a6b-8c7d-8e9f0a1b2c3d",
+        "retired_at": null,
+        "conversation_id": null,
+        "backend": "ufo",
+        "labels": {},
+        "sources": [
+          {
+            "kind": "page",
+            "page_id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+            "title": "Q3 plan",
+            "provider": "notion"
+          }
+        ]
+      }
+    }
+  },
+  "memory.correct": {
+    "method": "PATCH",
+    "path": "/v1/memory/memories/{id}",
+    "query": [],
+    "request": {
+      "body": "Alice prefers oolong tea.",
+      "subject": "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f",
+      "conversation_id": "da2a9c9f-66c8-4138-abda-34de2a7eab6f"
+    },
+    "answer": {
+      "status": 201,
+      "body": {
+        "id": "0192f0c4-8b6f-7d4c-ae3f-6a2b3c4d5e6f",
+        "subject": "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f",
+        "kind": "fact",
+        "item_class": "fact",
+        "body": "Alice prefers oolong tea.",
+        "confidence": 5,
+        "source_ref": "corrects memory/0192f0c4-7a5e-7c3b-9d2e-5f1a2b3c4d5e",
+        "as_of": null,
+        "created_at": "2026-10-07T12:05:00Z",
+        "valid_at": "2026-10-07T12:05:00Z",
+        "invalid_at": null,
+        "invalidated_by": null,
+        "superseded_by": null,
+        "retired_at": null,
+        "conversation_id": "da2a9c9f-66c8-4138-abda-34de2a7eab6f",
+        "backend": "ufo",
+        "labels": {},
+        "sources": [
+          {
+            "kind": "conversation",
+            "conversation_id": "da2a9c9f-66c8-4138-abda-34de2a7eab6f"
+          }
+        ]
+      }
+    }
+  },
+  "memory.delete": {
+    "method": "DELETE",
+    "path": "/v1/memory/memories/{id}",
+    "query": [],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "id": "0192f0c4-7a5e-7c3b-9d2e-5f1a2b3c4d5e",
+        "deleted_at": "2026-10-07T12:10:00Z"
+      }
+    }
+  },
+  "memory.delete_subject": {
+    "method": "DELETE",
+    "path": "/v1/memory/memories",
+    "query": [
+      [
+        "subject",
+        "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f"
+      ],
+      [
+        "source_ref_prefix",
+        "corrects memory/"
+      ]
+    ],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "subject": "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f",
+        "deleted": 3
+      }
+    }
+  },
+  "memory.settings": {
+    "method": "GET",
+    "path": "/v1/memory/settings",
+    "query": [],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "default_backend": "ufo",
+        "ingest": {
+          "sources": true
+        },
+        "retention_days": {
+          "fact": 3650,
+          "preference": 3650,
+          "decision": 1825,
+          "event": 365,
+          "task": 90
+        },
+        "consolidation": true
+      }
+    }
+  },
+  "memory.index": {
+    "method": "GET",
+    "path": "/v1/memory/index",
+    "query": [],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "pending": 12
+      }
+    }
+  },
+  "memory.pages": {
+    "method": "POST",
+    "path": "/v1/memory/pages",
+    "query": [],
+    "request": {
+      "pages": [
+        {
+          "page_id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+          "subject": "shared",
+          "revision": 413,
+          "indexed": true,
+          "tombstone": false,
+          "title": "Q3 plan",
+          "provider": "notion"
+        },
+        {
+          "page_id": "4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f7a",
+          "subject": "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f",
+          "revision": 414,
+          "indexed": false,
+          "tombstone": true,
+          "title": "",
+          "provider": "github"
+        }
+      ]
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "settled": 2
+      }
+    }
+  },
+  "memory.extract": {
+    "method": "POST",
+    "path": "/v1/memory/extract",
+    "query": [],
+    "request": {
+      "pages": [
+        {
+          "page_id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+          "source_id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+          "connection_id": "3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11",
+          "subject": "shared",
+          "revision": 413,
+          "as_of": "2026-10-01T09:00:00Z",
+          "facts": [
+            {
+              "body": "The Q3 plan ships the importer in October.",
+              "kind": "decision",
+              "confidence": 7
+            },
+            {
+              "body": "Dana owns the importer.",
+              "kind": "fact",
+              "confidence": 6
+            }
+          ]
+        }
+      ]
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "pages": [
+          {
+            "page_id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+            "outcome": "settled"
+          }
+        ]
+      }
+    }
+  },
+  "memory.consolidate.clusters": {
+    "method": "POST",
+    "path": "/v1/memory/consolidate",
+    "query": [],
+    "request": {
+      "pass": "clusters"
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "pass": "clusters",
+        "clusters": [
+          {
+            "subject": "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f",
+            "facts": [
+              {
+                "id": "0192f0b1-2c3d-7e4f-8a5b-6c7d8e9f0a1b",
+                "body": "Alice drinks tea in the morning.",
+                "confidence": 5
+              },
+              {
+                "id": "0192f0b2-3d4e-7f5a-9b6c-7d8e9f0a1b2c",
+                "body": "Alice has tea every morning.",
+                "confidence": 6
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "memory.consolidate.sections": {
+    "method": "POST",
+    "path": "/v1/memory/consolidate",
+    "query": [],
+    "request": {
+      "pass": "sections"
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "pass": "sections",
+        "bands": [
+          {
+            "subject": "shared",
+            "kind": "decision",
+            "facts": [
+              {
+                "body": "The Q3 plan ships the importer in October.",
+                "confidence": 7
+              },
+              {
+                "body": "The team reviews plans on Mondays.",
+                "confidence": 5
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "memory.consolidate.page": {
+    "method": "POST",
+    "path": "/v1/memory/consolidate",
+    "query": [],
+    "request": {
+      "pass": "page"
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "pass": "page",
+        "pages": [
+          {
+            "subject": "shared",
+            "bands": [
+              {
+                "kind": "decision",
+                "summary": "The importer ships in October.",
+                "rows": [
+                  {
+                    "id": "0192f0c5-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+                    "body": "The Q3 plan ships the importer in September."
+                  },
+                  {
+                    "id": "0192f0c6-2b3c-7d4e-9f5a-6b7c8d9e0f1a",
+                    "body": "The Q3 plan ships the importer in October."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "memory.consolidate_results.clusters": {
+    "method": "POST",
+    "path": "/v1/memory/consolidate/results",
+    "query": [],
+    "request": {
+      "pass": "clusters",
+      "summaries": [
+        {
+          "subject": "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f",
+          "body": "Alice drinks tea every morning.",
+          "donors": [
+            {
+              "id": "0192f0b1-2c3d-7e4f-8a5b-6c7d8e9f0a1b",
+              "body": "Alice drinks tea in the morning.",
+              "confidence": 5
+            },
+            {
+              "id": "0192f0b2-3d4e-7f5a-9b6c-7d8e9f0a1b2c",
+              "body": "Alice has tea every morning.",
+              "confidence": 6
+            }
+          ]
+        }
+      ]
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "written": [
+          "0192f0d0-4e5f-7a6b-8c7d-8e9f0a1b2c3d"
+        ],
+        "conflicts": [],
+        "retired": 0,
+        "refused": null
+      }
+    }
+  },
+  "memory.consolidate_results.sections": {
+    "method": "POST",
+    "path": "/v1/memory/consolidate/results",
+    "query": [],
+    "request": {
+      "pass": "sections",
+      "paragraphs": [
+        {
+          "subject": "shared",
+          "kind": "decision",
+          "body": "The importer ships in October and plans are reviewed on Mondays.",
+          "confidence": 6
+        }
+      ]
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "written": [
+          "0192f0d0-4e5f-7a6b-8c7d-8e9f0a1b2c3d"
+        ],
+        "conflicts": [],
+        "retired": 0,
+        "refused": null
+      }
+    }
+  },
+  "memory.consolidate_results.page": {
+    "method": "POST",
+    "path": "/v1/memory/consolidate/results",
+    "query": [],
+    "request": {
+      "pass": "page",
+      "subject": "shared",
+      "bands": [
+        [
+          "0192f0c6-2b3c-7d4e-9f5a-6b7c8d9e0f1a",
+          "0192f0c5-1a2b-7c3d-8e4f-5a6b7c8d9e0f"
+        ]
+      ],
+      "retire": [
+        {
+          "id": "0192f0c5-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+          "duplicate_of": "0192f0c6-2b3c-7d4e-9f5a-6b7c8d9e0f1a"
+        },
+        {
+          "id": "0192f0b1-2c3d-7e4f-8a5b-6c7d8e9f0a1b",
+          "duplicate_of": null
+        }
+      ]
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "written": [],
+        "conflicts": [],
+        "retired": 2,
+        "refused": null
+      }
+    }
+  },
+  "memory.import": {
+    "method": "POST",
+    "path": "/v1/memory/import",
+    "query": [],
+    "request": {
+      "records": [
+        {
+          "id": "0192f0c5-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+          "subject": "shared",
+          "body": "The Q3 plan ships the importer in September.",
+          "body_digest": "982a9ad60c3f8228f8013204946e310afed47521f48132f48a3e6236d90c6209",
+          "item_class": "fact",
+          "kind": "decision",
+          "confidence": 7,
+          "source_ref": null,
+          "page": {
+            "page_id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+            "revision": 412,
+            "source_id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+            "connection_id": "3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+          },
+          "conversation_id": null,
+          "as_of": "2026-10-01T09:00:00Z",
+          "superseded_by": "0192f0c6-2b3c-7d4e-9f5a-6b7c8d9e0f1a",
+          "overtaken_by": null,
+          "deprecates": [
+            "the importer"
+          ],
+          "swept_at": "2026-10-02T09:00:00Z",
+          "retired_at": null,
+          "created_at": "2026-10-01T09:00:00Z",
+          "updated_at": "2026-10-05T09:00:00Z"
+        },
+        {
+          "id": "0192f0c4-8b6f-7d4c-ae3f-6a2b3c4d5e6f",
+          "subject": "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f",
+          "body": "Alice asked for the Q3 plan's dates.",
+          "body_digest": "b96de776588ce692b289a4e9430a25a6a40a4a3314e16d1fcc00f238e92bf28b",
+          "item_class": "episodic",
+          "kind": "event",
+          "confidence": 4,
+          "source_ref": "first run",
+          "page": null,
+          "conversation_id": "da2a9c9f-66c8-4138-abda-34de2a7eab6f",
+          "as_of": null,
+          "superseded_by": null,
+          "overtaken_by": "0192f0c6-2b3c-7d4e-9f5a-6b7c8d9e0f1a",
+          "deprecates": null,
+          "swept_at": null,
+          "retired_at": "2026-10-07T12:10:00Z",
+          "created_at": "2026-10-07T12:00:00Z",
+          "updated_at": "2026-10-07T12:10:00Z"
+        }
+      ]
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "imported": 1,
+        "unchanged": 0,
+        "merged": [
+          {
+            "id": "0192f0c4-8b6f-7d4c-ae3f-6a2b3c4d5e6f",
+            "into": "0192f0c4-7a5e-7c3b-9d2e-5f1a2b3c4d5e"
+          }
+        ],
+        "unresolved": [
+          {
+            "id": "0192f0c5-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+            "pointer": "superseded_by",
+            "target": "0192f0c6-2b3c-7d4e-9f5a-6b7c8d9e0f1a"
+          }
+        ]
+      }
+    }
+  }
+}

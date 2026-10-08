@@ -1,0 +1,818 @@
+{
+  "files": {
+    "extensions/memory/ufo_ext_memory/prompts/consolidate.md": "0ebbac40e9546486dc84ccb003fbc0ff8fc03aa019f721435facb552e62c2e79",
+    "extensions/memory/ufo_ext_memory/prompts/corrections_section.md": "5de2186bedde63ff0e7d378b553a84c238c92c1db868732e4c259ab71aa808fb",
+    "extensions/memory/ufo_ext_memory/prompts/fact_extract.md": "dbb7ebbc78e67a0c722d684e82b2c28897c0f71ee51184882fd969d1e19936e8",
+    "extensions/memory/ufo_ext_memory/prompts/overview.md": "ab6ec54b7f78c73fdf7785e5308c292251ee354202ab64371776beaa6bc19404",
+    "extensions/memory/ufo_ext_memory/prompts/page_pass.md": "29237f47d3dd4395a741836cda423de9df1779b7a28ffd0f4da1cb4409578ebc",
+    "extensions/memory/ufo_ext_memory/prompts/people.md": "b23395e1b4f1053c3d9ffc859f647e04611027d71d38973eb84e66a85e075e78",
+    "extensions/memory/ufo_ext_memory/prompts/section.md": "c9109983adb3e980292278e039b9d956effc26b9f9ab2b91dbf476dc61c2ea55",
+    "extensions/research/ufo_ext_research/prompts/subagent_deep_research.md": "5e84b9c949fcde9814919485467540865d2120a9e454cc2f9e34b3445ce2d640",
+    "extensions/research/ufo_ext_research/prompts/subagent_research.md": "98140c0b1b8f53801d17ed342920b647fb1678bed58d7d328c3870fda7047cfd",
+    "extensions/research/ufo_ext_research/prompts/web_section.md": "cbfc2b1687efaa749e8a409bc8ccb88f74870ca6f4d31d5aa8bd6eef61b64709",
+    "extensions/research/ufo_ext_research/skills/competitive-intel/SKILL.md": "a0667616df208b02036527081581a4884c90b6850156f7d59ab0960eaa8f2b6a",
+    "extensions/research/ufo_ext_research/skills/research-assistant/SKILL.md": "301c8bcd23478ece15bdec7b0de3e2f8203cef396ffe1b812bd04421bba9df55",
+    "extensions/research/ufo_ext_research/skills/research-report/SKILL.md": "f87f391dc2e7f989aa104751c8470bae8a6dc8bc0bdd5cce4867ff770ce77fd8"
+  },
+  "kinds": {
+    "gbrain_source": {
+      "description": "A markdown page source: one GitHub repository or one serve-local directory, synced into memory for the member who registered it.",
+      "guidance": "Apply a manifest whose spec names a GitHub `repo` (owner/name); `branch` only refines `repo`, and unset tracks the repository's default branch. Names derive from the origin — a wrong name is refused with the exact derived name to re-apply, and changing repo or branch is a different source under its own name. Synced markdown lands in memory_search within about a minute of each sync; a file deleted from the repository or directory tombstones its page, and deleting the source removes them all. A private repository needs the workspace `github_token` credential; public repositories sync without it. A directory `root` is read-only here: it arrives from the deploy's [[sources]] config at boot, and an apply naming one is refused. An origin already registered privately by another member is refused whole; its registrar or an admin can share it. A source syncs privately to its registering member by default; set `shared: true` at apply — or in a later re-apply by the registrar — only when the member's words say the source is for the team. Unsharing is delete-and-recreate. To sync immediately, re-apply the current spec with `resync: true` (registrar or admin; it always reads back false). Delete is registrar-or-admin.",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Branch to track, only with repo; unset tracks the repository's default branch.",
+            "title": "Branch"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "GitHub repository as owner/name whose markdown files sync as pages. Set exactly one of repo or root.",
+            "title": "Repo"
+          },
+          "resync": {
+            "default": false,
+            "description": "Set true to schedule an immediate sync — an act, not state: it changes nothing else, always reads back false, and is the registering member's or a workspace admin's.",
+            "title": "Resync",
+            "type": "boolean"
+          },
+          "root": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Serve-local directory whose markdown files sync as pages. Read-only: a root arrives from the deploy's [[sources]] config at boot and cannot be applied in chat.",
+            "title": "Root"
+          },
+          "shared": {
+            "default": false,
+            "description": "Sync into the whole workspace's shared memory rather than privately to the registering member. Set it only when the member's words say the source is for the team.",
+            "title": "Shared",
+            "type": "boolean"
+          }
+        },
+        "title": "GbrainSpec",
+        "type": "object"
+      }
+    },
+    "memory": {
+      "description": "A stored memory item, readable by the id a memory_search ref carries. Read-only: memory_update records memories, consolidation supersedes them.",
+      "guidance": "Open a memory_search ref here to read the full item: its body, recall inputs, and links — pass the `created_from` target unchanged to object_get for the synced page the item was distilled from, and `superseded_by` names the item that replaced it. Search excludes superseded items, so reaching one through an old reference means follow `superseded_by` to the current statement before relying on it. Listing shows live items newest first (filter subject, item_class, or memory_kind, and order on `written`, the moment the item was recorded); search, not listing, is how memory is recalled. Reads follow the conversation audience. Apply and delete are refused — memory_update is the write path, and consolidation is how an item ends.",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the source information was current, ISO-8601.",
+            "title": "As Of"
+          },
+          "body": {
+            "description": "The stored memory text.",
+            "title": "Body",
+            "type": "string"
+          },
+          "confidence": {
+            "description": "Confidence 1-10; scales a fact's decayed recall rank.",
+            "title": "Confidence",
+            "type": "integer"
+          },
+          "item_class": {
+            "description": "fact, episodic, semantic, section, or overview.",
+            "title": "Item Class",
+            "type": "string"
+          },
+          "memory_kind": {
+            "description": "Recency-decay kind: fact, preference, decision, event, or task.",
+            "title": "Memory Kind",
+            "type": "string"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Free-form note on what produced the memory, when the writer gave one.",
+            "title": "Source Ref"
+          },
+          "subject": {
+            "description": "The exact visibility audience.",
+            "title": "Subject",
+            "type": "string"
+          }
+        },
+        "required": [
+          "body",
+          "subject",
+          "item_class",
+          "memory_kind",
+          "confidence",
+          "source_ref",
+          "as_of"
+        ],
+        "title": "MemorySpec",
+        "type": "object"
+      }
+    },
+    "page": {
+      "description": "A synced source page: one document the content-sync driver landed from a connected account's feed, read-only with an admin-only forget (delete). Created and updated only by the sync driver.",
+      "guidance": "List synced pages with exact `filters` on source_id, source, stream, title, created_at, or updated_at and `order_by` any of those fields; for example, filter one source's issues and order by created_at desc. Get by name returns those fields plus a bounded page body. Pages are landed by the content-sync driver, so create and update are refused; only a workspace admin can delete (forget) a page, which tombstones it and clears its derived index state. A source trigger's change alert references the changed pages by canonical ref so you can pass each one unchanged to object_get here.",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "description": "The page body, bounded to the first 65,536 UTF-8 bytes.",
+            "title": "Body",
+            "type": "string"
+          },
+          "body_ref": {
+            "description": "Reference to the page body in the blob store.",
+            "title": "Body Ref",
+            "type": "string"
+          },
+          "body_truncated": {
+            "description": "Whether the body exceeded the object read bound.",
+            "title": "Body Truncated",
+            "type": "boolean"
+          },
+          "created_at": {
+            "description": "The provider creation time, or first sync time.",
+            "title": "Created At",
+            "type": "string"
+          },
+          "digest": {
+            "description": "The content digest of the page body at last sync.",
+            "title": "Digest",
+            "type": "string"
+          },
+          "source": {
+            "description": "The content-source provider the page synced from.",
+            "title": "Source",
+            "type": "string"
+          },
+          "source_id": {
+            "description": "The stable id of the source row that landed the page.",
+            "title": "Source Id",
+            "type": "string"
+          },
+          "stream": {
+            "description": "The provider stream, such as issues or pull_requests.",
+            "title": "Stream",
+            "type": "string"
+          },
+          "subject": {
+            "description": "The page's visibility subject: 'shared' or 'member:<id>'.",
+            "title": "Subject",
+            "type": "string"
+          },
+          "title": {
+            "description": "The page's human-readable title.",
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "The provider update time, or last content change time.",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "source",
+          "stream",
+          "title",
+          "created_at",
+          "updated_at",
+          "subject",
+          "digest",
+          "body_ref",
+          "body_truncated",
+          "body"
+        ],
+        "title": "PageSpec",
+        "type": "object"
+      }
+    },
+    "profile": {
+      "description": "What the workspace knows about one of its members: the role they hold and the work they are carrying now, written nightly from the workspace's shared facts. Read-only.",
+      "guidance": "The People band's rows, named by member id — the same name the `member` kind's rows carry, so a profile and a roster row join on it. Each carries member_id, role (a short phrase), focus (one sentence on what that person is carrying now) and `written`, the moment the entry was recorded; listing orders on `written`, newest first. An entry exists only where the workspace's shared facts said something about that person, so a member with no entry is one nothing shared has been recorded about. Reads follow the conversation audience and never widen for an admin. Apply and delete are refused — the People pass is the write path, and what it can say is what memory_update and the synced sources put in shared memory.",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "focus": {
+            "description": "What they are carrying now, in one sentence.",
+            "title": "Focus",
+            "type": "string"
+          },
+          "role": {
+            "description": "What this person does in the workspace, in a short phrase.",
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "focus"
+        ],
+        "title": "ProfileSpec",
+        "type": "object"
+      }
+    },
+    "source_trigger": {
+      "description": "A standing wake-up on one shared connection's feed: the conversation wakes when a changed page starts to meet one of the trigger's `when` expressions. Only its creator or an admin may pause or delete it.",
+      "guidance": "Apply a manifest naming a shared connection with `delivery: current` to wake this conversation for each batch of changes. Set `when` to JMESPath expressions over each changed page, evaluated against `stream` (the page's stream name), `title`, and `page` (the provider's record) — for example \"page.url == 'https://github.com/acme/ufo/pull/7' && page.state == 'MERGED'\". The conversation wakes when a page STARTS to meet an expression: a page that met it before and meets it again reports nothing, so write one expression per event you want to hear rather than one expression that is true throughout. A link to a pull request or an issue earns a `<watch_offer>` carrying the expressions for it, so there is nothing to compose for the common case. Leave `when` empty to take the provider's own minimal set over the whole feed. At most 16 expressions, each at most 1000 characters; one that does not parse is refused here, and one that raises while running pauses the trigger and shows the error as `fault`, which resuming clears. Name it for what it watches — the name is unique across the workspace — and set `description` to the one line a listing shows it by. Applying the connection, the expressions and the conversation a trigger already has is refused as already watched, whatever name it carries. Delete it to stop, and delete it once the pull request or issue it watches is merged or closed — only its creator or a workspace admin may. A private or unknown connection cannot be watched. Disconnecting the account removes every trigger on it. Applying `paused: true` on a standing trigger stops it waking the conversation and keeps it; false wakes it again from the next batch. Pausing and `description` are the fields an apply may change — an apply naming a different connection or different expressions is refused, and an admin who did not create it may pause, resume or delete it and nothing else. Listing returns `connection`, `description`, `when`, `fault`, `delivery`, `paused`, the owning `conversation`, its creator (`owner_email`), `origin`, the `provider` whose feed it watches, and `last_run_at` — when it last woke a conversation, null until it has.",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "connection": {
+            "description": "The shared connection whose feed this trigger watches, by its connection object name.",
+            "title": "Connection",
+            "type": "string"
+          },
+          "delivery": {
+            "const": "current",
+            "default": "current",
+            "description": "Current delivery wakes this conversation for each batch of changes.",
+            "title": "Delivery",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "One listing line. Omitted on update preserves it; an empty string clears it.",
+            "examples": [
+              "metalcraftai/ufo#3657 — checks, reviews and merge"
+            ],
+            "title": "Description"
+          },
+          "paused": {
+            "default": false,
+            "description": "True stops the trigger waking its conversation without losing it; false wakes it again from the next batch of changes. It is the one field an apply on a standing trigger may change.",
+            "title": "Paused",
+            "type": "boolean"
+          },
+          "when": {
+            "default": [],
+            "description": "JMESPath expressions over each changed page. The conversation wakes when a page starts to meet one of them — meeting it again reports nothing, so write one expression per event you want to hear. Each is evaluated against `stream` (the page's stream name), `title`, and `page` (the provider's record). Leave it empty to take the provider's own minimal set for the whole feed.",
+            "items": {
+              "type": "string"
+            },
+            "title": "When",
+            "type": "array"
+          }
+        },
+        "required": [
+          "connection"
+        ],
+        "title": "SourceTriggerSpec",
+        "type": "object"
+      }
+    }
+  },
+  "sections": {
+    "memory:memory_corrections": "When a member corrects where something lives, who owns it, or what is current, record the current state as its own row and name each outdated claim in `deprecates`. A correction row without `deprecates` leaves earlier memory active. Use older text already in context, or call memory_search and then object_get if a search snippet omits the needed wording. Call memory_update after obtaining that text and before tools for any separate task in the message.",
+    "research:web": "<web>\nFor any question whose answer depends on real-world facts, search the web with search_web — never rely on memory alone for a factual claim, however confident you are. search_web is for current or time-sensitive information (news, prices, ongoing events) and for building expertise on a topic; fetch_url reads a specific URL's content, optionally extracting what you need with a prompt. To pull a raw file from a known public URL, use bash with curl.\n\nTreat a short, ambiguous, or search-engine-style message — a single word, a name, a brand, non-English or transliterated text — as a query: search it with your best interpretation and give a best-effort answer before concluding it is a mistake. Never reply with only a clarifying question when a message could plausibly be a search.\n\nWrite each query as a natural-language sentence stating what you want to know, never a keyword list, and carry filters in a parameter rather than in the query text: when a page was published in start_published_date/end_published_date, a site restriction in allowed_domains. The period you are asking about stays in the sentence — a page reporting a finished year is published after that year ends. Start broad and tighten those parameters only if results come back too general. Rephrasings of one question are one query at a higher num_results, never several near-duplicates; run parallel queries only for genuinely different topics.\n\nUse search_vertical instead of search_web when you need a specific content type: set vertical to academic for research papers and publications (prefer it over search_web for first-party sources), image for photos and illustrations, people for professional profiles, video for video content, or shopping for product listings.\n\n</web>"
+  },
+  "strings": {
+    "ALERT_CLOSING": "No member is reading. Do what this conversation set the watch for; write to the member only when the change needs them.",
+    "MEMORY_UNDELETABLE": "memories cannot be deleted — consolidation supersedes them and recall drops superseded items",
+    "MEMORY_UPDATE_REFUSAL": "memories are recorded through memory_update, never applied",
+    "PREFACE": "Answer from these passages when they answer the question. When the answer turns on live state, read that state with your tools. Name, in the sentence that states it, where every figure, date and name came from: a web passage by its address, a workspace passage by the record it names.\n",
+    "RECALL_CONTEXT_PREFIX": "Relevant memory:\n",
+    "RECALL_HEAD_PREFIX": "\n  now: ",
+    "RECALL_TRUNCATION_MARK": " …[truncated]",
+    "credential:gbrain:github_token": "GitHub token that opens private gbrain repositories; public repositories sync without it.",
+    "credential:sources:active_campaign": "BYOK API key for active_campaign feed-sync via the direct auth backend.",
+    "credential:sources:airtable": "BYOK API key for airtable feed-sync via the direct auth backend.",
+    "credential:sources:apollo": "BYOK API key for apollo feed-sync via the direct auth backend.",
+    "credential:sources:asana": "BYOK API key for asana feed-sync via the direct auth backend.",
+    "credential:sources:ashby": "BYOK API key for ashby feed-sync via the direct auth backend.",
+    "credential:sources:attio": "BYOK API key for attio feed-sync via the direct auth backend.",
+    "credential:sources:bamboohr": "BYOK API key for bamboohr feed-sync via the direct auth backend.",
+    "credential:sources:brex": "BYOK API key for brex feed-sync via the direct auth backend.",
+    "credential:sources:calendly": "BYOK API key for calendly feed-sync via the direct auth backend.",
+    "credential:sources:chargebee": "BYOK API key for chargebee feed-sync via the direct auth backend.",
+    "credential:sources:clickup": "BYOK API key for clickup feed-sync via the direct auth backend.",
+    "credential:sources:confluence": "BYOK API key for confluence feed-sync via the direct auth backend.",
+    "credential:sources:datadog_feed_api_key": "datadog_feed_api_key, read host-side for datadog feed-sync.",
+    "credential:sources:datadog_feed_application_key": "datadog_feed_application_key, read host-side for datadog feed-sync.",
+    "credential:sources:deel": "BYOK API key for deel feed-sync via the direct auth backend.",
+    "credential:sources:docusign": "BYOK API key for docusign feed-sync via the direct auth backend.",
+    "credential:sources:facebook_ads": "BYOK API key for facebook_ads feed-sync via the direct auth backend.",
+    "credential:sources:freshdesk": "BYOK API key for freshdesk feed-sync via the direct auth backend.",
+    "credential:sources:github": "BYOK API key for github feed-sync via the direct auth backend.",
+    "credential:sources:gmail": "BYOK API key for gmail feed-sync via the direct auth backend.",
+    "credential:sources:googleads": "BYOK API key for googleads feed-sync via the direct auth backend.",
+    "credential:sources:googlecalendar": "BYOK API key for googlecalendar feed-sync via the direct auth backend.",
+    "credential:sources:googledocs": "BYOK API key for googledocs feed-sync via the direct auth backend.",
+    "credential:sources:googledrive": "BYOK API key for googledrive feed-sync via the direct auth backend.",
+    "credential:sources:googlemeet": "BYOK API key for googlemeet feed-sync via the direct auth backend.",
+    "credential:sources:googlesheets": "BYOK API key for googlesheets feed-sync via the direct auth backend.",
+    "credential:sources:granola_mcp": "BYOK API key for granola_mcp feed-sync via the direct auth backend.",
+    "credential:sources:greenhouse": "BYOK API key for greenhouse feed-sync via the direct auth backend.",
+    "credential:sources:hubspot": "BYOK API key for hubspot feed-sync via the direct auth backend.",
+    "credential:sources:instagram": "BYOK API key for instagram feed-sync via the direct auth backend.",
+    "credential:sources:intercom": "BYOK API key for intercom feed-sync via the direct auth backend.",
+    "credential:sources:jira": "BYOK API key for jira feed-sync via the direct auth backend.",
+    "credential:sources:klaviyo": "BYOK API key for klaviyo feed-sync via the direct auth backend.",
+    "credential:sources:linear": "BYOK API key for linear feed-sync via the direct auth backend.",
+    "credential:sources:mailchimp": "BYOK API key for mailchimp feed-sync via the direct auth backend.",
+    "credential:sources:mercury": "BYOK API key for mercury feed-sync via the direct auth backend.",
+    "credential:sources:microsoft_teams": "BYOK API key for microsoft_teams feed-sync via the direct auth backend.",
+    "credential:sources:monday": "BYOK API key for monday feed-sync via the direct auth backend.",
+    "credential:sources:notion": "BYOK API key for notion feed-sync via the direct auth backend.",
+    "credential:sources:outlook": "BYOK API key for outlook feed-sync via the direct auth backend.",
+    "credential:sources:pagerduty": "BYOK API key for pagerduty feed-sync via the direct auth backend.",
+    "credential:sources:pandadoc": "BYOK API key for pandadoc feed-sync via the direct auth backend.",
+    "credential:sources:quickbooks": "BYOK API key for quickbooks feed-sync via the direct auth backend.",
+    "credential:sources:ramp": "BYOK API key for ramp feed-sync via the direct auth backend.",
+    "credential:sources:recruitee": "BYOK API key for recruitee feed-sync via the direct auth backend.",
+    "credential:sources:recurly": "BYOK API key for recurly feed-sync via the direct auth backend.",
+    "credential:sources:rippling": "BYOK API key for rippling feed-sync via the direct auth backend.",
+    "credential:sources:salesforce": "BYOK API key for salesforce feed-sync via the direct auth backend.",
+    "credential:sources:sentry": "BYOK API key for sentry feed-sync via the direct auth backend.",
+    "credential:sources:slack": "BYOK API key for slack feed-sync via the direct auth backend.",
+    "credential:sources:square": "BYOK API key for square feed-sync via the direct auth backend.",
+    "credential:sources:stripe": "BYOK API key for stripe feed-sync via the direct auth backend.",
+    "credential:sources:typeform": "BYOK API key for typeform feed-sync via the direct auth backend.",
+    "credential:sources:wrike": "BYOK API key for wrike feed-sync via the direct auth backend.",
+    "credential:sources:xero": "BYOK API key for xero feed-sync via the direct auth backend.",
+    "credential:sources:zendesk": "BYOK API key for zendesk feed-sync via the direct auth backend."
+  },
+  "tools": {
+    "action:memory:record_correction": {
+      "description": "Record the corrected statement of one memory item, as the portal's memory view does: a new item under the speaker's own audience naming the corrected item, which is superseded by it where both share that audience.",
+      "schema": {
+        "additionalProperties": false,
+        "description": "What a member states from the memory view: the item they are correcting and the statement\nthat replaces it. Everything else a recorded item carries — its class, kind, confidence, and the\nprovenance naming the corrected row — is the write's own to derive.",
+        "properties": {
+          "body": {
+            "description": "The corrected statement.",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Body",
+            "type": "string"
+          },
+          "corrects": {
+            "description": "The memory item this statement corrects.",
+            "format": "uuid",
+            "title": "Corrects",
+            "type": "string"
+          }
+        },
+        "required": [
+          "corrects",
+          "body"
+        ],
+        "title": "RecordCorrectionInput",
+        "type": "object"
+      }
+    },
+    "action:memory:record_first_run": {
+      "description": "Record what the team uses, as the portal's first run states it: one item under the speaker's own audience, named as the first run's.",
+      "schema": {
+        "additionalProperties": false,
+        "description": "What the first run states about the team: one sentence naming the tools they picked, written\nby the page from the catalog's own labels. Its class, kind, confidence, and provenance are the\nwrite's own.",
+        "properties": {
+          "body": {
+            "description": "What the team uses.",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Body",
+            "type": "string"
+          }
+        },
+        "required": [
+          "body"
+        ],
+        "title": "RecordFirstRunInput",
+        "type": "object"
+      }
+    },
+    "action:page:rebuild_page_facts": {
+      "description": "Write the workspace's page-derived facts again, for a workspace admin who says the wiki rows drawn from synced documents read badly. It marks every synced page due and returns: the derivation pass replaces each page's facts as it reaches them, and no row goes before its replacement is written. Rows drawn from a page the wiki derives nothing from at all — the streams a run of the machine writes about itself — are retired outright. It redoes nothing else — the wiki's paragraphs are the writing passes', and an item recorded through memory_update came from a conversation that cannot be held again. Use it for the whole workspace's page facts, never to change one row: a single wrong statement is corrected by recording the right one.",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "requested_by": {
+            "description": "Message ref that explicitly requested this call. Required for any member-specific authority or capability, including admin actions; omit only for conversation-common work.",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "title": "RebuildPageFactsInput",
+        "type": "object"
+      }
+    },
+    "action:workspace:export": {
+      "description": "",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "requested_by": {
+            "description": "Message ref that explicitly requested this call. Required for any member-specific authority or capability, including admin actions; omit only for conversation-common work.",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "title": "ExportInput",
+        "type": "object"
+      }
+    },
+    "connect_account": {
+      "description": "Connect an external account to this agent through OAuth when the member asks in chat to connect a provider (for example their Gmail or GitHub). The account is connected privately to the asking member by default — only their own turns (and their scheduled jobs) can use it; set `shared` only when they say it is for the team. This leaves a private connection control for the member who asked; tell them to use it and end your turn. Never invent or expose an authorization URL in the conversation.",
+      "schema": {
+        "properties": {
+          "agent": {
+            "default": "",
+            "description": "Grant the connection to this agent instead of yourself, by name. Only the workspace main agent may name another agent. Use it when a member asks you to finish setting up an agent that cannot ask for itself.",
+            "title": "Agent",
+            "type": "string"
+          },
+          "provider": {
+            "description": "The connector source_id to connect an account for, exactly as list_external_tools returns it (e.g. 'github', 'googlecalendar', 'notion'). Look it up there first rather than guessing — an unknown provider is refused.",
+            "title": "Provider",
+            "type": "string"
+          },
+          "requested_by": {
+            "description": "Message ref that explicitly requested this call. Required for any member-specific authority or capability, including admin actions; omit only for conversation-common work.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "shared": {
+            "default": false,
+            "description": "Connect the account for the whole workspace rather than privately to the speaking member. Set it only when the member's words say the account is for the team.",
+            "title": "Shared",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "title": "ConnectAccountInput",
+        "type": "object"
+      }
+    },
+    "fetch_url": {
+      "description": "Fetches content from an HTTP/HTTPS URL. Optionally extracts specific information via LLM prompt. Use to read web pages, documentation, articles, or any publicly accessible URL. Results are cached — use force_fetch=true if content appears stale. Fetches run through a crawler whose session is not yours: identity or account context in a response is the crawler's, so call APIs from bash instead of fetching them.",
+      "schema": {
+        "properties": {
+          "force_fetch": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Bypass cache and force a real-time fetch. Costly — only use when cached content appears outdated or incorrect.",
+            "title": "Force Fetch"
+          },
+          "max_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Maximum characters of raw content to return (~10k tokens). Increase for longer documents.",
+            "title": "Max Length"
+          },
+          "prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional LLM prompt to extract specific information. If omitted, returns raw page content. May summarize or truncate long documents.",
+            "title": "Prompt"
+          },
+          "url": {
+            "description": "The public URL to fetch. Must start with http:// or https://. Never pass local file paths or internal storage paths.",
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "FetchUrlInput",
+        "type": "object"
+      }
+    },
+    "memory_search": {
+      "description": "Search memory for facts, notes, and synced source documents, over the shared audience plus the exact member making this request. An explicit member request may search that member's private memory and sources even in a shared conversation; never treat that access as ambient for other members. Pass up to 3 distinct queries — they run in parallel and their results are merged and deduplicated. Optionally restrict to items written in a window with start_date/end_date (ISO-8601, e.g. 2026-01-31). Returns the best-matching items and document snippets, each with its object ref (memory/<id> or page/<id>) and date — pass the ref unchanged as object_get's `ref` to open the full item or page and follow its provenance links. Use it to recall context before answering.",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "end_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional ISO-8601 end of the window; a bare date covers its whole day.",
+            "title": "End Date"
+          },
+          "queries": {
+            "description": "Up to 3 distinct queries, each targeting ONE topic — multiple focused queries beat one vague catch-all. They run in parallel and their results are merged.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Queries",
+            "type": "array"
+          },
+          "requested_by": {
+            "description": "Message ref that explicitly requested this call. Required for any member-specific authority or capability, including admin actions; omit only for conversation-common work.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "start_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional ISO-8601 start of a created-at window to restrict results, e.g. '2026-01-31'.",
+            "title": "Start Date"
+          }
+        },
+        "required": [
+          "queries"
+        ],
+        "title": "MemorySearchInput",
+        "type": "object"
+      }
+    },
+    "memory_update": {
+      "description": "Record a durable memory item so later turns and conversations can recall it, and so it reads as one row of the member's wiki. Writes only to the current conversation audience: a private conversation writes that member's memory; a shared conversation writes shared memory. Use it as you learn what lasts — a name, role, company, team, colleague, preference, project, tool, or working style. Record what a person would act on or repeat months from now: a decision, an owner, a commitment, a date, a standing rule. Leave to the system the values it reports about itself and can read again on demand — a last-updated time, a count, an identifier, a status flag. When an older memory is wrong, save the current fact and quote an exact identifying phrase from each old row in `body`. Put the same phrases in `deprecates`. Each phrase must occur unchanged in the new `body`, or nothing is saved. Each must also match its old row to mark that row outdated; the tool does not verify that old-row match. Set `memory_kind` (fact/preference/decision/event/task) so recency decay matches how fast the item goes stale, and `confidence` (1-10) for how sure you are it is true. A one-off instruction ('make it shorter') belongs in the turn, in-task working state in workspace files or todo items, and per-run output in the delivered post or artifact.",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "description": "A standalone memory row in the third person. State the current fact. For a correction, quote each `deprecates` phrase unchanged after that fact and say the older claims are outdated. A correction can use more than one sentence, up to 2,000 characters.",
+            "maxLength": 2000,
+            "title": "Body",
+            "type": "string"
+          },
+          "confidence": {
+            "default": 5,
+            "description": "Confidence 1-10 in the fact; scales its recall score.",
+            "maximum": 10,
+            "minimum": 1,
+            "title": "Confidence",
+            "type": "integer"
+          },
+          "deprecates": {
+            "default": [],
+            "description": "One exact phrase from each outdated old row. Include the subject or namespace that identifies each claim; do not use only a generic suffix. Start and end at word boundaries, not inside a word or hyphenated name. Copy each phrase unchanged into this list and into `body`. Example: old rows contain 'SUBJECT_A CLAIM_A' and 'SUBJECT_B CLAIM_B'; body='SUBJECT — NEW_FACT. Earlier claims \"SUBJECT_A CLAIM_A\" and \"SUBJECT_B CLAIM_B\" are outdated.'; deprecates=['SUBJECT_A CLAIM_A', 'SUBJECT_B CLAIM_B']. Replace placeholders with old text. Empty only when no earlier memory is contradicted.",
+            "items": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "title": "Deprecates",
+            "type": "array"
+          },
+          "item_class": {
+            "default": "fact",
+            "description": "fact for something that stays true; episodic for a breadcrumb of what happened, which recall offers as a topic to open rather than quoting back.",
+            "enum": [
+              "fact",
+              "episodic"
+            ],
+            "title": "Item Class",
+            "type": "string"
+          },
+          "memory_kind": {
+            "default": "fact",
+            "description": "Memory kind (fact/preference/decision/event/task), which sets the recency-decay half-life; defaults to fact.",
+            "enum": [
+              "fact",
+              "preference",
+              "decision",
+              "event",
+              "task"
+            ],
+            "title": "Memory Kind",
+            "type": "string"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional reference to the source this fact came from.",
+            "title": "Source Ref"
+          }
+        },
+        "required": [
+          "body"
+        ],
+        "title": "MemoryUpdateInput",
+        "type": "object"
+      }
+    },
+    "search_vertical": {
+      "description": "Search specialized content verticals. Use instead of search_web when you need a specific content type: images, professional profiles, academic papers, videos, product listings, or the documents synced into this workspace.",
+      "schema": {
+        "properties": {
+          "query": {
+            "description": "A natural-language phrase for what you want, not a keyword list. E.g. 'photographs of a golden retriever puppy', 'transformer architectures for machine translation', 'John Smith, the CTO of Acme'.",
+            "title": "Query",
+            "type": "string"
+          },
+          "vertical": {
+            "description": "'image' for photos/illustrations, 'people' for finding professionals by name/role/company/location (NOT for company lookups), 'academic' for research papers/publications, 'video' for video content, 'shopping' for product listings with prices, 'internal' for the documents a connected account, folder, or site syncs into this workspace — searched over the shared audience plus the exact member making this request, answering each hit with its object ref (page/<id>) to pass unchanged to object_get.",
+            "enum": [
+              "image",
+              "people",
+              "academic",
+              "video",
+              "shopping",
+              "internal"
+            ],
+            "title": "Vertical",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vertical",
+          "query"
+        ],
+        "title": "SearchVerticalInput",
+        "type": "object"
+      }
+    },
+    "search_web": {
+      "description": "Searches the web for current and factual information. Returns results with titles, URLs, and content snippets. Best for news, prices, and time-sensitive data. Write each query as a natural-language sentence stating what you want to know, and carry filters in a parameter rather than in the query text: when a page was published in start_published_date/end_published_date, a site restriction in allowed_domains. The period you are asking about stays in the sentence — a page reporting a finished year is published after that year ends. One query at a higher num_results beats several rephrasings of it — send more than one query only for genuinely different topics.",
+      "schema": {
+        "properties": {
+          "allowed_domains": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only return results from these domains, e.g. ['nytimes.com', 'reuters.com']. Leave unset for all domains. Use this instead of site: syntax in queries.",
+            "title": "Allowed Domains"
+          },
+          "end_published_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only return pages published on or before this date (YYYY-MM-DD). This filters on when a page was published, not on the period it reports: sources for a finished year are published after that year ends, so a window closed at the period's end drops them.",
+            "title": "End Published Date"
+          },
+          "num_results": {
+            "anyOf": [
+              {
+                "maximum": 25,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "How many results each query returns, 1-25; defaults to 5. Raise it to cover one question broadly instead of firing near-duplicate queries.",
+            "title": "Num Results"
+          },
+          "queries": {
+            "description": "One natural-language sentence per query, stating the intent — not a keyword string. Max 5, and each must be a genuinely different topic: rephrasings of one question belong in a single query at a higher num_results. Keep publication filters, site: filters, and quotes out of the text — they belong in the parameters below; the period you are asking about stays in the sentence.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 5,
+            "title": "Queries",
+            "type": "array"
+          },
+          "start_published_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only return pages published on or after this date (YYYY-MM-DD). Recency constraints go here rather than into the query text.",
+            "title": "Start Published Date"
+          }
+        },
+        "required": [
+          "queries"
+        ],
+        "title": "SearchWebInput",
+        "type": "object"
+      }
+    },
+    "wide_research": {
+      "description": "Batch web-research tool. Takes a file with entities, companies, or topics (one per line) and researches each in PARALLEL using the research subagent to gather structured data. Results collected into a JSON file.",
+      "schema": {
+        "properties": {
+          "entities_file": {
+            "title": "Entities File",
+            "type": "string"
+          },
+          "output_schema_file": {
+            "title": "Output Schema File",
+            "type": "string"
+          },
+          "prompt_template": {
+            "title": "Prompt Template",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entities_file",
+          "prompt_template",
+          "output_schema_file"
+        ],
+        "title": "WideResearchInput",
+        "type": "object"
+      }
+    }
+  }
+}

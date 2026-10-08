@@ -1,0 +1,723 @@
+{
+  "sources.connect": {
+    "method": "POST",
+    "path": "/v1/sources",
+    "query": [],
+    "request": {
+      "provider": "github",
+      "secret": "connection:3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11",
+      "streams": "all",
+      "backfill_days": 30,
+      "subject": "shared",
+      "base_url": null,
+      "options": {},
+      "labels": {
+        "connection": "3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+      }
+    },
+    "answer": {
+      "status": 201,
+      "body": {
+        "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+        "items": [
+          {
+            "id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+            "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+            "provider": "github",
+            "stream": "issues",
+            "secrets": {
+              "authorization": "connection:3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+            },
+            "subject": "shared",
+            "base_url": null,
+            "options": {},
+            "backfill_days": 30,
+            "labels": {
+              "connection": "3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+            },
+            "next_sync_at": "2026-10-07T12:15:00Z",
+            "synced_at": "2026-10-07T12:00:00Z",
+            "consecutive_errors": 0,
+            "parked_at": null,
+            "parked_reason": null,
+            "awaits_grant": false,
+            "created_at": "2026-10-01T09:00:00Z",
+            "updated_at": "2026-10-07T12:00:00Z"
+          },
+          {
+            "id": "9f8e7d6c-5b4a-4392-8a1f-2e3d4c5b6a79",
+            "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+            "provider": "github",
+            "stream": "pull_requests",
+            "secrets": {
+              "authorization": "connection:3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+            },
+            "subject": "shared",
+            "base_url": null,
+            "options": {},
+            "backfill_days": 30,
+            "labels": {
+              "connection": "3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+            },
+            "next_sync_at": "2026-10-07T12:15:00Z",
+            "synced_at": "2026-10-07T12:00:00Z",
+            "consecutive_errors": 0,
+            "parked_at": null,
+            "parked_reason": null,
+            "awaits_grant": false,
+            "created_at": "2026-10-01T09:00:00Z",
+            "updated_at": "2026-10-07T12:00:00Z"
+          }
+        ]
+      }
+    }
+  },
+  "sources.list": {
+    "method": "GET",
+    "path": "/v1/sources",
+    "query": [
+      [
+        "connection_id",
+        "e84e4ecb-468e-440a-9fc6-02aa6d5a734a"
+      ],
+      [
+        "provider",
+        "github"
+      ],
+      [
+        "labels.connection",
+        "3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+      ],
+      [
+        "cursor",
+        "older|9f8e7d6c-5b4a-4392-8a1f-2e3d4c5b6a79"
+      ],
+      [
+        "limit",
+        "200"
+      ]
+    ],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+            "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+            "provider": "github",
+            "stream": "issues",
+            "secrets": {
+              "authorization": "connection:3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+            },
+            "subject": "shared",
+            "base_url": null,
+            "options": {},
+            "backfill_days": 30,
+            "labels": {
+              "connection": "3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+            },
+            "next_sync_at": "2026-10-07T12:15:00Z",
+            "synced_at": "2026-10-07T12:00:00Z",
+            "consecutive_errors": 0,
+            "parked_at": null,
+            "parked_reason": null,
+            "awaits_grant": false,
+            "created_at": "2026-10-01T09:00:00Z",
+            "updated_at": "2026-10-07T12:00:00Z"
+          },
+          {
+            "id": "9f8e7d6c-5b4a-4392-8a1f-2e3d4c5b6a79",
+            "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+            "provider": "github",
+            "stream": "pull_requests",
+            "secrets": {
+              "authorization": "connection:3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+            },
+            "subject": "shared",
+            "base_url": null,
+            "options": {},
+            "backfill_days": 30,
+            "labels": {
+              "connection": "3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+            },
+            "next_sync_at": null,
+            "synced_at": "2026-10-07T12:00:00Z",
+            "consecutive_errors": 3,
+            "parked_at": "2026-10-07T12:05:00Z",
+            "parked_reason": "The account needs a new grant.",
+            "awaits_grant": true,
+            "created_at": "2026-10-01T09:00:00Z",
+            "updated_at": "2026-10-07T12:05:00Z"
+          }
+        ],
+        "next_cursor": null
+      }
+    }
+  },
+  "sources.get": {
+    "method": "GET",
+    "path": "/v1/sources/{id}",
+    "query": [],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+        "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+        "provider": "github",
+        "stream": "issues",
+        "secrets": {
+          "authorization": "connection:3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+        },
+        "subject": "shared",
+        "base_url": null,
+        "options": {},
+        "backfill_days": 30,
+        "labels": {
+          "connection": "3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+        },
+        "next_sync_at": "2026-10-07T12:15:00Z",
+        "synced_at": "2026-10-07T12:00:00Z",
+        "consecutive_errors": 0,
+        "parked_at": null,
+        "parked_reason": null,
+        "awaits_grant": false,
+        "created_at": "2026-10-01T09:00:00Z",
+        "updated_at": "2026-10-07T12:00:00Z"
+      }
+    }
+  },
+  "sources.patch": {
+    "method": "PATCH",
+    "path": "/v1/sources/{id}",
+    "query": [],
+    "request": {
+      "subject": "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f",
+      "base_url": null,
+      "backfill_days": 90
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+        "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+        "provider": "github",
+        "stream": "issues",
+        "secrets": {
+          "authorization": "connection:3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+        },
+        "subject": "member:7c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f",
+        "base_url": null,
+        "options": {},
+        "backfill_days": 90,
+        "labels": {
+          "connection": "3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+        },
+        "next_sync_at": "2026-10-07T12:15:00Z",
+        "synced_at": "2026-10-07T12:00:00Z",
+        "consecutive_errors": 0,
+        "parked_at": null,
+        "parked_reason": null,
+        "awaits_grant": false,
+        "created_at": "2026-10-01T09:00:00Z",
+        "updated_at": "2026-10-07T12:00:00Z"
+      }
+    }
+  },
+  "sources.delete": {
+    "method": "DELETE",
+    "path": "/v1/sources/{id}",
+    "query": [],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+        "deleted_at": "2026-10-07T12:10:00Z"
+      }
+    }
+  },
+  "sources.sync": {
+    "method": "POST",
+    "path": "/v1/sources/{id}/sync",
+    "query": [],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+        "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+        "provider": "github",
+        "stream": "issues",
+        "secrets": {
+          "authorization": "connection:3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+        },
+        "subject": "shared",
+        "base_url": null,
+        "options": {},
+        "backfill_days": 30,
+        "labels": {
+          "connection": "3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+        },
+        "next_sync_at": "2026-10-07T12:15:00Z",
+        "synced_at": "2026-10-07T12:00:00Z",
+        "consecutive_errors": 0,
+        "parked_at": null,
+        "parked_reason": null,
+        "awaits_grant": false,
+        "created_at": "2026-10-01T09:00:00Z",
+        "updated_at": "2026-10-07T12:00:00Z"
+      }
+    }
+  },
+  "sources.page_upload": {
+    "method": "PUT",
+    "path": "/v1/sources/{id}/pages/{ref}",
+    "query": [],
+    "request": {
+      "title": "Handbook: on-call",
+      "body": "Page the on-call engineer through the incident channel first.",
+      "created_at": "2026-10-01T09:00:00Z",
+      "updated_at": "2026-10-07T12:00:00Z"
+    },
+    "answer": {
+      "status": 201,
+      "body": {
+        "id": "b1c2d3e4-f5a6-4b7c-8d9e-0f1a2b3c4d5e",
+        "source_id": "2c3d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f",
+        "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+        "provider": "upload",
+        "stream": "pages",
+        "title": "Handbook: on-call",
+        "subject": "shared",
+        "digest": "sha256:9b47f62704c877ed46f9f76ef303bae7d2ef589b4f95832bd45e63a770feefeb",
+        "revision": 415,
+        "indexed": true,
+        "as_of": "2026-10-01T09:00:00Z",
+        "created_at": "2026-10-01T09:00:00Z",
+        "updated_at": "2026-10-07T12:00:00Z"
+      }
+    }
+  },
+  "sources.pages_list": {
+    "method": "GET",
+    "path": "/v1/sources/pages",
+    "query": [
+      [
+        "source",
+        "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968"
+      ],
+      [
+        "stream",
+        "issues"
+      ],
+      [
+        "cursor",
+        "413|6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f"
+      ],
+      [
+        "limit",
+        "200"
+      ]
+    ],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+            "source_id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+            "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+            "provider": "github",
+            "stream": "issues",
+            "title": "Importer drops the last page",
+            "subject": "shared",
+            "digest": "sha256:4449d76d2db20afdfe70231a413f52110e3c8b4ae388ecf40d915c68c9c4bcb4",
+            "revision": 413,
+            "indexed": true,
+            "as_of": "2026-10-01T09:00:00Z",
+            "created_at": "2026-10-01T09:00:00Z",
+            "updated_at": "2026-10-07T12:00:00Z"
+          }
+        ],
+        "next_cursor": "413|6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f"
+      }
+    }
+  },
+  "sources.page_get": {
+    "method": "GET",
+    "path": "/v1/sources/pages/{id}",
+    "query": [],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+        "source_id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+        "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+        "provider": "github",
+        "stream": "issues",
+        "title": "Importer drops the last page",
+        "subject": "shared",
+        "digest": "sha256:4449d76d2db20afdfe70231a413f52110e3c8b4ae388ecf40d915c68c9c4bcb4",
+        "revision": 413,
+        "indexed": true,
+        "as_of": "2026-10-01T09:00:00Z",
+        "created_at": "2026-10-01T09:00:00Z",
+        "updated_at": "2026-10-07T12:00:00Z",
+        "body": "The importer drops the last page of a 200-row export.",
+        "body_truncated": false
+      }
+    }
+  },
+  "sources.pages_read": {
+    "method": "POST",
+    "path": "/v1/sources/pages/read",
+    "query": [],
+    "request": {
+      "ids": [
+        "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+        "4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f7a"
+      ]
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+            "source_id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+            "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+            "provider": "github",
+            "stream": "issues",
+            "title": "Importer drops the last page",
+            "subject": "shared",
+            "digest": "sha256:4449d76d2db20afdfe70231a413f52110e3c8b4ae388ecf40d915c68c9c4bcb4",
+            "revision": 413,
+            "indexed": true,
+            "as_of": "2026-10-01T09:00:00Z",
+            "created_at": "2026-10-01T09:00:00Z",
+            "updated_at": "2026-10-07T12:00:00Z"
+          }
+        ]
+      }
+    }
+  },
+  "sources.page_forget": {
+    "method": "DELETE",
+    "path": "/v1/sources/pages/{id}",
+    "query": [],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+        "tombstone": true,
+        "revision": 416
+      }
+    }
+  },
+  "sources.changes": {
+    "method": "GET",
+    "path": "/v1/sources/changes",
+    "query": [
+      [
+        "cursor",
+        "412|4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f7a"
+      ],
+      [
+        "limit",
+        "50"
+      ]
+    ],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "page_id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+            "source_id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+            "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+            "provider": "github",
+            "subject": "shared",
+            "stream": "issues",
+            "title": "Importer drops the last page",
+            "body": "The importer drops the last page of a 200-row export.",
+            "digest": "sha256:9c0e36118fb8e1962476591d02f0bfd2a6648807cd82d25bcdcdacbff26d969f",
+            "revision": 413,
+            "tombstone": false,
+            "indexed": true,
+            "as_of": "2026-10-01T09:00:00Z",
+            "created_at": "2026-10-01T09:00:00Z",
+            "changed_at": "2026-10-07T12:00:00Z"
+          },
+          {
+            "page_id": "4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f7a",
+            "source_id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+            "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+            "provider": "github",
+            "subject": "shared",
+            "stream": "issues",
+            "title": "",
+            "body": "",
+            "digest": "",
+            "revision": 414,
+            "tombstone": true,
+            "indexed": false,
+            "as_of": "2026-10-01T09:00:00Z",
+            "created_at": "2026-10-01T09:00:00Z",
+            "changed_at": "2026-10-07T12:00:00Z"
+          }
+        ],
+        "next_cursor": "414|4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f7a"
+      }
+    }
+  },
+  "sources.trigger_create": {
+    "method": "POST",
+    "path": "/v1/sources/triggers",
+    "query": [],
+    "request": {
+      "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+      "when": [
+        "contains(page.labels[].name, 'bug')"
+      ],
+      "events_url": "https://serve.test/ext/sources/alerts/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d/d5e6f7a8-b9c0-4d1e-9f2a-3b4c5d6e7f8a",
+      "subjects": [
+        "shared"
+      ],
+      "description": "Bugs filed against the importer.",
+      "labels": {
+        "trigger": "d5e6f7a8-b9c0-4d1e-9f2a-3b4c5d6e7f8a"
+      }
+    },
+    "answer": {
+      "status": 201,
+      "body": {
+        "id": "c4d5e6f7-a8b9-4c0d-8e1f-2a3b4c5d6e7f",
+        "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+        "when": [
+          "contains(page.labels[].name, 'bug')"
+        ],
+        "subjects": [
+          "shared"
+        ],
+        "events_url": "https://serve.test/ext/sources/alerts/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d/d5e6f7a8-b9c0-4d1e-9f2a-3b4c5d6e7f8a",
+        "description": "Bugs filed against the importer.",
+        "labels": {
+          "trigger": "d5e6f7a8-b9c0-4d1e-9f2a-3b4c5d6e7f8a"
+        },
+        "paused": false,
+        "fault": null,
+        "created_at": "2026-10-07T12:00:00Z",
+        "updated_at": "2026-10-07T12:00:00Z",
+        "events_secret": "9c1e4b7a2d5f8e0b3a6c9d2f5e8b1a4c7d0e3f6a9b2c5d8e1f4a7b0c3d6e9f2a"
+      }
+    }
+  },
+  "sources.triggers_list": {
+    "method": "GET",
+    "path": "/v1/sources/triggers",
+    "query": [
+      [
+        "cursor",
+        "older|c4d5e6f7-a8b9-4c0d-8e1f-2a3b4c5d6e7f"
+      ],
+      [
+        "limit",
+        "200"
+      ]
+    ],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "id": "c4d5e6f7-a8b9-4c0d-8e1f-2a3b4c5d6e7f",
+            "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+            "when": [
+              "contains(page.labels[].name, 'bug')"
+            ],
+            "subjects": [
+              "shared"
+            ],
+            "events_url": "https://serve.test/ext/sources/alerts/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d/d5e6f7a8-b9c0-4d1e-9f2a-3b4c5d6e7f8a",
+            "description": "Bugs filed against the importer.",
+            "labels": {
+              "trigger": "d5e6f7a8-b9c0-4d1e-9f2a-3b4c5d6e7f8a"
+            },
+            "paused": true,
+            "fault": "The clause names a field the page lacks.",
+            "created_at": "2026-10-07T12:00:00Z",
+            "updated_at": "2026-10-07T12:05:00Z"
+          }
+        ],
+        "next_cursor": null
+      }
+    }
+  },
+  "sources.trigger_patch": {
+    "method": "PATCH",
+    "path": "/v1/sources/triggers/{id}",
+    "query": [],
+    "request": {
+      "paused": true,
+      "description": "Bugs filed against the importer."
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "id": "c4d5e6f7-a8b9-4c0d-8e1f-2a3b4c5d6e7f",
+        "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+        "when": [
+          "contains(page.labels[].name, 'bug')"
+        ],
+        "subjects": [
+          "shared"
+        ],
+        "events_url": "https://serve.test/ext/sources/alerts/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d/d5e6f7a8-b9c0-4d1e-9f2a-3b4c5d6e7f8a",
+        "description": "Bugs filed against the importer.",
+        "labels": {
+          "trigger": "d5e6f7a8-b9c0-4d1e-9f2a-3b4c5d6e7f8a"
+        },
+        "paused": true,
+        "fault": null,
+        "created_at": "2026-10-07T12:00:00Z",
+        "updated_at": "2026-10-07T12:05:00Z"
+      }
+    }
+  },
+  "sources.trigger_delete": {
+    "method": "DELETE",
+    "path": "/v1/sources/triggers/{id}",
+    "query": [],
+    "request": null,
+    "answer": {
+      "status": 200,
+      "body": {
+        "id": "c4d5e6f7-a8b9-4c0d-8e1f-2a3b4c5d6e7f",
+        "deleted": true
+      }
+    }
+  },
+  "sources.import": {
+    "method": "POST",
+    "path": "/v1/sources/import",
+    "query": [],
+    "request": {
+      "revision_floor": 412,
+      "sources": [
+        {
+          "id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+          "provider": "github",
+          "stream": "issues",
+          "secret": "connection:3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11",
+          "options": {},
+          "subject": "shared",
+          "base_url": null,
+          "backfill_days": 30,
+          "labels": {
+            "connection": "3f0a1d5e-7c8b-4a2e-9d61-2b7c4e8f0a11"
+          },
+          "cursor": "2026-10-07T11:58:00Z",
+          "partition_cursor": null,
+          "synced_at": "2026-10-07T12:00:00Z",
+          "next_sync_at": "2026-10-07T12:15:00Z",
+          "consecutive_errors": 0,
+          "consecutive_refusals": 0,
+          "consecutive_empty": 2,
+          "parked_at": null,
+          "parked_reason": null,
+          "parked_since": null,
+          "parked_awaits_grant": false,
+          "created_at": "2026-10-01T09:00:00Z",
+          "updated_at": "2026-10-07T12:00:00Z"
+        }
+      ],
+      "pages": [
+        {
+          "id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+          "source_id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+          "source_identity": "issue:1042",
+          "digest": "sha256:9c0e36118fb8e1962476591d02f0bfd2a6648807cd82d25bcdcdacbff26d969f",
+          "body": "The importer drops the last page of a 200-row export.",
+          "stream": "issues",
+          "title": "Importer drops the last page",
+          "record_created_at": "2026-09-30T16:20:00Z",
+          "record_updated_at": "2026-10-01T09:00:00Z",
+          "parent_fields": {
+            "repository": "importer"
+          },
+          "subject": "shared",
+          "revision": 412,
+          "tombstone": false,
+          "indexed": true,
+          "created_at": "2026-10-01T09:00:00Z",
+          "updated_at": "2026-10-07T12:00:00Z"
+        }
+      ],
+      "triggers": [
+        {
+          "trigger_id": "c4d5e6f7-a8b9-4c0d-8e1f-2a3b4c5d6e7f",
+          "matched": [
+            {
+              "page_id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+              "clause": 0,
+              "met": true
+            }
+          ]
+        }
+      ]
+    },
+    "answer": {
+      "status": 200,
+      "body": {
+        "imported": 3
+      }
+    }
+  },
+  "sources.trigger_event": {
+    "method": "POST",
+    "path": "<events_url>",
+    "query": [],
+    "request": {
+      "id": "e6f7a8b9-c0d1-5e2f-8a3b-4c5d6e7f8a9b",
+      "type": "source.trigger",
+      "workspace_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "trigger_id": "c4d5e6f7-a8b9-4c0d-8e1f-2a3b4c5d6e7f",
+      "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+      "labels": {
+        "trigger": "d5e6f7a8-b9c0-4d1e-9f2a-3b4c5d6e7f8a"
+      },
+      "at": "2026-10-07T12:05:00Z",
+      "data": {
+        "pages": [
+          {
+            "page_id": "6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f",
+            "source_id": "8e7d6c5b-4a39-4281-9f0e-1d2c3b4a5968",
+            "connection_id": "e84e4ecb-468e-440a-9fc6-02aa6d5a734a",
+            "provider": "github",
+            "subject": "shared",
+            "stream": "issues",
+            "title": "Importer drops the last page",
+            "digest": "sha256:9c0e36118fb8e1962476591d02f0bfd2a6648807cd82d25bcdcdacbff26d969f",
+            "revision": 413,
+            "tombstone": false,
+            "indexed": true,
+            "as_of": "2026-10-01T09:00:00Z",
+            "created_at": "2026-10-01T09:00:00Z",
+            "changed_at": "2026-10-07T12:00:00Z"
+          }
+        ]
+      }
+    },
+    "answer": {
+      "status": 200,
+      "body": {}
+    }
+  }
+}
