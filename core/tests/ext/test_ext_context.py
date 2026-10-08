@@ -53,6 +53,7 @@ from ufo.harness.sandbox.session import (
 )
 from ufo.harness.sandbox.terminal import TerminalGone
 from ufo.host.ext.loader import turn_hooks, turn_tools
+from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.vault import SecretValue, VaultReads
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
@@ -1430,7 +1431,9 @@ async def test_only_a_vault_read_context_wired_with_the_vault_resolves_a_secret(
         ),
     )
     await store.put(workspace_id, slot.name, "sk-acme")
-    vault = VaultReads(store, WorkspaceSlots(deploy=(slot,)), {}, {})
+    vault = VaultReads(
+        store, WorkspaceSlots(deploy=(slot,)), {}, {}, {}, ConnectorRegistry(entries={}), {}
+    )
 
     with ws(workspace_id):
         resolved = await context_for(

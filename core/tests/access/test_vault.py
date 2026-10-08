@@ -16,7 +16,7 @@ from ufo.config import BlobConfig, Config, DatabaseConfig, ModelsConfig
 from ufo.db import workspace_tx
 from ufo.host.ext.loader import workspace_slot_source
 from ufo.proxy_serve import MODEL_KEY_ENVS
-from ufo.runtime.access.connectors import CliCredential, GitWire
+from ufo.runtime.access.connectors import CliCredential, ConnectorRegistry, GitWire
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
 from ufo.runtime.access.egress_rules import CONNECTION_SECRET_PREFIX, UFO_MODELS_SECRET
 from ufo.runtime.access.vault import SecretUnbound, SecretValue, VaultReads
@@ -121,6 +121,9 @@ def _vault(store: CredentialStore, broker: _Broker) -> VaultReads:
         workspace_slot_source((MANIFEST,)),
         {GITHUB: CliCredential(env="GH_TOKEN", header="authorization", secret=broker, git=GIT)},
         MODEL_KEY_ENVS(CONFIG),
+        {slot.name: slot for slot in MANIFEST.credentials},
+        ConnectorRegistry(entries={}),
+        {},
     )
 
 

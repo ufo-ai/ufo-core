@@ -22,13 +22,14 @@ from dataclasses import dataclass
 from ufo.sdk.authproxy import AuthProxySpec
 from ufo.sdk.context import CredentialAccess
 from ufo.sdk.jobs import JobSpec, feed_workspaces
-from ufo.sdk.manifest import CredentialSlot, HookSpec, Manifest, SourceProvider
+from ufo.sdk.manifest import HookSpec, Manifest, SourceProvider
 from ufo.sdk.sources import Connector, ConnectorBackend
 from ufo_ext_sources.connected import on_connection_recorded, retry_connected_sources
 from ufo_ext_sources.direct import DirectAuthProxy
+from ufo_ext_sources.feeds import FEED_SLOTS, FEEDS
 from ufo_ext_sources.pages import PAGE_OBJECT
 from ufo_ext_sources.providers.googleads import DEVELOPER_TOKEN_ENV
-from ufo_ext_sources.registry import CONNECTORS, direct_slots
+from ufo_ext_sources.registry import CONNECTORS
 from ufo_ext_sources.tools import SOURCE_TRIGGER_OBJECT, on_link_seen, on_page_change
 
 NAME = "sources"
@@ -36,30 +37,6 @@ VERSION = "0.1.0"
 DIRECT_BACKEND = "direct"
 CONNECTED_SOURCES_RETRY_JOB = "connected_sources_retry"
 CONNECTED_SOURCES_RETRY_SCHEDULE = "0 * * * * *"
-FEED_SLOTS = frozenset(
-    slot for connector in CONNECTORS.values() for slot in direct_slots(connector)
-)
-"""Every slot a keyed feed can start from, which is what makes a workspace holding one a candidate
-for the registrar's tick — the provider names alone would miss a provider whose keys are its own."""
-
-
-def _declared_slots(name: str, connector: type[Connector]) -> tuple[CredentialSlot, ...]:
-    """Named apart from the slots an extension swaps onto the sandbox wire, so a feed-sync key stays
-    host-side."""
-    if not connector.key_headers:
-        return (
-            CredentialSlot(
-                name=name,
-                description=f"BYOK API key for {name} feed-sync via the direct auth backend.",
-            ),
-        )
-    return tuple(
-        CredentialSlot(
-            name=slot,
-            description=f"{slot}, read host-side for {name} feed-sync.",
-        )
-        for slot in direct_slots(connector)
-    )
 
 
 @dataclass(frozen=True)
@@ -97,11 +74,7 @@ def manifest() -> Manifest:
             SourceProvider(backend=name, build=ConnectorSourceFactory(connector=cls))
             for name, cls in CONNECTORS.items()
         ),
-        credentials=tuple(
-            slot
-            for name, connector in CONNECTORS.items()
-            for slot in _declared_slots(name, connector)
-        ),
+        credentials=tuple(slot for feed in FEEDS.values() for slot in feed.slots),
         auth_proxies=(
             AuthProxySpec(
                 backend=DIRECT_BACKEND,

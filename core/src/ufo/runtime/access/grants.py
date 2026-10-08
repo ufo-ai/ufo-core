@@ -898,7 +898,7 @@ class GrantStore:
             updated = await connection.execute(
                 sa.update(tables.connection)
                 .values(
-                    base_url=_tenant_url(provider, base_url),
+                    base_url=tenant_url(provider, base_url),
                     backfill_days=backfill_days,
                     updated_at=sa.func.now(),
                 )
@@ -1373,7 +1373,9 @@ admin export the key by pointing a keyed feed at a host they control. The provid
 that URL: the request to it succeeds."""
 
 
-def _tenant_url(provider: str, base_url: str | None) -> str | None:
+def tenant_url(provider: str, base_url: str | None) -> str | None:
+    """The tenant URL `base_url` names for `provider`, normalized, or None when it is blank;
+    ValueError when the provider's `TENANT_URL_RULES` entry refuses it or it has none."""
     value = (base_url or "").strip()
     if not value:
         return None

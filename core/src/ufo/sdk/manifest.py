@@ -124,6 +124,9 @@ from ufo.runtime.ext.manifest import (
     EmbedBackendSpec as EmbedBackendSpec,
 )
 from ufo.runtime.ext.manifest import (
+    FeedRelease as FeedRelease,
+)
+from ufo.runtime.ext.manifest import (
     FlagProviderSpec as FlagProviderSpec,
 )
 from ufo.runtime.ext.manifest import (

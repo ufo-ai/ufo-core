@@ -134,7 +134,7 @@ from ufo.schema.records import (
 )
 
 if TYPE_CHECKING:
-    from ufo.runtime.access.vault import SecretValue, VaultReads
+    from ufo.runtime.access.vault import SecretDescription, SecretValue, VaultReads
 
 CORE_EXTENSION = "core"
 SPEND_REFUSAL_NOTICE_KEY = "spend_refusal_notice"
@@ -1513,6 +1513,16 @@ class ExtensionContext:
         if self.vault is None:
             raise RuntimeError("resolve_secret requires the deploy's vault; none is wired.")
         return await self.vault.resolve(self.workspace_id, name, host)
+
+    async def describe_secret(self, name: str) -> "SecretDescription":
+        """What the secret `name` is for the bound workspace, never its value, or `SecretUnbound`
+        for `ufo/models`, an undeclared name and a connection the workspace does not hold. Only a
+        manifest declaring `vault_read` asks, and the deploy's vault answers."""
+        if not self.vault_read_allowed:
+            raise PermissionError("This extension cannot describe secrets.")
+        if self.vault is None:
+            raise RuntimeError("describe_secret requires the deploy's vault; none is wired.")
+        return await self.vault.describe(self.workspace_id, name)
 
     def cloud_api(self) -> CloudApi:
         """The cloud API's client as the bound workspace, presenting the deploy's bearer for it.

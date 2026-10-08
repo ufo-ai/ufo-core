@@ -109,6 +109,17 @@ class WorkspaceCredentials:
 
 
 @dataclass(frozen=True)
+class FeedRelease:
+    """Where a sources feed may present a slot's value: the feed's `provider`, its fixed `hosts`,
+    and `tenant` when the host of the workspace's keyed connection to that provider, as
+    `TENANT_URL_RULES` admits it, takes the value too."""
+
+    provider: str
+    hosts: tuple[str, ...]
+    tenant: bool
+
+
+@dataclass(frozen=True)
 class CredentialSlot:
     """A named secret an extension needs. With an InjectionTarget the proxy swaps it onto the
     wire so the sandbox never holds it; without one it is readable only in-process.
@@ -116,17 +127,23 @@ class CredentialSlot:
     A slot holds one secret, and its fill state is the whole of what a read can say. A `minted`
     slot holds a value the extension mints and reissues itself through `credentials.put`: no member
     hands it over, so no member-facing projection offers it, and the proxy never injects it. Only a
-    first-party distribution declares one."""
+    first-party distribution declares one. A `feed` names the hosts the proxy may receive this
+    slot's value on when a sources feed binds it."""
 
     name: str
     description: str
     injection: InjectionTarget | None = None
     minted: bool = False
+    feed: FeedRelease | None = None
 
     def __post_init__(self) -> None:
         if self.minted and self.injection is not None:
             raise ValueError(
                 f"Minted credential slot {self.name!r} cannot carry an injection target."
+            )
+        if self.feed is not None and self.injection is not None:
+            raise ValueError(
+                f"Feed credential slot {self.name!r} cannot carry an injection target."
             )
 
 

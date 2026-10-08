@@ -21,7 +21,7 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        connector_resolver=ComposioResolver(broker=broker),
+        connector_resolver=ComposioResolver(broker=broker, name=NAME),
         routes=(
             RouteSpec(
                 method="GET",

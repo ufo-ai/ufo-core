@@ -42,12 +42,12 @@ from ufo.runtime.access.grants import (
     GrantSummary,
     OAuthAccount,
     UnknownProvider,
-    _tenant_url,
     cli_accounts,
     connection_summaries,
     grant_sentinel,
     grant_summaries,
     install_connect_flow,
+    tenant_url,
 )
 from ufo.runtime.agent_scope import AgentUnbound, agent
 from ufo.runtime.billing.accounting import UNGATED_LEDGER
@@ -2420,18 +2420,18 @@ REFUSED_TENANT_URLS = (
 
 
 def test_a_tenant_url_is_admitted_only_under_its_providers_rule() -> None:
-    assert _tenant_url("zendesk", "https://acme.zendesk.com") == "https://acme.zendesk.com"
-    assert _tenant_url("zendesk", "https://acme.zendesk.com/") == "https://acme.zendesk.com"
-    assert _tenant_url("zendesk", "  https://acme.zendesk.com/  ") == "https://acme.zendesk.com"
+    assert tenant_url("zendesk", "https://acme.zendesk.com") == "https://acme.zendesk.com"
+    assert tenant_url("zendesk", "https://acme.zendesk.com/") == "https://acme.zendesk.com"
+    assert tenant_url("zendesk", "  https://acme.zendesk.com/  ") == "https://acme.zendesk.com"
     assert (
-        _tenant_url("quickbooks", "https://quickbooks.api.intuit.com/v3/company/4620816365/")
+        tenant_url("quickbooks", "https://quickbooks.api.intuit.com/v3/company/4620816365/")
         == "https://quickbooks.api.intuit.com/v3/company/4620816365"
     )
 
     for provider in ("github", "zendesk"):
-        assert _tenant_url(provider, None) is None
-        assert _tenant_url(provider, "") is None
-        assert _tenant_url(provider, "   ") is None
+        assert tenant_url(provider, None) is None
+        assert tenant_url(provider, "") is None
+        assert tenant_url(provider, "   ") is None
 
     for exfiltrating in (
         "https://api.github.com",
@@ -2439,7 +2439,7 @@ def test_a_tenant_url_is_admitted_only_under_its_providers_rule() -> None:
         "https://evil.example.com",
     ):
         with pytest.raises(ValueError, match="'github' has a fixed API host"):
-            _tenant_url("github", exfiltrating)
+            tenant_url("github", exfiltrating)
 
     for foreign in (
         "https://evil.example.com",
@@ -2447,24 +2447,24 @@ def test_a_tenant_url_is_admitted_only_under_its_providers_rule() -> None:
         "https://acme.zendesk.com/api/v2",
     ):
         with pytest.raises(ValueError, match=re.escape("https://<subdomain>.zendesk.com")):
-            _tenant_url("zendesk", foreign)
+            tenant_url("zendesk", foreign)
 
     with pytest.raises(ValueError, match=re.escape("/v3/company/<realmId>")):
-        _tenant_url("quickbooks", "https://quickbooks.api.intuit.com")
+        tenant_url("quickbooks", "https://quickbooks.api.intuit.com")
 
     for site in ("api.datadoghq.com", "api.us5.datadoghq.com", "api.datadoghq.eu"):
-        assert _tenant_url("datadog", f"https://{site}/") == f"https://{site}"
+        assert tenant_url("datadog", f"https://{site}/") == f"https://{site}"
     for wrong_site in (
         "https://api.us9.datadoghq.com",
         "https://api.datadoghq.com.evil.example.com",
         "https://api.datadoghq.com/api/v1",
     ):
         with pytest.raises(ValueError, match=re.escape("https://api.datadoghq.com")):
-            _tenant_url("datadog", wrong_site)
+            tenant_url("datadog", wrong_site)
 
     for refused in REFUSED_TENANT_URLS:
         with pytest.raises(ValueError, match="base_url"):
-            _tenant_url("zendesk", refused)
+            tenant_url("zendesk", refused)
 
 
 async def test_set_feed_stores_what_the_streams_dial_and_how_far_back_they_reach(db: None) -> None:

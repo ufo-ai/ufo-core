@@ -14,6 +14,7 @@ from pathlib import Path
 from sys import stdlib_module_names
 from typing import TYPE_CHECKING
 
+from ufo_ext_sources.feeds import FEEDS, Feed
 from ufo_ext_sources.registry import CONNECTORS
 
 from ufo.harness.o11y import HISTOGRAMS, METRICS, UP_DOWN_METRICS, MetricSpec
@@ -1092,27 +1093,18 @@ def _canonical_stream_failures() -> list[str]:
     return failures
 
 
-def _tenant_rule_failures() -> list[str]:
-    """`TENANT_URL_RULES` is the only guard between an admin and a feed that sends the workspace
-    credential to a host they control."""
-    per_tenant = {
-        name
-        for name, connector_type in CONNECTORS.items()
-        if not connector_type.base_url and connector_type.dials_host
-    }
+def _tenant_rule_failures(feeds: Mapping[str, Feed]) -> list[str]:
+    """`TENANT_URL_RULES` is the only guard between an admin and a feed that sends the workspace's
+    key to a host they control."""
+    tenant = {feed.provider for feed in feeds.values() if feed.tenant}
     ruled = set(TENANT_URL_RULES)
-    failures = []
-    for name in sorted(per_tenant - ruled):
-        failures.append(
-            f"connector {name!r} declares no fixed base_url and TENANT_URL_RULES names no rule for "
-            "it — its connections can never take a tenant URL"
-        )
-    for name in sorted(ruled - per_tenant):
-        failures.append(
-            f"TENANT_URL_RULES names {name!r} but that connector declares a fixed base_url — the "
-            "rule admits a host the connector never dials"
-        )
-    return failures
+    return [
+        f"The feed {name!r} is released on a tenant URL that TENANT_URL_RULES names no rule for."
+        for name in sorted(tenant - ruled)
+    ] + [
+        f"TENANT_URL_RULES names {name!r} but no tenant feed is released on it."
+        for name in sorted(ruled - tenant)
+    ]
 
 
 def _init_code_failures(trees: dict[Path, ast.Module]) -> list[str]:
@@ -1998,7 +1990,7 @@ def main() -> int:
         if calls.count(name) == 1 and name not in exported
     )
     failures.extend(_canonical_stream_failures())
-    failures.extend(_tenant_rule_failures())
+    failures.extend(_tenant_rule_failures(FEEDS))
     failures.extend(_init_code_failures(trees))
     failures.extend(_raw_blob_failures(trees))
     failures.extend(_admission_construction_failures(trees))

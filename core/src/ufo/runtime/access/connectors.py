@@ -299,11 +299,13 @@ class CliCredential:
 @dataclass(frozen=True)
 class ConnectorEntry:
     """One installed connector as the registry holds it: the provider name that keys it, the
-    member-facing label the discovery tool lists, and the broker that serves it."""
+    member-facing label the discovery tool lists, the broker that serves it, and `broker_name`, the
+    extension that registers that broker."""
 
     provider: str
     label: str
     broker: ConnectorBroker
+    broker_name: str | None = None
 
 
 @dataclass(frozen=True)

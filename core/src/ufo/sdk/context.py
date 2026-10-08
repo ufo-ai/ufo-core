@@ -21,6 +21,9 @@ from ufo.runtime.access.credentials import (
     CredentialSlotUnset as CredentialSlotUnset,
 )
 from ufo.runtime.access.vault import (
+    SecretDescription as SecretDescription,
+)
+from ufo.runtime.access.vault import (
     SecretUnbound as SecretUnbound,
 )
 from ufo.runtime.access.vault import (

@@ -22,11 +22,12 @@ from ufo_ext_composio.provider import ComposioOAuthProvider
 
 @dataclass(frozen=True)
 class ComposioResolver:
-    """Composio's open namespace over one shared broker. Stateless beyond the broker — the client
-    and its key are read per call, so a test's transport override is honoured and no connection
-    leaks."""
+    """Composio's open namespace over one shared broker, every entry naming `name`, the extension
+    that serves it. Stateless beyond the broker — the client and its key are read per call, so a
+    test's transport override is honoured and no connection leaks."""
 
     broker: ConnectorBroker
+    name: str
 
     @property
     def transfer_hosts(self) -> tuple[str, ...]:
@@ -42,7 +43,10 @@ class ComposioResolver:
 
     def entry(self, provider: str) -> ConnectorEntry:
         return ConnectorEntry(
-            provider=provider, label=provider.replace("_", " ").title(), broker=self.broker
+            provider=provider,
+            label=provider.replace("_", " ").title(),
+            broker=self.broker,
+            broker_name=self.name,
         )
 
     async def catalog(

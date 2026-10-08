@@ -1,4 +1,5 @@
 import ast
+import dataclasses
 import importlib.util
 import tomllib
 from collections import defaultdict
@@ -1078,6 +1079,25 @@ def _check_metric_and_deploy_key_gates_hold_over_the_tree() -> None:
         "PIPEDREAM_CLIENT_SECRET",
         "PIPEDREAM_PROJECT_ID",
     }
+
+
+def test_tenant_feeds_are_the_tenant_rules() -> None:
+    missing = {
+        **gates.FEEDS,
+        "datadog": dataclasses.replace(gates.FEEDS["datadog"], tenant=False),
+    }
+    widened = {
+        **gates.FEEDS,
+        "github": dataclasses.replace(gates.FEEDS["github"], tenant=True),
+    }
+
+    assert gates._tenant_rule_failures(gates.FEEDS) == []
+    assert gates._tenant_rule_failures(missing) == [
+        "TENANT_URL_RULES names 'datadog' but no tenant feed is released on it."
+    ]
+    assert gates._tenant_rule_failures(widened) == [
+        "The feed 'github' is released on a tenant URL that TENANT_URL_RULES names no rule for."
+    ]
 
 
 def test_repository_gates() -> None:

@@ -640,6 +640,9 @@ def run(fleet: Fleet) -> None:
             workspace_slot_source(manifests),
             connector_clis(manifests),
             MODEL_KEY_ENVS(config),
+            {slot.name: slot for manifest in manifests for slot in manifest.credentials},
+            connectors,
+            self_user_ids,
         ),
     )
     _mount_shared_surfaces(
@@ -1665,7 +1668,10 @@ def _connector_entries(manifests: tuple[Manifest, ...]) -> dict[str, ConnectorEn
             if provider in entries:
                 raise RuntimeError(f"two extensions register connector provider {provider!r}")
             entries[provider] = ConnectorEntry(
-                provider=provider, label=connector.label, broker=connector.broker
+                provider=provider,
+                label=connector.label,
+                broker=connector.broker,
+                broker_name=manifest.name,
             )
     return entries
 
