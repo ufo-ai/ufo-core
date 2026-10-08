@@ -88,6 +88,8 @@ pub enum MeterRecord {
         usage: Usage,
     },
     Metric {
+        #[serde(default)]
+        workspace_id: Option<Uuid>,
         host: String,
         dimension: String,
     },

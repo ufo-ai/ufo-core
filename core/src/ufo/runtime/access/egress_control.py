@@ -100,6 +100,7 @@ class TokenMeterRecord(BaseModel):
 
 class MetricMeterRecord(BaseModel):
     kind: Literal["metric"]
+    workspace_id: UUID | None = None
     host: str
     dimension: str
 
@@ -188,11 +189,12 @@ class EgressControl:
     async def _meter(self, body: MeterRequest) -> dict[str, object]:
         egress: dict[tuple[UUID, UUID | None], int] = {}
         tokens: dict[tuple[UUID, UUID | None], dict[str, Usage]] = {}
-        counter: dict[tuple[str, str], int] = {}
+        counter: dict[tuple[str, str, UUID | None], int] = {}
         for record in body.records:
             match record:
-                case MetricMeterRecord(host=host, dimension=dimension):
-                    counter[(host, dimension)] = counter.get((host, dimension), 0) + 1
+                case MetricMeterRecord(host=host, dimension=dimension, workspace_id=workspace_id):
+                    key = (host, dimension, workspace_id)
+                    counter[key] = counter.get(key, 0) + 1
                     continue
                 case _:
                     billed = (record.workspace_id, record.turn_id)
@@ -217,8 +219,12 @@ class EgressControl:
                             previous.cache_write_1h_tokens + added.cache_write_1h_tokens
                         ),
                     )
-        for (host, dimension), amount in counter.items():
-            emit_metric("sandbox_egress_total", amount, host=host, dimension=dimension)
+        for (host, dimension, ws_id), amount in counter.items():
+            if ws_id is None:
+                emit_metric("sandbox_egress_total", amount, host=host, dimension=dimension)
+            else:
+                with ws(ws_id):
+                    emit_metric("sandbox_egress_total", amount, host=host, dimension=dimension)
         for workspace_id, turn_id in {*egress, *tokens}:
             with ws(workspace_id):
                 async with workspace_tx() as connection:

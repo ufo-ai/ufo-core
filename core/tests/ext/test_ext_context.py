@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import ANY
 from uuid import UUID, uuid4
 
 import pytest
@@ -236,7 +237,7 @@ def _exported_metrics(
     }
 
 
-async def _turn(model: ModelClient, job: str = JOB) -> Message:
+async def _turn(model: ModelClient, job: str = JOB) -> tuple[Message, UUID]:
     context = context_for(
         "core",
         frozenset(),
@@ -246,8 +247,9 @@ async def _turn(model: ModelClient, job: str = JOB) -> Message:
         ledger=UNGATED_LEDGER,
     )
     assert context.model is not None
-    with ws(await _workspace()):
-        return await context.model.turn(
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        message = await context.model.turn(
             ModelRequest(
                 model="auto",
                 system="be terse",
@@ -256,6 +258,7 @@ async def _turn(model: ModelClient, job: str = JOB) -> Message:
                 conversation_cache_ttl="5m",
             )
         )
+    return message, workspace_id
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -264,7 +267,7 @@ async def test_model_turn_opens_a_tool_calling_message_with_its_reasoning_blocks
 ) -> None:
     """The seam re-sends this message when a handler feeds the tool result back, so it carries the
     round's reasoning ahead of the tool calls the signature authenticates."""
-    assert (await _turn(ReasoningModel(with_tool=True))).content == (
+    assert (await _turn(ReasoningModel(with_tool=True)))[0].content == (
         RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
         ThinkingBlock(thinking="", signature="sig-1"),
         ReasoningItemBlock(id="rs_1", encrypted_content="Z3B0LWVuY3J5cHRlZA"),
@@ -390,7 +393,8 @@ async def test_a_background_call_meters_its_tokens_and_latency_under_its_job(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     reader = _metric_capture(monkeypatch)
-    assert (await _turn(CachingModel())).content == "summarized"
+    message, workspace_id = await _turn(CachingModel())
+    assert message.content == "summarized"
     points = _exported_metrics(reader)
     assert {
         (point.attributes["kind"], point.value) for point in points["ufo.model_round_tokens_total"]
@@ -412,6 +416,7 @@ async def test_a_background_call_meters_its_tokens_and_latency_under_its_job(
                 "provider": PROVIDER_ANTHROPIC,
                 "profile": BACKGROUND_PROFILE,
                 "job": JOB,
+                "workspace_id": str(workspace_id),
             },
         )
     ]
@@ -433,8 +438,12 @@ async def test_a_failed_background_call_meters_its_latency_with_the_error_class(
             "profile": BACKGROUND_PROFILE,
             "job": JOB,
             "error_class": "TimeoutError",
+            "workspace_id": ANY,
         }
     ]
+    assert all(
+        len(point.attributes["workspace_id"]) == 36 for point in points["ufo.model_round_ms"]
+    )
     assert "ufo.model_round_tokens_total" not in points
 
 

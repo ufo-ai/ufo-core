@@ -10,10 +10,13 @@ import pytest
 import sqlalchemy as sa
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_sample.spend import CHARGE_TABLE, SampleGate
 
 from ufo.db import workspace_tx
+from ufo.harness import o11y
 from ufo.harness.models.catalog import CORE_PRICING
 from ufo.harness.sandbox.cache import CACHE_HOST
 from ufo.harness.sandbox.preview import PREVIEW_AUTH_HEADER, PREVIEW_HOST, PREVIEW_SENTINEL
@@ -37,7 +40,7 @@ from ufo.runtime.access.egress_rules import (
 )
 from ufo.runtime.access.grants import GrantStore, grant_sentinel
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.billing.accounting import Ledger
+from ufo.runtime.billing.accounting import EGRESS_DIMENSION, Ledger
 from ufo.runtime.billing.spend import GateDeploy
 from ufo.runtime.tools.bridge import (
     TOOL_BRIDGE_HOST,
@@ -48,6 +51,7 @@ from ufo.runtime.tools.bridge import (
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import TurnRuntimeConfig
+from ufo.serve import WorkspaceScopeBoundary
 
 CONTROL_TOKEN = "egress-control-secret"
 CACHE_TOKEN = "egress-cache-secret"
@@ -852,11 +856,15 @@ async def test_meter_folds_unpriced_cache_write_30m_into_input(monkeypatch, db: 
     assert captured["claude-opus-4-8"].input_tokens == 6000
 
 
-async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(monkeypatch) -> None:
-    calls: list[tuple[str, int, str, str]] = []
+async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(
+    db: None, monkeypatch
+) -> None:
+    calls: list[tuple[str, int, str, str, bool]] = []
     monkeypatch.setattr(
         "ufo.runtime.access.egress_control.emit_metric",
-        lambda name, amount, **dims: calls.append((name, amount, dims["host"], dims["dimension"])),
+        lambda name, amount, **dims: calls.append(
+            (name, amount, dims["host"], dims["dimension"], "workspace_id" in dims)
+        ),
     )
     resolver = PerAgentRules(base=(), grants=None)
     async with _client(_control(resolver)) as client:
@@ -873,9 +881,74 @@ async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(mon
         )
     assert response.json() == {}
     assert set(calls) == {
-        ("sandbox_egress_total", 2, "api.anthropic.com", "tokens"),
-        ("sandbox_egress_total", 1, "github.com", "requests"),
+        ("sandbox_egress_total", 2, "api.anthropic.com", "tokens", False),
+        ("sandbox_egress_total", 1, "github.com", "requests", False),
     }
+
+
+async def test_meter_tags_each_workspace_after_the_request_boundary(db, monkeypatch) -> None:
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    seeded, resolver, _tokens = await _seed_git_cli()
+    other_workspace = uuid4()
+    app = FastAPI()
+    app.include_router(_control(resolver).router())
+    app.add_middleware(WorkspaceScopeBoundary)
+    with ws(uuid4()):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://serve") as client:
+            response = await client.post(
+                "/internal/egress/meter",
+                headers=_auth(),
+                json={
+                    "records": [
+                        {"kind": "metric", "host": HOST, "dimension": "requests"},
+                        {
+                            "kind": "metric",
+                            "host": HOST,
+                            "dimension": "requests",
+                            "workspace_id": str(seeded.workspace_id),
+                        },
+                        {
+                            "kind": "metric",
+                            "host": HOST,
+                            "dimension": "requests",
+                            "workspace_id": str(other_workspace),
+                        },
+                        {
+                            "kind": "egress",
+                            "workspace_id": str(seeded.workspace_id),
+                            "turn_id": str(seeded.turn_id),
+                        },
+                    ]
+                },
+            )
+    assert response.status_code == 200
+    points = [
+        (dict(point.attributes), point.value)
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "ufo.sandbox_egress_total"
+        for point in metric.data.data_points
+    ]
+    assert points == [
+        ({"host": HOST, "dimension": "requests"}, 1),
+        ({"host": HOST, "dimension": "requests", "workspace_id": str(seeded.workspace_id)}, 1),
+        ({"host": HOST, "dimension": "requests", "workspace_id": str(other_workspace)}, 1),
+    ]
+    with ws(seeded.workspace_id):
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.ledger).where(
+                        tables.ledger.c.workspace_id == seeded.workspace_id,
+                        tables.ledger.c.turn_id == seeded.turn_id,
+                        tables.ledger.c.dimension == EGRESS_DIMENSION,
+                    )
+                )
+            ).fetchall()
+    assert len(rows) == 1
 
 
 async def _seed_git_cli(

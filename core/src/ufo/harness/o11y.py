@@ -641,6 +641,15 @@ def _emit_log(
     )
 
 
+WORKSPACE_DIMENSION = "workspace_id"
+
+
+def _tagged(dimensions: dict[str, str]) -> dict[str, str]:
+    if WORKSPACE_DIMENSION in dimensions:
+        raise ValueError(f"{WORKSPACE_DIMENSION} is ambient; do not pass it to a metric")
+    return {**dimensions, **_ambient_scope()}
+
+
 def _bounded_error_class(dimensions: dict[str, str]) -> dict[str, str]:
     """The provider SDK maps each status to its own subclass and returns the base only for unmapped
     ones, so a listed base needs its subclasses (`RateLimitError`) beside it."""
@@ -663,7 +672,7 @@ def emit_metric(name: str, amount: int = 1, /, **dimensions: str) -> None:
     if counter is None:
         counter = metrics.get_meter(INSTRUMENTATION_NAME).create_counter(f"ufo.{name}")
         _counters[name] = counter
-    counter.add(amount, attributes=_bounded_error_class(dimensions))
+    counter.add(amount, attributes=_bounded_error_class(_tagged(dimensions)))
 
 
 def emit_histogram(name: str, value: int, /, **dimensions: str) -> None:
@@ -686,7 +695,7 @@ def emit_histogram(name: str, value: int, /, **dimensions: str) -> None:
             f"ufo.{name}", unit="ms"
         )
         _histograms[name] = histogram
-    histogram.record(value, attributes=_bounded_error_class(dimensions))
+    histogram.record(value, attributes=_bounded_error_class(_tagged(dimensions)))
 
 
 def emit_up_down_metric(name: str, amount: int, /, **dimensions: str) -> None:
@@ -700,7 +709,7 @@ def emit_up_down_metric(name: str, amount: int, /, **dimensions: str) -> None:
     if counter is None:
         counter = metrics.get_meter(INSTRUMENTATION_NAME).create_up_down_counter(f"ufo.{name}")
         _up_down_counters[name] = counter
-    counter.add(amount, attributes=dimensions)
+    counter.add(amount, attributes=_tagged(dimensions))
 
 
 async def emit_service_check(name: str, status: int, message: str = "", /, **tags: str) -> None:
