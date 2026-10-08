@@ -118,7 +118,7 @@ from ufo.runtime.access.egress_rules import (
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from ufo.runtime.access.vault import VaultReads
 from ufo.runtime.background_tasks import BackgroundTaskSweep
-from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger
+from ufo.runtime.billing.accounting import SOURCES_SERVICE, UNGATED_LEDGER, Ledger
 from ufo.runtime.billing.spend import NO_SPEND_GATES, GateDeploy, SpendGates, built_gates
 from ufo.runtime.cloud import (
     CLOUD_CONNECT_TIMEOUT_SECONDS,
@@ -198,6 +198,7 @@ from ufo.runtime.media.preview_renderer import (
 )
 from ufo.runtime.media.site_previewer import SitePreviewer
 from ufo.runtime.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
+from ufo.runtime.pages import PageFeed
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
 from ufo.runtime.provisioning import Provisioning
 from ufo.runtime.queue import Runtime, init_runtime, register_turn_queues
@@ -212,6 +213,7 @@ from ufo.runtime.search import SearchProvider
 from ufo.runtime.skills.runtime import RuntimeSkill, SkillRegistry, SystemSkillBundle
 from ufo.runtime.sources.sync import (
     FOLDER_BACKEND,
+    CorePageFeed,
     FolderSource,
     SourceBackend,
     SyncDriver,
@@ -251,6 +253,8 @@ FOREIGN_HANDSHAKE = "This connection did not come from the page it addresses."
 DEPLOY_ROUTE_PREFIX = "/internal"
 RUNTIME_REVISION_ENV = "UFO_RUNTIME_REVISION"
 RUNTIME_IMAGE_ENV = "UFO_RUNTIME_IMAGE"
+CLOUD_CLIENTS_ENV = "UFO_CLOUD_CLIENTS"
+CLOUD_CLIENT_SERVICES = frozenset({SOURCES_SERVICE})
 
 
 @dataclass(frozen=True)
@@ -402,7 +406,8 @@ def run(fleet: Fleet) -> None:
     ).start()
     deploy_actions = validate_ext_tools(manifests, credentials)
     _validate_requires(config, manifests, credentials)
-    _require_cloud(config, manifests)
+    clients = _cloud_clients()
+    _require_cloud(config, manifests, clients)
     bearer_source = proxy_credentials(manifests)
     cloud = (
         None
@@ -622,7 +627,7 @@ def run(fleet: Fleet) -> None:
     if unknown_backends:
         raise RuntimeError(f"[[sources]] names unknown backends: {', '.join(unknown_backends)}")
     app.state.configured_sources = config.sources
-    _launch_jobs(runtime, invoker_for, sync_driver, probes, cloud, self_user_ids)
+    _launch_jobs(runtime, invoker_for, sync_driver, probes, cloud, clients, self_user_ids)
     _mount_ext_routes(
         app,
         manifests,
@@ -763,9 +768,14 @@ def _launch_jobs(
     sync_driver: SyncDriver,
     probes: ConversationProbes,
     cloud: CloudApis | None,
+    clients: frozenset[str],
     self_user_ids: Mapping[str, SelfUserIdResolver],
 ) -> None:
-    page_feed = None if cloud is None else SourcesFeed(apis=cloud, links=SourceLinks(entries={}))
+    page_feed: PageFeed = CorePageFeed(blob=runtime.blob)
+    if SOURCES_SERVICE in clients:
+        if cloud is None:
+            raise RuntimeError(f"{CLOUD_CLIENTS_ENV} names sources, so the cloud API must be set.")
+        page_feed = SourcesFeed(apis=cloud, links=SourceLinks(entries={}))
     page_change_runner = PageChangeRunner(
         manifests=runtime.manifests,
         pages=page_feed,
@@ -934,26 +944,34 @@ def _validate_requires(
                 ) from error
 
 
-def _require_cloud(config: Config, manifests: tuple[Manifest, ...]) -> None:
-    """A `cloud_client` extension and a `page_change` hook (the sources feed) call the cloud API
-    with the bearer `proxy_credentials` answers, so each boots only where both are present."""
-    clients = sorted(
-        (
-            manifest.name,
-            "declares cloud_client" if manifest.cloud_client else "registers a page_change hook",
-        )
-        for manifest in manifests
-        if manifest.cloud_client or any(spec.event == "page_change" for spec in manifest.hooks)
+def _cloud_clients() -> frozenset[str]:
+    """The services core reads through the cloud API, from comma-separated `UFO_CLOUD_CLIENTS`;
+    absent or empty selects none, and a name core has no client for fails boot."""
+    named = frozenset(
+        name.strip() for name in os.environ.get(CLOUD_CLIENTS_ENV, "").split(",") if name.strip()
     )
-    if not clients:
+    unknown = sorted(named - CLOUD_CLIENT_SERVICES)
+    if unknown:
+        raise RuntimeError(f"{CLOUD_CLIENTS_ENV} names unknown services: {', '.join(unknown)}.")
+    return named
+
+
+def _require_cloud(
+    config: Config, manifests: tuple[Manifest, ...], clients: frozenset[str]
+) -> None:
+    """A `cloud_client` extension and a selected cloud client call the cloud API with the bearer
+    `proxy_credentials` answers, so each boots only where both are present."""
+    declaring = sorted(manifest.name for manifest in manifests if manifest.cloud_client)
+    if declaring:
+        subject = f"The extension {declaring[0]!r} declares cloud_client"
+    elif clients:
+        subject = f"{CLOUD_CLIENTS_ENV} names {', '.join(sorted(clients))}"
+    else:
         return
-    name, reason = clients[0]
     if config.cloud.api_url is None:
-        raise RuntimeError(f"The extension {name!r} {reason}, so [cloud] api_url must be set.")
+        raise RuntimeError(f"{subject}, so [cloud] api_url must be set.")
     if not any(manifest.proxy_credentials is not None for manifest in manifests):
-        raise RuntimeError(
-            f"The extension {name!r} {reason}, so an extension must declare proxy_credentials."
-        )
+        raise RuntimeError(f"{subject}, so an extension must declare proxy_credentials.")
 
 
 def _require_cdp_provider(

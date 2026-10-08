@@ -51,6 +51,7 @@ from ufo.runtime.ext.context import (
     context_for,
 )
 from ufo.runtime.ext.manifest import (
+    PAGE_CHANGE_CURSOR_KEY,
     HookContext,
     HookOutcome,
     HookSpec,
@@ -76,7 +77,7 @@ from ufo.runtime.jobs import (
     core_jobs,
     reap_index_queue,
 )
-from ufo.runtime.knowledge_import import IMPORT_SOURCES_KEY, ImportCursor
+from ufo.runtime.pages import PageBatch, PageFeed
 from ufo.runtime.signin_photo import SIGNIN_PHOTO_JOB
 from ufo.runtime.sources import rest, sync
 from ufo.runtime.sources.backend import ConnectorBackend, ConnectorSourceConfig
@@ -1453,10 +1454,6 @@ async def _seed_page(workspace_id: UUID) -> UUID:
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
             )
         )
-    with ws(workspace_id):
-        await ScopedStore(extension=CORE_EXTENSION).put(
-            IMPORT_SOURCES_KEY, ImportCursor(done=True).model_dump(mode="json")
-        )
     connection_id = await _connection(workspace_id, FOLDER_BACKEND)
     async with workspace_tx() as connection:
         await connection.execute(
@@ -1491,7 +1488,17 @@ async def _seed_page(workspace_id: UUID) -> UUID:
     return page_uid
 
 
-def _probe_runner(tmp_path: Path) -> PageChangeRunner:
+@dataclass
+class _RecordingFeed:
+    inner: CorePageFeed
+    opened: list[UUID] = field(default_factory=list)
+
+    async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch:
+        self.opened.append(ws_current().workspace_id)
+        return await self.inner.pages_changed_since(cursor, limit)
+
+
+def _probe_runner(tmp_path: Path, pages: PageFeed | None = None) -> PageChangeRunner:
     manifest = Manifest(
         name=PROBE_EXTENSION,
         version="0",
@@ -1499,7 +1506,7 @@ def _probe_runner(tmp_path: Path) -> PageChangeRunner:
     )
     return PageChangeRunner(
         manifests=(manifest,),
-        pages=CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "blobs")),
+        pages=pages or CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "blobs")),
     )
 
 
@@ -1520,6 +1527,67 @@ async def test_page_change_drive_enumerates_workspaces_with_changes(
         seen_b = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
     assert isinstance(seen_a, str) and str(page_a) in seen_a
     assert isinstance(seen_b, str) and str(page_b) in seen_b
+
+
+async def test_page_change_drive_skips_a_workspace_unchanged_since_its_cursor(
+    db: None, tmp_path: Path
+) -> None:
+    """Selectivity: a workspace that holds pages but has none changed since this consumer's
+    cursor is never opened."""
+    ws_a, ws_b = uuid4(), uuid4()
+    page_a = await _seed_page(ws_a)
+    feed = _RecordingFeed(inner=CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "blobs")))
+    runner = _probe_runner(tmp_path, pages=feed)
+    (consumer,) = runner.consumers()
+
+    await _fire_page_change(runner, consumer)
+    assert set(feed.opened) == {ws_a}
+    with ws(ws_a):
+        drained = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
+    assert isinstance(drained, str) and str(page_a) in drained
+
+    page_b = await _seed_page(ws_b)
+    feed.opened.clear()
+    await _fire_page_change(runner, consumer)
+    assert set(feed.opened) == {ws_b}
+    with ws(ws_b):
+        seen_b = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
+    assert isinstance(seen_b, str) and str(page_b) in seen_b
+
+
+async def test_page_change_candidates_isolate_an_invalid_cursor(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    broken_id, healthy_id = uuid4(), uuid4()
+    await _seed_page(broken_id)
+    healthy_page = await _seed_page(healthy_id)
+    runner = _probe_runner(tmp_path)
+    (consumer,) = runner.consumers()
+    with ws(broken_id):
+        await ScopedStore(extension=PROBE_EXTENSION).put(
+            f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}",
+            f"{datetime(2030, 1, 1, tzinfo=UTC).isoformat()}|{uuid4()}",
+        )
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        pending = await runner.workspaces_with_changes(consumer)
+    assert set(pending) == {broken_id, healthy_id}
+    record = next(
+        record for record in caplog.records if record.message == "jobs.page_change_cursor_invalid"
+    )
+    assert record.ufo == {
+        "workspace_id": str(broken_id),
+        "extension": PROBE_EXTENSION,
+        "discriminator": consumer.discriminator,
+    }
+
+    with ws(healthy_id):
+        await runner.drive(consumer)
+        seen = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
+    assert isinstance(seen, str) and str(healthy_page) in seen
+
+    with ws(broken_id), pytest.raises(ValueError, match="invalid page cursor"):
+        await runner.drive(consumer)
 
 
 async def test_shared_page_scoping_excludes_a_member_only_search(

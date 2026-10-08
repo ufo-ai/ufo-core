@@ -67,7 +67,7 @@ from ufo.runtime.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarge
 from ufo.runtime.ext.operator import install_operator, installed_operator
 from ufo.runtime.ext.surface import SurfaceSpec
 from ufo.runtime.jobs import model_key_slots
-from ufo.runtime.sources.sync import FOLDER_BACKEND
+from ufo.runtime.sources.sync import FOLDER_BACKEND, CorePageFeed
 from ufo.runtime.sources_api import SourcesFeed
 from ufo.runtime.workspace import SeveralWorkspaces, ws
 from ufo.schema import tables
@@ -289,7 +289,7 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
     probes = object()
     cloud = cloud_apis_for()
     speakers = {"chat": object()}
-    serve._launch_jobs(runtime, object(), object(), probes, cloud, speakers)
+    serve._launch_jobs(runtime, object(), object(), probes, cloud, frozenset({"sources"}), speakers)
 
     assert captured["page"]["cloud"] is captured["jobs"]["cloud"] is cloud
     feed = captured["page"]["pages"]
@@ -307,6 +307,18 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["page"]["spend"] is captured["jobs"]["spend"] is runtime.spend
     assert captured["page"]["ledger"] is captured["jobs"]["ledger"] is runtime.ledger
     assert captured["disabled"] == frozenset()
+
+
+def test_cloud_clients_reads_the_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("UFO_CLOUD_CLIENTS", raising=False)
+    assert serve._cloud_clients() == frozenset()
+    monkeypatch.setenv("UFO_CLOUD_CLIENTS", "")
+    assert serve._cloud_clients() == frozenset()
+    monkeypatch.setenv("UFO_CLOUD_CLIENTS", " sources , ")
+    assert serve._cloud_clients() == frozenset({"sources"})
+    monkeypatch.setenv("UFO_CLOUD_CLIENTS", "sources,traces")
+    with pytest.raises(RuntimeError, match=r"UFO_CLOUD_CLIENTS names unknown services: traces\."):
+        serve._cloud_clients()
 
 
 def test_launch_jobs_hands_both_runners_the_background_jobs_model(
@@ -349,9 +361,14 @@ def test_launch_jobs_hands_both_runners_the_background_jobs_model(
     monkeypatch.setattr(serve, "JobRunner", Runner)
 
     probes = object()
-    serve._launch_jobs(runtime, object(), object(), probes, None, {})
+    serve._launch_jobs(runtime, object(), object(), probes, None, frozenset(), {})
 
-    assert captured["page"]["pages"] is captured["jobs"]["pages"] is None
+    feed = captured["page"]["pages"]
+    assert isinstance(feed, CorePageFeed)
+    assert feed.blob is runtime.blob
+    assert captured["jobs"]["pages"] is feed
+    with pytest.raises(RuntimeError, match="UFO_CLOUD_CLIENTS names sources"):
+        serve._launch_jobs(runtime, object(), object(), probes, None, frozenset({"sources"}), {})
     assert captured["page"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL
     assert captured["jobs"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL
     assert captured["jobs"]["registry"] is registry

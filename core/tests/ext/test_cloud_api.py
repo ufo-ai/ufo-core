@@ -340,28 +340,28 @@ def test_boot_fails_when_a_cloud_client_loads_without_api_url_or_proxy_credentia
     client = Manifest(name="memoryish", version="0", cloud_client=True)
 
     with pytest.raises(RuntimeError, match=r"'memoryish' declares cloud_client, so \[cloud\]"):
-        _require_cloud(base, (client, DECLARING))
+        _require_cloud(base, (client, DECLARING), frozenset())
     with pytest.raises(RuntimeError, match="'memoryish' declares cloud_client, so an extension"):
-        _require_cloud(configured, (client,))
-    _require_cloud(configured, (client, DECLARING))
-    _require_cloud(base, (DECLARING,))
+        _require_cloud(configured, (client,), frozenset())
+    _require_cloud(configured, (client, DECLARING), frozenset())
+    _require_cloud(base, (DECLARING,), frozenset())
 
 
-def test_boot_fails_when_a_page_change_hook_loads_without_api_url_or_proxy_credentials() -> None:
+def test_boot_fails_when_a_selected_client_lacks_api_url_or_proxy_credentials() -> None:
     base = Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db"),
         blob=BlobConfig(backend="filesystem", root="/tmp/blobs"),
     )
     configured = base.model_copy(update={"cloud": CloudConfig(api_url=API_URL)})
     consumer = sample.manifest()
+    sources = frozenset({"sources"})
 
-    with pytest.raises(RuntimeError, match=r"'sample' registers a page_change hook, so \[cloud\]"):
-        _require_cloud(base, (consumer, DECLARING))
-    with pytest.raises(
-        RuntimeError, match="'sample' registers a page_change hook, so an extension"
-    ):
-        _require_cloud(configured, (consumer,))
-    _require_cloud(configured, (consumer, DECLARING))
+    with pytest.raises(RuntimeError, match=r"UFO_CLOUD_CLIENTS names sources, so \[cloud\]"):
+        _require_cloud(base, (consumer, DECLARING), sources)
+    with pytest.raises(RuntimeError, match="UFO_CLOUD_CLIENTS names sources, so an extension"):
+        _require_cloud(configured, (consumer,), sources)
+    _require_cloud(configured, (consumer, DECLARING), sources)
+    _require_cloud(base, (consumer,), frozenset())
 
 
 async def test_cloud_apis_for_serves_every_apps_routes() -> None:
