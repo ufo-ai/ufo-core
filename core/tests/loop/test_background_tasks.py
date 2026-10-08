@@ -16,7 +16,6 @@ from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     RUNTIME_DIRNAME,
     ExecResult,
-    ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
 )
@@ -168,8 +167,6 @@ async def _rig(
             conversation_id=sandbox_conversation_id or turn.conversation_id,
             image_ref=SANDBOX_IMAGE_REF,
             workspace_host_path=str(tmp_path / "ws"),
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
-            run_token="off-turn-test",
         )
     )
     if runtime_id is not None:

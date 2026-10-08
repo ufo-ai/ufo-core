@@ -43,7 +43,6 @@ from ufo.harness.auth.bearer import mint_token
 from ufo.harness.models.interface import Message, TextBlock, ToolUseBlock
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.runtime.engine import DispatchResult, StreamResult
 from ufo.runtime.ext.operator import OperatorSetup, install_operator, select_operator_rule
 from ufo.runtime.hub import InProcessHub
@@ -178,7 +177,6 @@ def mounted(
             backend="local",
             off_cluster=False,
             image_ref=SANDBOX_IMAGE_REF,
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             workspace_root=tmp_path / "workspaces",
         ),
         InProcessHub(),

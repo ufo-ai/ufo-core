@@ -1,9 +1,9 @@
 """The environment a sandbox open exports, derived from the workspace's credentials and grants.
 
-Two callers open a conversation's sandbox to run a command in it: the turn opener, under the turn's
-run token, and an off-turn probe, under its own probe token. Both need the same derivations — git's
-proxy-auth and credential-helper config, the connector CLI sentinels, the conversation's own id — so
-they live here rather than in either caller. What a probe deliberately does not export is the keyed
+Two callers open a conversation's sandbox to run a command in it: the turn opener and an off-turn
+probe. Both need the same derivations — git's proxy-auth and credential-helper config, the
+connector CLI sentinels, the conversation's own id — so they live here rather than in either
+caller. What a probe deliberately does not export is the keyed
 provider environment: those variables carry a model key's sentinel, and an unattended exec is not
 the workspace's model spend to make.
 
@@ -14,8 +14,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from uuid import UUID
 
+from ufo.harness.models.catalog import ANTHROPIC_KEY_ENV, OPENAI_KEY_ENV
 from ufo.harness.o11y import log, warn
-from ufo.harness.sandbox.session import ProxyEndpoint, egress_proxy_env
+from ufo.harness.sandbox.session import PROXY_SESSION_ENV_NAMES
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import (
     CredentialSlotUnset,
@@ -48,11 +49,10 @@ class ProbeEnv:
     alerting?" — needs its `DD_API_KEY` sentinel, and the proxy holds the matching injection rule
     either way, so withholding the variable would leave that rule inert and 401 every probe.
 
-    The deployment's own model key is the one thing an off-turn exec may not spend, and it is
-    withheld where it actually lives: the platform sentinel rides each carrier's base environment,
-    so a probe's session policy binds no `ufo/models` (`PolicyScope.running`). A workspace's BYOK
-    model key needs nothing here either — those slots declare no injection target at all and
-    are read in-process by the model registry, never exported to a sandbox.
+    The deployment's own model key is the one thing an off-turn exec may not spend: a probe's
+    session policy binds no `ufo/models` (`PolicyScope.running`). A workspace's BYOK model key needs
+    nothing here either — those slots declare no injection target at all and are read in-process by
+    the model registry, never exported to a sandbox.
 
     The member the probe acts for selects connector CLI sentinels exactly as a turn's
     re-authorization does."""
@@ -105,29 +105,32 @@ def cli_git_config(clis: Mapping[str, CliCredential]) -> tuple[tuple[str, str], 
     return tuple(settings)
 
 
-_SAMPLE_PROXY = ProxyEndpoint(port=443, ca_cert="", public_url="https://proxy.invalid")
-"""A stand-in endpoint `sandbox_exported_env` reads the proxy environment's variable *names* off.
-The names are the same for every endpoint, and reading them from the export itself is what keeps
-one list: a variable added to `egress_proxy_env` is reserved without being written down again."""
+CA_BUNDLE_ENV_NAMES = frozenset(
+    {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"}
+)
 
 
 def sandbox_exported_env(clis: Mapping[str, CliCredential]) -> frozenset[str]:
-    """Every sandbox variable core itself exports on an open, whatever the carrier: the egress
-    proxy's environment (the model-key sentinels, the proxy URLs, the CA paths), git's config
-    channel including each connector CLI's credential helper, the conversation id, and the
-    committer identity a cloning grant sets.
+    """Every sandbox variable an open exports beside the deploy's declared slots, whatever the
+    carrier: a proxy session's proxy variables and the model keys its bindings mint sentinels for,
+    the CA paths an off-cluster carrier points at the proxy's CA, git's config channel including
+    each connector CLI's credential helper, the conversation id, and the committer identity a
+    cloning grant sets.
 
     One sandbox variable carries one value and the later export wins the merge, so this namespace
     is claimed beside the deploy's declared slots: a workspace declaring a slot on one of these
-    names would replace a value core exported — a model-key sentinel the proxy holds no workspace
-    rule for, and every model call from the sandbox would carry a sentinel nothing swaps."""
+    names would replace a value the open exported — a model-key sentinel the session binds, and
+    every model call from the sandbox would carry a value the proxy swaps nothing for."""
     return frozenset(
         {
             CONVERSATION_ID_ENV,
             TOOL_BRIDGE_URL_ENV,
+            ANTHROPIC_KEY_ENV,
+            OPENAI_KEY_ENV,
+            *PROXY_SESSION_ENV_NAMES,
+            *CA_BUNDLE_ENV_NAMES,
             *GIT_IDENTITY_ENV,
             *_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cli_git_config(clis))),
-            *egress_proxy_env(_SAMPLE_PROXY, "sample-run-token"),
         }
     )
 

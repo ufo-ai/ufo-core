@@ -66,7 +66,6 @@ from ufo.harness.models.interface import Message, ModelRequest, TextBlock
 from ufo.harness.o11y import emit_metric, log, warn
 from ufo.harness.replies import marked_artifacts
 from ufo.harness.sandbox.conversation import (
-    UNSIGNED_RUN_TOKEN,
     WORKSPACE_WRITE_MAX_BYTES,
     ConversationSandbox,
     WorkspaceFile,
@@ -6142,11 +6141,11 @@ class SurfaceContext:
         """An interactive PTY on the conversation's sandbox, created or resumed for it, streaming
         to `output` until the block ends.
 
-        The open is off-turn and unsigned exactly as a workspace read is, so the shell reaches the
-        network no further than any other off-turn call: a member typing here is not a turn, and
-        nothing they run carries a turn's egress. The PTY is killed on the way out; the container
-        stays, because it holds the conversation's whole workspace."""
-        session = await self._sandboxes.open(conversation_id, None, UNSIGNED_RUN_TOKEN, {})
+        The open is off-turn and opens no proxy session, exactly as a workspace read is, so the
+        shell reaches the network no further than any other off-turn call: a member typing here is
+        not a turn, and nothing they run carries a turn's egress. The PTY is killed on the way out;
+        the container stays, because it holds the conversation's whole workspace."""
+        session = await self._sandboxes.open(conversation_id, None, {})
         shell = await session.attach_shell(cwd, size, output)
         try:
             yield shell

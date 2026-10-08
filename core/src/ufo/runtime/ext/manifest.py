@@ -130,8 +130,8 @@ class JobFault(RuntimeError):
 
     A stack says where a job died and never why. `formatted_stack` carries frames and classes and
     no exception message, because a message is text this process did not write — a sandbox
-    command's stderr arrives as a `RuntimeError` carrying the run token the sandbox echoed into
-    `HTTP_PROXY`, and a field name is all redaction matches — so a provider outage, a revoked
+    command's stderr arrives as a `RuntimeError` carrying the session token the sandbox echoed
+    into `HTTP_PROXY`, and a field name is all redaction matches — so a provider outage, a revoked
     token, and a bug leave one indistinguishable record and the answer lives only in a pod's
     stderr. This is the seam that closes that, and it closes it the way `StreamFault` does for a
     source stream: the handler authored the text against the call it made, so it names the status

@@ -20,7 +20,6 @@ DEFAULT_CDP_PROVIDER = "sandbox_chrome"
 DEFAULT_AUTO_MODEL = "claude-opus-5-5"
 DEFAULT_AMBIENT_REPLY_MODEL = "gpt-5.6-luna"
 DEFAULT_BACKGROUND_JOBS_MODEL = "gpt-5.6-luna"
-DEFAULT_PROXY_PORT = 8888
 DEFAULT_INGRESS_PORT = 8100
 DEFAULT_FLAG_CACHE_TTL_SECONDS = 30.0
 DEFAULT_CONTEXT_STRATEGY = "compact"
@@ -227,11 +226,10 @@ class SandboxConfig(BaseModel):
     reference lets an eval or deploy bind the runtime tools it validated instead of resolving a
     mutable local tag after validation.
 
-    `proxy_port` is the stable port the egress proxy binds. `proxy_url` names the proxy service,
-    `https` and a host with nothing after it: a carrier whose sandbox runs off the cluster, such as
-    E2B, egresses only through it, and `serve` fails loud when one is selected without it — open,
-    unmetered egress is never a silent default. The in-cluster carriers reach the process-local
-    proxy directly.
+    `proxy_url` names the proxy service, `https` and a host with nothing after it: a carrier whose
+    sandbox runs off the cluster, such as E2B, egresses only through it, and `serve` fails loud
+    when one is selected without it — open, unmetered egress is never a silent default. The
+    in-cluster carriers run unenforced and open no proxy session.
 
     `ingress_port` is the stable port the sandbox ingress binds. `ingress_public_url` is the
     wildcard base every served sandbox port is a subdomain of (`https://example.com`, backed
@@ -249,7 +247,6 @@ class SandboxConfig(BaseModel):
     `backend`. Every name must resolve to a registered carrier, and repeating `backend` here fails
     loud."""
     workspace_root: Path = Path("./workspaces")
-    proxy_port: int = DEFAULT_PROXY_PORT
     proxy_url: str | None = None
     ingress_port: int = DEFAULT_INGRESS_PORT
     ingress_public_url: str | None = None

@@ -75,7 +75,7 @@ from ufo.harness.models.interface import (
 from ufo.harness.models.spec import RepeatedToolRollover
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import SandboxSession, SandboxSpec
 from ufo.harness.untrusted import UNTRUSTED_CLOSE, wall
 from ufo.host.ext.loader import BoundHook, HookChain
 from ufo.runtime.engine import MAX_OUTPUT_TOKENS, OFFLOAD_NOTICE
@@ -635,8 +635,6 @@ async def test_the_sandbox_journal_splices_the_file_through_the_carrier(tmp_path
             conversation_id=uuid4(),
             image_ref=SANDBOX_IMAGE_REF,
             workspace_host_path=str(tmp_path / "workspace"),
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
-            run_token="rollover-test",
         )
     )
     session = SandboxSession(carrier=carrier, handle=handle)
@@ -666,8 +664,6 @@ async def test_each_conversation_in_a_shared_sandbox_keeps_its_own_history_file(
             conversation_id=uuid4(),
             image_ref=SANDBOX_IMAGE_REF,
             workspace_host_path=str(tmp_path / "workspace"),
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
-            run_token="rollover-test",
         )
     )
     session = SandboxSession(carrier=carrier, handle=handle)

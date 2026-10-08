@@ -590,13 +590,12 @@ class ConversationProbes:
     work meant to outlive its arming turn loses the network the moment the turn commits, and a
     container the carrier suspended has nothing left running to ask. A probe re-enters the
     conversation's own sandbox — the same `/workspace` the agent's files live in, resumed on touch —
-    under a token this deployment signs for that one exec, and hands back what the command reported.
+    and hands back what the command reported.
 
     Its capability is the conversation's agent, that agent's snapshotted internet policy, the
     workspace's keyed credentials, and the connector grants of the member the caller acts for.
-    The one thing it deliberately lacks is the deployment's model key: no sentinel is exported and
-    the proxy resolves no injection for it, so an unattended exec cannot spend the deployment's
-    model budget.
+    The one thing it deliberately lacks is the deployment's model key: none is exported to it, so
+    an unattended exec cannot spend the deployment's model budget.
 
     A conversation bound to a member's terminal raises `TerminalGone` when that terminal is not
     connected. That reaches the caller rather than reading as an empty result: a probe that could
@@ -625,13 +624,10 @@ class ConversationProbes:
 
         The exec runs bound to the conversation's own agent. A job binds a workspace and no agent —
         nothing has an agent to bind, since a probe answers to no turn — yet the environment is
-        derived from that agent's connector grants, and the proxy resolves this probe's rules under
-        the same agent. Binding it here is what makes those two agree, and what keeps an
-        agent-scoped read anywhere under this call from failing on an unbound scope.
+        derived from that agent's connector grants. Binding it here is what keeps an agent-scoped
+        read anywhere under this call from failing on an unbound scope.
 
-        The token's deadline is this timeout, minted before the sandbox is opened, so the probe's
-        egress window is bounded by the exec it belongs to and closes with nothing having to revoke
-        it. Raises on a conversation outside the ambient workspace, and on a timeout over
+        Raises on a conversation outside the ambient workspace, and on a timeout over
         `PROBE_TIMEOUT_MAX_SECONDS`: an unattended exec able to hold a sandbox open longer than that
         is a wait with no end rather than a probe."""
         if not 0 < timeout_s <= PROBE_TIMEOUT_MAX_SECONDS:
@@ -654,7 +650,6 @@ class ConversationProbes:
             session = await self._sandboxes.open(
                 conversation_id,
                 None,
-                self._probe_tokens.encode(probe),
                 await self._env(conversation_id, probe.probe_id, probe.member_id),
             )
             return await session.bash(command, timeout_s=timeout_s)

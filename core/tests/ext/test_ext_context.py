@@ -1,5 +1,4 @@
 import asyncio
-from base64 import b64encode
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -19,7 +18,7 @@ from ufo_ext_sample.spend import CHARGE_TABLE, SampleGate, allow
 
 from ufo.db import workspace_tx
 from ufo.harness import o11y
-from ufo.harness.models.catalog import CORE_PRICING
+from ufo.harness.models.catalog import ANTHROPIC_KEY_ENV, CORE_PRICING, OPENAI_KEY_ENV
 from ufo.harness.models.interface import (
     PROVIDER_ANTHROPIC,
     Message,
@@ -42,10 +41,8 @@ from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSand
 from ufo.harness.sandbox.exec_env import CONVERSATION_ID_ENV, ProbeEnv
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
-    SENTINEL_MODEL_KEY,
-    ProbeToken,
+    PROXY_SESSION_ENV_NAMES,
     ProbeTokenCodec,
-    ProxyEndpoint,
     SandboxHandle,
     SandboxSpec,
 )
@@ -884,7 +881,6 @@ def _sandboxes(root: Path, carrier: LocalCarrier | None = None) -> ConversationS
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
         workspace_root=root,
     )
 
@@ -917,22 +913,23 @@ async def test_probe_runs_in_the_conversations_own_sandbox(db: None, tmp_path: P
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_probes_acting_member_reaches_the_environment_and_token(
-    db: None, tmp_path: Path
-) -> None:
+async def test_a_probes_acting_member_reaches_its_environment(db: None, tmp_path: Path) -> None:
     asked: list[tuple[UUID, UUID | None]] = []
 
     async def env(conversation_id: UUID, probe_id: UUID, member_id: UUID | None) -> dict[str, str]:
         asked.append((probe_id, member_id))
-        return {}
+        return {"PROBE_ID": str(probe_id)}
 
     workspace_id = await _workspace()
     carrier = _RecordingProbeCarrier()
-    codec = ProbeTokenCodec(b"probe-token-test-secret")
     member_id = uuid4()
     with ws(workspace_id):
         conversation_id = await _conversation(workspace_id)
-        probes = ConversationProbes(_sandboxes(tmp_path / "workspaces", carrier), codec, env)
+        probes = ConversationProbes(
+            _sandboxes(tmp_path / "workspaces", carrier),
+            ProbeTokenCodec(b"probe-token-test-secret"),
+            env,
+        )
         await probes.run(
             conversation_id,
             "true",
@@ -943,21 +940,10 @@ async def test_a_probes_acting_member_reaches_the_environment_and_token(
 
     assert [member for _, member in asked] == [member_id, None]
     assert len({probe_id for probe_id, _ in asked}) == 2
-    assert len(carrier.specs) == 2
-    principals = tuple(
-        codec.from_proxy_auth("Basic " + b64encode(f"{spec.run_token}:x".encode()).decode())
-        for spec in carrier.specs
-    )
-    assert principals[0] == ProbeToken(
-        workspace_id=workspace_id,
-        conversation_id=conversation_id,
-        probe_id=asked[0][0],
-        expires_at=principals[0].expires_at,
-        member_id=member_id,
-        internet_access=False,
-    )
-    assert principals[1].member_id is None
-    assert principals[1].internet_access is None
+    assert [spec.env for spec in carrier.specs] == [
+        {"PROBE_ID": str(probe_id)} for probe_id, _ in asked
+    ]
+    assert all(PROXY_SESSION_ENV_NAMES.isdisjoint(spec.env) for spec in carrier.specs)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -987,8 +973,7 @@ async def test_the_probe_environment_exports_keyed_connectors_but_never_a_model_
 
     assert exports["DD_API_KEY"] == "UFO_SENTINEL_DATADOG_API_KEY"
     assert "dd-real" not in exports.values()
-    assert SENTINEL_MODEL_KEY not in exports.values()
-    assert SENTINEL_MODEL_KEY not in bare.values()
+    assert {ANTHROPIC_KEY_ENV, OPENAI_KEY_ENV}.isdisjoint(exports)
     assert set(bare) == {
         CONVERSATION_ID_ENV,
         "GIT_CONFIG_COUNT",

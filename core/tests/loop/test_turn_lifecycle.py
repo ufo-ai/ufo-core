@@ -87,12 +87,10 @@ from ufo.harness.models.registry import ModelRegistry, ServingModel
 from ufo.harness.models.spec import RepeatedToolRollover
 from ufo.harness.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
-    UNSIGNED_RUN_TOKEN,
     ConversationSandbox,
 )
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
-    ProxyEndpoint,
     SandboxProviderUnavailable,
 )
 from ufo.host import assemble as host_assemble
@@ -140,11 +138,10 @@ async def test_workspace_host_path_is_absolute_for_a_relative_workspace_root(
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
         workspace_root=Path("workspaces"),
     )
     with ws(seed.workspace_id):
-        handle = (await sandboxes.open(seed.conversation_id, None, UNSIGNED_RUN_TOKEN, {})).handle
+        handle = (await sandboxes.open(seed.conversation_id, None, {})).handle
     assert handle.workspace_host_path is not None
     assert Path(handle.workspace_host_path).is_absolute()
     assert await asyncio.to_thread(Path(handle.workspace_host_path).is_dir)

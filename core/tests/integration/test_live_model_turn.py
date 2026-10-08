@@ -28,7 +28,7 @@ from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.harness.sandbox.session import RunTokenCodec
 from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
@@ -75,7 +75,6 @@ async def live_runtime(
                 backend="local",
                 off_cluster=False,
                 image_ref=SANDBOX_IMAGE_REF,
-                proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
                 workspace_root=tmp_path / "workspaces",
             ),
             hub=hub,

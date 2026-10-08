@@ -29,7 +29,7 @@ from ufo.db import workspace_tx
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.exec_env import ProbeEnv
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import SANDBOX_HANDLE_SEP, ProbeTokenCodec, ProxyEndpoint
+from ufo.harness.sandbox.session import SANDBOX_HANDLE_SEP, ProbeTokenCodec
 from ufo.harness.sandbox.terminal import CLIENT_BACKEND
 from ufo.harness.untrusted import UNTRUSTED_OPEN
 from ufo.runtime.access.connectors import CliCredential
@@ -146,7 +146,6 @@ def _sandboxes(root: Path) -> ConversationSandbox:
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
         workspace_root=root,
     )
 

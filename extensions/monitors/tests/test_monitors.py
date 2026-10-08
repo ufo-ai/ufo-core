@@ -49,7 +49,6 @@ from ufo.harness.sandbox.exec_env import ProbeEnv
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     ProbeTokenCodec,
-    ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
 )
@@ -210,7 +209,6 @@ def _sandboxes(root: Path) -> ConversationSandbox:
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
         workspace_root=root,
     )
 
@@ -234,8 +232,6 @@ async def _tool_ctx(
             conversation_id=conversation_id,
             image_ref=SANDBOX_IMAGE_REF,
             workspace_host_path=str(root / str(conversation_id)),
-            proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
-            run_token="probe-run",
         )
     )
     sandboxes = _sandboxes(root)

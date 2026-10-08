@@ -134,7 +134,6 @@ from ufo.harness.sandbox.select import select_carriers
 from ufo.harness.sandbox.session import (
     ExecResult,
     ProbeTokenCodec,
-    ProxyEndpoint,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
@@ -343,7 +342,6 @@ def _sandboxes(root: Path) -> ConversationSandbox:
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
         workspace_root=root,
     )
 

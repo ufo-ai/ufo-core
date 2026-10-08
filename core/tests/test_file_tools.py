@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -35,7 +35,6 @@ from ufo.harness.models.interface import ModelEvent, ModelRequest, ToolResultBlo
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     WORKSPACE_DIR,
-    ProxyEndpoint,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
@@ -287,13 +286,15 @@ async def test_cancelled_docker_create_removes_its_real_container_and_network(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    installing = asyncio.Event()
+    preparing = asyncio.Event()
 
-    async def wait_during_install(carrier: DockerCarrier, container_id: str, ca_cert: str) -> None:
-        installing.set()
+    async def wait_during_mounts(
+        carrier: DockerCarrier, container_id: str, conversation_id: UUID
+    ) -> None:
+        preparing.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(DockerCarrier, "_install_ca", wait_during_install)
+    monkeypatch.setattr(DockerCarrier, "_prepare_mounts", wait_during_mounts)
     conversation = uuid4()
     task = asyncio.create_task(
         DockerCarrier().create(
@@ -301,12 +302,10 @@ async def test_cancelled_docker_create_removes_its_real_container_and_network(
                 conversation_id=conversation,
                 image_ref=sandbox_image,
                 workspace_host_path=str(tmp_path),
-                proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
-                run_token="integration-run",
             )
         )
     )
-    await asyncio.wait_for(installing.wait(), timeout=30)
+    await asyncio.wait_for(preparing.wait(), timeout=30)
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
@@ -677,8 +676,6 @@ async def test_share_file_packs_a_workspace_a_carrier_serves_under_another_name(
             conversation_id=conversation,
             image_ref="ufo-sandbox:latest",
             workspace_host_path=str(tmp_path / str(conversation)),
-            proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
-            run_token="pack-run",
         )
     )
     local = replace(ctx, sandbox=SandboxSession(carrier=carrier, handle=handle))

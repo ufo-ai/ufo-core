@@ -25,7 +25,6 @@ from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.ingress_host import parse_site_label
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.ext.surface import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec
 from ufo.runtime.hub import InProcessHub
@@ -99,7 +98,6 @@ def _site_link_app(tmp_path: Path, ingress_public_url: str | None) -> FastAPI:
             backend="local",
             off_cluster=False,
             image_ref=SANDBOX_IMAGE_REF,
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             workspace_root=tmp_path / "workspaces",
         ),
         InProcessHub(),
@@ -135,7 +133,6 @@ def _app(tmp_path: Path) -> FastAPI:
             backend="local",
             off_cluster=False,
             image_ref=SANDBOX_IMAGE_REF,
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             workspace_root=tmp_path / "workspaces",
         ),
         InProcessHub(),
@@ -168,7 +165,6 @@ def _challenge_app(tmp_path: Path) -> FastAPI:
             backend="local",
             off_cluster=False,
             image_ref=SANDBOX_IMAGE_REF,
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             workspace_root=tmp_path / "workspaces",
         ),
         InProcessHub(),
@@ -220,7 +216,6 @@ async def test_the_mounted_surface_admits_through_the_process_gate(
             backend="local",
             off_cluster=False,
             image_ref=SANDBOX_IMAGE_REF,
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             workspace_root=tmp_path / "workspaces",
         ),
         InProcessHub(),

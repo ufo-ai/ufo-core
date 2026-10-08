@@ -12,7 +12,7 @@ import sqlalchemy as sa
 import ufo.runtime.turns.workspace_changes as workspace_changes_module
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import ToolUseBlock
-from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec, _LateSandbox
+from ufo.harness.sandbox.session import SandboxSession, SandboxSpec, _LateSandbox
 from ufo.harness.sandbox.terminal import TerminalCarrier, TerminalOp, Terminals
 from ufo.runtime.turns.workspace_changes import (
     WORKSPACE_CHANGE_TARGET_DIRS_MAX,
@@ -347,7 +347,5 @@ def _spec(conversation_id: UUID) -> SandboxSpec:
         conversation_id=conversation_id,
         image_ref="unused",
         workspace_host_path="/p",
-        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem", public_url=None),
-        run_token="run-token",
         env={"UFO_CONVERSATION_ID": str(conversation_id)},
     )

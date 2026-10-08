@@ -7,7 +7,6 @@ resume-read and the env exports the turn derives are asserted through the conver
 spec a stand-in carrier records."""
 
 import asyncio
-import base64
 import json
 import logging
 from collections.abc import AsyncIterator, Mapping
@@ -39,13 +38,11 @@ from ufo.harness.sandbox.exec_env import (
 )
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
-    PROXY_PASSWORD,
+    PROXY_CA_CERT_ENV,
+    PROXY_SESSION_ENV_NAMES,
     Carrier,
     DialTarget,
     ExecResult,
-    ProxyEndpoint,
-    RunToken,
-    RunTokenCodec,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
@@ -58,6 +55,7 @@ from ufo.runtime.access.credentials import CredentialStore, HostChoice
 from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import HostEntry, PolicyScope
 from ufo.runtime.access.grants import CommitIdentity, GrantStore, grant_sentinel
+from ufo.runtime.access.proxy_sessions import SessionCreated
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget
@@ -73,8 +71,6 @@ from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Turn
 
-PROXY = ProxyEndpoint(port=8080, ca_cert="ca-pem")
-RUN_TOKENS = RunTokenCodec(b"sandbox-handle-test-secret")
 GIT_PROXY_AUTH_ENV = _git_config_env(GIT_PROXY_AUTH_CONFIG)
 pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 
@@ -180,7 +176,6 @@ def _sandboxes(
         backend=backend,
         off_cluster=backend == "e2b",
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=PROXY,
         workspace_root=tmp_path / "workspaces",
         resume_carriers=resume if resume is not None else {},
     )
@@ -228,7 +223,6 @@ async def test_open_sandbox_persists_the_backend_prefixed_handle(db: None, tmp_p
         handle = (
             await _open_sandbox(
                 _sandboxes(LocalCarrier(), "local", tmp_path),
-                RUN_TOKENS,
                 _turn(workspace_id, conversation_id),
                 {},
                 None,
@@ -253,7 +247,6 @@ async def test_open_sandbox_follows_a_symlinked_workspace_root(db: None, tmp_pat
         handle = (
             await _open_sandbox(
                 _sandboxes(LocalCarrier(), "local", tmp_path),
-                RUN_TOKENS,
                 _turn(workspace_id, conversation_id),
                 {},
                 None,
@@ -277,7 +270,6 @@ async def test_open_sandbox_refuses_a_workspace_root_that_is_not_a_directory(
     with ws(workspace_id), pytest.raises(NotADirectoryError, match=WORKSPACE_ROOT_SETTING):
         await _open_sandbox(
             _sandboxes(LocalCarrier(), "local", tmp_path),
-            RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             {},
             None,
@@ -296,15 +288,12 @@ async def test_open_sandbox_provisions_a_traversing_root_at_its_canonical_place(
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=PROXY,
         workspace_root=tmp_path / "roots" / ".." / "workspaces",
     )
 
     with ws(workspace_id):
         handle = (
-            await _open_sandbox(
-                sandboxes, RUN_TOKENS, _turn(workspace_id, conversation_id), {}, None, ()
-            )
+            await _open_sandbox(sandboxes, _turn(workspace_id, conversation_id), {}, None, ())
         ).handle
 
     assert handle.workspace_host_path == str(tmp_path / "workspaces" / str(conversation_id))
@@ -315,17 +304,15 @@ async def test_open_sandbox_resumes_from_the_stored_handle_without_rewriting(
     db: None, tmp_path: Path
 ) -> None:
     """A row that already holds this backend's handle seeds the carrier's resume_id — resume, not a
-    fresh create — under the turn's signed run token."""
+    fresh create."""
     workspace_id, conversation_id = await _conversation(handle="e2b:sbx-1")
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
     turn = _turn(workspace_id, conversation_id)
 
     with ws(workspace_id):
-        await _open_sandbox(_sandboxes(carrier, "e2b", tmp_path), RUN_TOKENS, turn, {}, None, ())
+        await _open_sandbox(_sandboxes(carrier, "e2b", tmp_path), turn, {}, None, ())
 
     assert carrier.specs[0].resume_id == "sbx-1"
-    basic = "Basic " + base64.b64encode(f"{carrier.specs[0].run_token}:".encode()).decode()
-    assert RUN_TOKENS.from_proxy_auth(basic) == RunToken(workspace_id, turn.id)
     assert await _stored_handle(conversation_id) == "e2b:sbx-1"
 
 
@@ -338,8 +325,8 @@ async def test_open_states_the_turn_a_carrier_scopes_its_running_commands_to(
     turn = _turn(workspace_id, conversation_id)
 
     with ws(workspace_id):
-        await _open_sandbox(sandboxes, RUN_TOKENS, turn, {}, None, ())
-        await sandboxes.open(conversation_id, None, "run-off-turn", {})
+        await _open_sandbox(sandboxes, turn, {}, None, ())
+        await sandboxes.open(conversation_id, None, {})
 
     assert [spec.turn_id for spec in carrier.specs] == [turn.id, None]
 
@@ -351,9 +338,7 @@ async def test_open_carries_the_owning_agents_sandbox_size_on_the_spec(
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
 
     with ws(workspace_id):
-        await _conversation_sandboxes(carrier, tmp_path, "e2b").open(
-            conversation_id, None, "run-a", {}
-        )
+        await _conversation_sandboxes(carrier, tmp_path, "e2b").open(conversation_id, None, {})
 
     assert carrier.specs[0].size == "large"
 
@@ -377,9 +362,7 @@ async def test_open_routes_a_resume_backends_handle_to_its_own_carrier(
     )
 
     with ws(workspace_id):
-        await _open_sandbox(
-            sandboxes, RUN_TOKENS, _turn(workspace_id, conversation_id), {}, None, ()
-        )
+        await _open_sandbox(sandboxes, _turn(workspace_id, conversation_id), {}, None, ())
 
     assert resumed.specs[0].resume_id == "sbx-old"
     assert fresh.specs == []
@@ -424,7 +407,6 @@ async def test_open_sandbox_ignores_a_handle_another_backend_wrote_and_overwrite
     with ws(workspace_id):
         await _open_sandbox(
             _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             {},
             None,
@@ -499,7 +481,6 @@ async def test_sandbox_cli_env_derives_the_acting_members_grant_after_open(
     with ws(workspace_id), agent(agent_id):
         await _open_sandbox(
             _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
             turn,
             {"hub": HUB_CLI},
             None,
@@ -511,31 +492,20 @@ async def test_sandbox_cli_env_derives_the_acting_members_grant_after_open(
     assert scoped == {"HUB_TOKEN": grant_sentinel("acct-1")}
 
 
-async def test_sandbox_authorizer_binds_the_run_token_and_cli_env_to_the_acting_member(
-    db: None,
-) -> None:
+async def test_sandbox_authorizer_binds_the_cli_env_to_the_acting_member(db: None) -> None:
     workspace_id, conversation_id = await _conversation()
     agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
-    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
-    proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
     base = SandboxSession(
         carrier=_ResumeRecordingCarrier(container_id="sbx-1"),
         handle=SandboxHandle(
             conversation_id=conversation_id,
             container_id="sbx-1",
-            run_token=common_token,
-            egress_env={
-                "HTTP_PROXY": proxy,
-                "HTTPS_PROXY": proxy,
-                "http_proxy": proxy,
-                "https_proxy": proxy,
-            },
+            egress_env={CONVERSATION_ID_ENV: str(conversation_id)},
         ),
     )
     authorizer = SandboxAuthorizer(
         sandbox=base,
-        run_tokens=RUN_TOKENS,
         grants=GrantStore(),
         clis={"hub": HUB_CLI},
         turn=turn,
@@ -546,28 +516,20 @@ async def test_sandbox_authorizer_binds_the_run_token_and_cli_env_to_the_acting_
         authorized = cast(SandboxSession, await authorizer.authorize(member_id))
         nobody = cast(SandboxSession, await authorizer.authorize(None))
 
-    def decoded(sandbox: SandboxSession) -> RunToken:
-        basic = (
-            "Basic "
-            + base64.b64encode(f"{sandbox.handle.run_token}:{PROXY_PASSWORD}".encode()).decode()
-        )
-        return RUN_TOKENS.from_proxy_auth(basic)
-
-    run = decoded(authorized)
-    assert run == RunToken(workspace_id, turn.id, acts_for=member_id)
     with ws(workspace_id), agent(agent_id):
         acting = await PerAgentRules(grants=GrantStore()).session_policy(
             PolicyScope(workspace_id, member_id, True, True, None)
         )
     assert HostEntry(host="api.hub.test") in acting.hosts
-    assert authorized.handle.egress_env["HUB_TOKEN"] == grant_sentinel("acct-1")
+    assert authorized.handle.egress_env == {
+        CONVERSATION_ID_ENV: str(conversation_id),
+        "HUB_TOKEN": grant_sentinel("acct-1"),
+    }
     assert "HUB_TOKEN" not in base.handle.egress_env
-    assert decoded(nobody) == RunToken(workspace_id, turn.id)
     assert "HUB_TOKEN" not in nobody.handle.egress_env
 
     own = SandboxAuthorizer(
         sandbox=base,
-        run_tokens=RUN_TOKENS,
         grants=GrantStore(),
         clis={"hub": HUB_CLI},
         turn=turn.model_copy(update={"member_id": member_id}),
@@ -578,8 +540,7 @@ async def test_sandbox_authorizer_binds_the_run_token_and_cli_env_to_the_acting_
         nobody_policy = await PerAgentRules(grants=GrantStore()).session_policy(
             PolicyScope(workspace_id, None, True, True, None)
         )
-    assert decoded(as_its_turn) == RunToken(workspace_id, turn.id)
-    assert decoded(as_nobody) == RunToken(workspace_id, turn.id, acts_for="nobody")
+    assert as_its_turn.handle.egress_env["HUB_TOKEN"] == grant_sentinel("acct-1")
     assert HostEntry(host="api.hub.test") not in nobody_policy.hosts
     assert "HUB_TOKEN" not in as_nobody.handle.egress_env
 
@@ -587,35 +548,25 @@ async def test_sandbox_authorizer_binds_the_run_token_and_cli_env_to_the_acting_
 async def test_open_sandbox_exports_the_conversation_identity_stable_across_turns(
     db: None, tmp_path: Path
 ) -> None:
-    """`UFO_CONVERSATION_ID` is what states the conversation to a process in the container: the
-    run token carries the workspace and turn, but no conversation id."""
+    """`UFO_CONVERSATION_ID` is what states the conversation to a process in the container, and a
+    re-authorization keeps it."""
     workspace_id, conversation_id = await _conversation()
     agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
-    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
-    proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
     await _store_turn(turn)
 
     with ws(workspace_id), agent(agent_id):
-        await _open_sandbox(_sandboxes(carrier, "e2b", tmp_path), RUN_TOKENS, turn, {}, None, ())
+        await _open_sandbox(_sandboxes(carrier, "e2b", tmp_path), turn, {}, None, ())
         authorized = await SandboxAuthorizer(
             sandbox=SandboxSession(
                 carrier=carrier,
                 handle=SandboxHandle(
                     conversation_id=conversation_id,
                     container_id="sbx-1",
-                    run_token=common_token,
-                    egress_env={
-                        **carrier.specs[0].env,
-                        "HTTP_PROXY": proxy,
-                        "HTTPS_PROXY": proxy,
-                        "http_proxy": proxy,
-                        "https_proxy": proxy,
-                    },
+                    egress_env=carrier.specs[0].env,
                 ),
             ),
-            run_tokens=RUN_TOKENS,
             grants=GrantStore(),
             clis={"hub": HUB_CLI},
             turn=turn,
@@ -624,16 +575,13 @@ async def test_open_sandbox_exports_the_conversation_identity_stable_across_turn
 
     followup = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
     with ws(workspace_id), agent(agent_id):
-        await _open_sandbox(
-            _sandboxes(carrier, "e2b", tmp_path), RUN_TOKENS, followup, {}, None, ()
-        )
+        await _open_sandbox(_sandboxes(carrier, "e2b", tmp_path), followup, {}, None, ())
 
     assert followup.id != turn.id
     assert carrier.specs[0].env["UFO_CONVERSATION_ID"] == str(conversation_id)
     assert carrier.specs[1].env["UFO_CONVERSATION_ID"] == str(conversation_id)
     assert carrier.specs[0].env[TOOL_BRIDGE_URL_ENV] == TOOL_BRIDGE_URL
     assert carrier.specs[1].env[TOOL_BRIDGE_URL_ENV] == TOOL_BRIDGE_URL
-    assert authorized.handle.run_token != common_token
     assert authorized.handle.egress_env["UFO_CONVERSATION_ID"] == str(conversation_id)
     assert authorized.handle.egress_env[TOOL_BRIDGE_URL_ENV] == TOOL_BRIDGE_URL
 
@@ -651,7 +599,6 @@ async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
     with ws(workspace_id), agent(agent_id):
         await _open_sandbox(
             _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
             turn,
             {"hub": HUB_CLI},
             None,
@@ -682,7 +629,6 @@ async def test_sandbox_cli_env_prefers_the_members_private_account_over_a_shared
     with ws(workspace_id), agent(agent_id):
         await _open_sandbox(
             _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
             turn,
             {"hub": HUB_CLI},
             None,
@@ -782,7 +728,6 @@ async def test_open_sandbox_exports_keyed_provider_sentinels_not_secrets(
     with ws(workspace_id):
         await _open_sandbox(
             _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             {},
             store,
@@ -810,7 +755,6 @@ async def test_open_sandbox_exports_nothing_for_an_unfilled_keyed_slot(
     with ws(workspace_id):
         await _open_sandbox(
             _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             {},
             store,
@@ -839,7 +783,6 @@ async def test_open_sandbox_withholds_and_warns_on_a_selection_the_row_does_not_
     with caplog.at_level(logging.WARNING, logger="ufo"), ws(workspace_id):
         await _open_sandbox(
             _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             {},
             store,
@@ -884,7 +827,6 @@ async def test_open_sandbox_survives_a_keyed_slot_whose_host_will_not_decrypt(
     with caplog.at_level(logging.WARNING, logger="ufo"), ws(workspace_id):
         await _open_sandbox(
             _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             {},
             store,
@@ -921,7 +863,6 @@ async def test_open_sandbox_survives_a_keyed_slot_whose_secret_will_not_decrypt(
     with caplog.at_level(logging.WARNING, logger="ufo"), ws(workspace_id):
         await _open_sandbox(
             _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             {},
             store,
@@ -949,7 +890,7 @@ async def test_open_sandbox_configures_git_to_authenticate_to_the_proxy(
     turn = _turn(workspace_id, conversation_id)
 
     with ws(workspace_id):
-        await _open_sandbox(_sandboxes(carrier, "e2b", tmp_path), RUN_TOKENS, turn, {}, None, ())
+        await _open_sandbox(_sandboxes(carrier, "e2b", tmp_path), turn, {}, None, ())
 
     assert _derived_env(carrier.specs[0]) == {
         "GIT_CONFIG_COUNT": "1",
@@ -967,7 +908,6 @@ async def test_open_sandbox_configures_the_connector_git_hosts_credential_helper
     with ws(workspace_id):
         await _open_sandbox(
             _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             {"github": GIT_CLI},
             None,
@@ -1047,19 +987,12 @@ async def test_reauthorization_drops_the_committer_identity_of_another_authority
     workspace_id, conversation_id = await _conversation()
     agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
-    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
-    proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
     base = SandboxSession(
         carrier=_ResumeRecordingCarrier(container_id="sbx-1"),
         handle=SandboxHandle(
             conversation_id=conversation_id,
             container_id="sbx-1",
-            run_token=common_token,
             egress_env={
-                "HTTP_PROXY": proxy,
-                "HTTPS_PROXY": proxy,
-                "http_proxy": proxy,
-                "https_proxy": proxy,
                 "GH_TOKEN": grant_sentinel("acct-gh"),
                 "GIT_AUTHOR_NAME": "Alex Graveley",
                 "GIT_AUTHOR_EMAIL": "12345+alexg-ufo@users.noreply.github.com",
@@ -1074,7 +1007,6 @@ async def test_reauthorization_drops_the_committer_identity_of_another_authority
             SandboxSession,
             await SandboxAuthorizer(
                 sandbox=base,
-                run_tokens=RUN_TOKENS,
                 grants=GrantStore(),
                 clis={"github": GIT_CLI},
                 turn=turn,
@@ -1097,18 +1029,10 @@ class _UniqueIdCarrier:
             self.created += 1
         if self.held is not None:
             await self.held.wait()
-        proxy = f"http://{spec.run_token}:{PROXY_PASSWORD}@proxy:8080"
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=spec.resume_id or f"sbx-{self.created}",
-            run_token=spec.run_token,
-            egress_env={
-                "HTTP_PROXY": proxy,
-                "HTTPS_PROXY": proxy,
-                "http_proxy": proxy,
-                "https_proxy": proxy,
-                **spec.env,
-            },
+            egress_env=spec.env,
             turn_id=spec.turn_id,
         )
 
@@ -1133,7 +1057,7 @@ class _UniqueIdCarrier:
         timeout_s: int,
         model_command: str | None = None,
     ) -> ExecResult:
-        self.execs.append((handle.container_id, handle.run_token))
+        self.execs.append((handle.container_id, handle.egress_env.get("HUB_TOKEN")))
         return ExecResult(stdout="", stderr="", exit_code=0)
 
     def read(self, *args: object, **kwargs: object) -> AsyncIterator[bytes]:
@@ -1149,7 +1073,6 @@ def _conversation_sandboxes(carrier: object, tmp_path: Path, backend: str) -> Co
         backend=backend,
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=PROXY,
         workspace_root=tmp_path / "workspaces",
     )
 
@@ -1165,8 +1088,8 @@ async def test_concurrent_first_opens_converge_on_one_persisted_sandbox(
 
     with ws(workspace_id):
         first, second = await asyncio.gather(
-            sandboxes.open(conversation_id, None, "run-a", {}),
-            sandboxes.open(conversation_id, None, "run-b", {}),
+            sandboxes.open(conversation_id, None, {}),
+            sandboxes.open(conversation_id, None, {}),
         )
         stored = await _stored_handle(conversation_id)
 
@@ -1181,7 +1104,6 @@ def _late(carrier: _UniqueIdCarrier, turn: Turn, tmp_path: Path) -> _LateSandbox
         turn_id=turn.id,
         open=lambda: _open_sandbox(
             sandboxes,
-            RUN_TOKENS,
             turn,
             {},
             None,
@@ -1231,7 +1153,6 @@ async def test_an_authorized_view_binds_the_turns_one_create(db: None, tmp_path:
         sandbox = _late(carrier, turn, tmp_path)
         authorizer = SandboxAuthorizer(
             sandbox=sandbox,
-            run_tokens=RUN_TOKENS,
             grants=GrantStore(),
             clis={"hub": HUB_CLI},
             turn=turn,
@@ -1242,9 +1163,7 @@ async def test_an_authorized_view_binds_the_turns_one_create(db: None, tmp_path:
         await sandbox.bash("true")
 
     assert carrier.created == 1
-    member_token, turn_token = (run_token for _, run_token in carrier.execs)
-    assert member_token == RUN_TOKENS.encode(RunToken(workspace_id, turn.id, acts_for=member_id))
-    assert turn_token == RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
+    assert [hub_token for _, hub_token in carrier.execs] == [grant_sentinel("acct-1"), None]
 
 
 async def test_a_recovered_cancel_stops_commands_without_creating_a_sandbox(
@@ -1302,7 +1221,7 @@ async def test_workspace_listing_warns_when_the_walk_truncates(
     sandboxes = _conversation_sandboxes(_TruncatingCarrier(), tmp_path, "local")
 
     with ws(workspace_id):
-        await sandboxes.open(conversation_id, None, "run-a", {})
+        await sandboxes.open(conversation_id, None, {})
         with caplog.at_level(logging.WARNING, logger="ufo"):
             entries = await sandboxes.entries(conversation_id)
 
@@ -1380,9 +1299,7 @@ async def test_a_subagent_turn_opens_the_sandbox_of_the_member_conversation(
 
     with ws(workspace_id):
         handle = (
-            await _open_sandbox(
-                _sandboxes(LocalCarrier(), "local", tmp_path), RUN_TOKENS, child, {}, None, ()
-            )
+            await _open_sandbox(_sandboxes(LocalCarrier(), "local", tmp_path), child, {}, None, ())
         ).handle
 
     assert handle.conversation_id == member_conversation
@@ -1453,10 +1370,88 @@ def _terminal_sandboxes(tmp_path: Path, terminals: Terminals) -> ConversationSan
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=PROXY,
         workspace_root=tmp_path / "workspaces",
         terminals=terminals,
     )
+
+
+SESSION = SessionCreated(
+    id=uuid4(),
+    workspace_id=uuid4(),
+    token_id=uuid4(),
+    version=1,
+    labels={},
+    budget=None,
+    created_at=datetime(2026, 10, 7, tzinfo=UTC),
+    expires_at=datetime(2026, 10, 7, 1, tzinfo=UTC),
+    revoked_at=None,
+    proxy_url="https://proxy.test",
+    env={"HTTPS_PROXY": "https://ufo-session-1:ufo@proxy.test", "GH_TOKEN": "ufo-sentinel-gh"},
+    token="ufo-session-1",
+    ca_pem="session-ca-pem",
+)
+
+
+@dataclass
+class _RecordingOpener:
+    calls: int = 0
+
+    async def __call__(self) -> SessionCreated:
+        self.calls += 1
+        return SESSION
+
+
+async def test_an_open_on_the_terminal_carrier_exports_the_session_its_opener_answers(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, conversation_id = await _conversation()
+    terminals = Terminals()
+    terminals.connect(conversation_id, "/Users/member/proj", None)
+    opener = _RecordingOpener()
+    env = {CONVERSATION_ID_ENV: str(conversation_id)}
+
+    with ws(workspace_id):
+        session = await _terminal_sandboxes(tmp_path, terminals).open(
+            conversation_id, None, env, opener
+        )
+
+    assert isinstance(session.carrier, TerminalCarrier)
+    assert opener.calls == 1
+    assert session.handle.egress_env == {
+        **env,
+        **SESSION.env,
+        PROXY_CA_CERT_ENV: SESSION.ca_pem,
+    }
+
+
+async def test_an_open_on_an_off_cluster_carrier_carries_the_session_on_its_spec(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, conversation_id = await _conversation()
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+    opener = _RecordingOpener()
+    env = {CONVERSATION_ID_ENV: str(conversation_id)}
+
+    with ws(workspace_id):
+        await _sandboxes(carrier, "e2b", tmp_path).open(conversation_id, None, env, opener)
+
+    (spec,) = carrier.specs
+    assert opener.calls == 1
+    assert (spec.env, spec.proxy_ca) == ({**env, **SESSION.env}, SESSION.ca_pem)
+
+
+async def test_an_open_on_the_local_carrier_never_asks_the_opener(db: None, tmp_path: Path) -> None:
+    workspace_id, conversation_id = await _conversation()
+    opener = _RecordingOpener()
+
+    with ws(workspace_id):
+        session = await _sandboxes(LocalCarrier(), "local", tmp_path).open(
+            conversation_id, None, {CONVERSATION_ID_ENV: str(conversation_id)}, opener
+        )
+
+    assert opener.calls == 0
+    assert PROXY_SESSION_ENV_NAMES.isdisjoint(session.handle.egress_env)
+    assert PROXY_CA_CERT_ENV not in session.handle.egress_env
 
 
 async def test_a_fresh_conversation_binds_to_the_connected_terminal(
@@ -1470,7 +1465,7 @@ async def test_a_fresh_conversation_binds_to_the_connected_terminal(
     sandboxes = _terminal_sandboxes(tmp_path, terminals)
 
     with ws(workspace_id):
-        session = await sandboxes.open(conversation_id, None, "run-a", {})
+        session = await sandboxes.open(conversation_id, None, {})
 
     assert isinstance(session.carrier, TerminalCarrier)
     assert session.handle.workspace_host_path == "/Users/member/proj"
@@ -1503,7 +1498,7 @@ async def test_a_bound_conversation_refuses_a_terminal_standing_elsewhere(
 
     with ws(workspace_id):
         with pytest.raises(TerminalGone) as refusal:
-            await sandboxes.open(conversation_id, None, "run-a", {})
+            await sandboxes.open(conversation_id, None, {})
 
     assert "/Users/member/proj" in str(refusal.value)
     assert "/Users/member/other" in str(refusal.value)
@@ -1518,7 +1513,7 @@ async def test_a_bound_conversation_refuses_when_no_terminal_is_connected(
 
     with ws(workspace_id):
         with pytest.raises(TerminalGone):
-            await sandboxes.open(conversation_id, None, "run-a", {})
+            await sandboxes.open(conversation_id, None, {})
         assert await sandboxes.existing(conversation_id) is None
 
 
@@ -1534,7 +1529,7 @@ async def test_a_deploy_conversation_keeps_its_carrier_beside_a_connected_termin
     sandboxes = _terminal_sandboxes(tmp_path, terminals)
 
     with ws(workspace_id):
-        session = await sandboxes.open(conversation_id, None, "run-a", {})
+        session = await sandboxes.open(conversation_id, None, {})
 
     assert isinstance(session.carrier, LocalCarrier)
     assert await _stored_handle(conversation_id) == "local:local"

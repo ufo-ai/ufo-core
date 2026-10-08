@@ -47,7 +47,7 @@ from ufo.harness.models.interface import (
 from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ExecResult, ProxyEndpoint, RunTokenCodec
+from ufo.harness.sandbox.session import ExecResult, RunTokenCodec
 from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
@@ -224,7 +224,6 @@ def _install_runtime(config: Config, registry: ModelRegistry, workspace_root: Pa
                 backend="local",
                 off_cluster=False,
                 image_ref=SANDBOX_IMAGE_REF,
-                proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
                 workspace_root=workspace_root,
             ),
             hub=InProcessHub(),

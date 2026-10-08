@@ -22,15 +22,10 @@ from ufo.harness.auth.token_signing import sign_token
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
-    CA_SANDBOX_PATH,
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     DOCUMENT_READ_EXEC_TIMEOUT_SECONDS,
-    NO_PROXY_HOSTS,
     PROBE_TOKEN_KIND,
-    PROXY_ENV_NAMES,
-    PROXY_PASSWORD,
     SANDBOX_PYTHON_FLAG,
-    SENTINEL_MODEL_KEY,
     SKILL_LOAD_PROG,
     SKILL_STAGING_DIRNAME,
     SYSTEM_SKILL_SYNC_PROG,
@@ -40,13 +35,11 @@ from ufo.harness.sandbox.session import (
     ExecResult,
     ProbeToken,
     ProbeTokenCodec,
-    ProxyEndpoint,
     RunToken,
     RunTokenCodec,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
-    egress_proxy_env,
     host_argv,
     runtime_relative,
     shell_path,
@@ -81,28 +74,8 @@ def _check_shell_path_expands_only_the_runtime_home_prefix() -> None:
     assert shell_path("/workspace/run file.mjs") == "'/workspace/run file.mjs'"
 
 
-def _check_egress_proxy_env_embeds_run_token_and_sentinels() -> None:
-    proxy = ProxyEndpoint(port=9, ca_cert="PEM", public_url="https://proxy.example.com")
-    env = egress_proxy_env(proxy, "tok-123")
-    assert env["HTTPS_PROXY"] == "https://tok-123:ufo@proxy.example.com"
-    assert env["HTTP_PROXY"] == env["https_proxy"] == env["http_proxy"] == env["HTTPS_PROXY"]
-    assert env["ANTHROPIC_API_KEY"] == SENTINEL_MODEL_KEY
-    assert env["OPENAI_API_KEY"] == SENTINEL_MODEL_KEY
-    assert env["NO_PROXY"] == env["no_proxy"] == NO_PROXY_HOSTS
-    assert env["NODE_EXTRA_CA_CERTS"] == CA_SANDBOX_PATH
-
-
-def _check_egress_proxy_env_refuses_missing_or_http_url() -> None:
-    with pytest.raises(RuntimeError, match=r"\[sandbox\] proxy_url"):
-        egress_proxy_env(ProxyEndpoint(port=9, ca_cert="PEM"), "tok")
-    with pytest.raises(RuntimeError, match="HTTPS"):
-        egress_proxy_env(
-            ProxyEndpoint(port=9, ca_cert="PEM", public_url="http://proxy.example.com"), "tok"
-        )
-
-
 def _basic(username: str) -> str:
-    return "Basic " + base64.b64encode(f"{username}:{PROXY_PASSWORD}".encode()).decode()
+    return "Basic " + base64.b64encode(f"{username}:ufo".encode()).decode()
 
 
 def _check_run_token_round_trips_encode_then_proxy_auth() -> None:
@@ -228,66 +201,41 @@ def _check_neither_codec_reads_the_other_domain_under_one_secret() -> None:
 
 
 def _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base() -> None:
-    conversation_id = uuid4()
-    common = RUN_TOKENS.encode(RunToken(uuid4(), uuid4()))
-    scoped = RUN_TOKENS.encode(RunToken(uuid4(), uuid4(), acts_for=uuid4()))
-    proxy = f"http://{common}:{PROXY_PASSWORD}@proxy:9000"
+    base_env = {
+        "HTTPS_PROXY": "https://ufo-session-turn:ufo@proxy.test",
+        "ALICE_KEY": "alice",
+        "UNRELATED": "kept",
+    }
     base = SandboxSession(
         carrier=_RecordingCarrier(),
         system_skill_archive=b"bundle",
-        handle=SandboxHandle(
-            conversation_id=conversation_id,
-            container_id="c",
-            run_token=common,
-            egress_env={
-                "HTTP_PROXY": proxy,
-                "HTTPS_PROXY": proxy,
-                "http_proxy": proxy,
-                "https_proxy": proxy,
-                "ALICE_KEY": "alice",
-                "UNRELATED": common,
-            },
-        ),
+        handle=SandboxHandle(conversation_id=uuid4(), container_id="c", egress_env=base_env),
     )
 
     authorized = base.authorize(
-        scoped,
         frozenset(("ALICE_KEY", "BOB_KEY")),
-        {"BOB_KEY": "bob"},
+        {"BOB_KEY": "bob", "HTTPS_PROXY": "https://ufo-session-member:ufo@proxy.test"},
     )
 
-    assert authorized.handle.run_token == scoped
     assert authorized.system_skill_archive == b"bundle"
-    assert all(
-        scoped in authorized.handle.egress_env[name]
-        for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
-    )
-    assert authorized.handle.egress_env["UNRELATED"] == common
-    assert "ALICE_KEY" not in authorized.handle.egress_env
-    assert authorized.handle.egress_env["BOB_KEY"] == "bob"
-    assert base.handle.run_token == common
-    assert base.handle.egress_env["HTTP_PROXY"] == proxy
+    assert authorized.handle.egress_env == {
+        "HTTPS_PROXY": "https://ufo-session-member:ufo@proxy.test",
+        "UNRELATED": "kept",
+        "BOB_KEY": "bob",
+    }
+    assert base.handle.egress_env == base_env
 
 
 def _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
     """A tool runs commands through a member-authorized session while cancel uses the base one.
     Both name the same turn, so the stop reaches its command groups alone."""
     turn_id = uuid4()
-    common = RUN_TOKENS.encode(RunToken(uuid4(), turn_id))
-    scoped = RUN_TOKENS.encode(RunToken(uuid4(), turn_id, acts_for=uuid4()))
-    proxy = f"http://{common}:{PROXY_PASSWORD}@proxy:9000"
     base = SandboxSession(
         carrier=_RecordingCarrier(),
-        handle=SandboxHandle(
-            conversation_id=uuid4(),
-            container_id="c",
-            run_token=common,
-            egress_env=dict.fromkeys(PROXY_ENV_NAMES, proxy),
-            turn_id=turn_id,
-        ),
+        handle=SandboxHandle(conversation_id=uuid4(), container_id="c", turn_id=turn_id),
     )
 
-    authorized = base.authorize(scoped, frozenset(), {})
+    authorized = base.authorize(frozenset(), {})
 
     assert authorized.handle.turn_id == turn_id
 
@@ -396,8 +344,6 @@ async def _live_ctx(
             ),
             image_ref=SANDBOX_IMAGE_REF,
             workspace_host_path=str(tmp_path / "my ws"),
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
-            run_token="off-turn-test",
         )
     )
     return _tool_ctx(
@@ -1456,8 +1402,6 @@ async def test_a_command_that_failed_on_its_own_records_no_timeout(
 def test_sandbox_session_sync_contract() -> None:
     for check in (
         _check_shell_path_expands_only_the_runtime_home_prefix,
-        _check_egress_proxy_env_embeds_run_token_and_sentinels,
-        _check_egress_proxy_env_refuses_missing_or_http_url,
         _check_run_token_round_trips_encode_then_proxy_auth,
         _check_run_token_wire_carries_a_member_the_turn_or_nobody,
         _check_run_token_member_is_keyword_only,

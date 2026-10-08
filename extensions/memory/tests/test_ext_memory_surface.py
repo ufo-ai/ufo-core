@@ -34,7 +34,6 @@ from ufo.config import DEFAULT_OPERATOR_RULE, DebuggerConfig
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.runtime.ext.operator import OperatorSetup, install_operator, select_operator_rule
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
@@ -107,7 +106,6 @@ async def explorer(
             backend="local",
             off_cluster=False,
             image_ref=SANDBOX_IMAGE_REF,
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             workspace_root=tmp_path / "workspaces",
         ),
         InProcessHub(),

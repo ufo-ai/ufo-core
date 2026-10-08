@@ -42,7 +42,6 @@ from ufo.harness.sandbox.exec_env import (
     cli_git_config,
 )
 from ufo.harness.sandbox.session import (
-    RunToken,
     RunTokenCodec,
     Sandbox,
     SandboxProviderUnavailable,
@@ -1060,7 +1059,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             turn_id=turn.id,
             open=lambda: _open_sandbox(
                 runtime.sandboxes,
-                runtime.run_tokens,
                 turn,
                 clis,
                 runtime.credentials,
@@ -1072,7 +1070,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         )
         sandbox_authorizer = SandboxAuthorizer(
             sandbox=sandbox,
-            run_tokens=runtime.run_tokens,
             grants=grants,
             clis=clis,
             turn=turn,
@@ -1482,7 +1479,6 @@ async def _frozen_byok(turn_id: UUID, decided: bool, attempt: str) -> bool:
 
 async def _open_sandbox(
     sandboxes: ConversationSandbox,
-    run_tokens: RunTokenCodec,
     turn: Turn,
     clis: Mapping[str, CliCredential],
     credentials: CredentialStore | None,
@@ -1490,12 +1486,10 @@ async def _open_sandbox(
 ) -> SandboxSession:
     """git's default `http.proxyAuthMethod=anyauth` waits for a `407` the proxy never sends;
     `GIT_PROXY_AUTH_CONFIG` presents the token on the first CONNECT."""
-    run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
     with span("sandbox.open"):
         return await sandboxes.open(
             turn.sandbox_conversation_id or turn.conversation_id,
             turn.id,
-            run_tokens.encode(run),
             {
                 CONVERSATION_ID_ENV: str(turn.conversation_id),
                 TOOL_BRIDGE_URL_ENV: TOOL_BRIDGE_URL,
@@ -1508,25 +1502,12 @@ async def _open_sandbox(
 @dataclass(frozen=True)
 class SandboxAuthorizer:
     sandbox: Sandbox
-    run_tokens: RunTokenCodec
     grants: GrantStore | None
     clis: Mapping[str, CliCredential]
     turn: Turn
 
     async def authorize(self, acting_member_id: UUID | None) -> Sandbox:
-        run = RunToken(
-            workspace_id=self.turn.workspace_id,
-            turn_id=self.turn.id,
-            acts_for=(
-                "turn"
-                if acting_member_id == self.turn.member_id
-                else "nobody"
-                if acting_member_id is None
-                else acting_member_id
-            ),
-        )
         return self.sandbox.authorize(
-            self.run_tokens.encode(run),
             frozenset(cli.env for cli in self.clis.values()) | GIT_IDENTITY_ENV,
             await _grant_cli_env(self.grants, self.clis, self.turn.id, acting_member_id),
         )

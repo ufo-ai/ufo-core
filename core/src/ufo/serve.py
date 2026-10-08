@@ -9,18 +9,13 @@ import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import uvicorn
-from cryptography import x509
 from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import NameOID
 from dbos import DBOS, DBOSClient
 from fastapi import FastAPI, WebSocket
 from openfeature.provider import FeatureProvider
@@ -62,13 +57,7 @@ from ufo.harness.sandbox.conversation import ConversationSandbox
 from ufo.harness.sandbox.exec_env import ProbeEnv
 from ufo.harness.sandbox.preview import parse_preview_service
 from ufo.harness.sandbox.select import select_carriers
-from ufo.harness.sandbox.session import (
-    EGRESS_CA_CERT_ENV,
-    EGRESS_CONTROL_TOKEN_ENV,
-    ProbeTokenCodec,
-    ProxyEndpoint,
-    RunTokenCodec,
-)
+from ufo.harness.sandbox.session import ProbeTokenCodec, RunTokenCodec
 from ufo.harness.sandbox.site_report import SiteReports
 from ufo.harness.sandbox.terminal import Terminals, TerminalTransport
 from ufo.host.assemble import HostEnvironment
@@ -431,15 +420,13 @@ def run(fleet: Fleet) -> None:
         subagent_grants=subagent_grants,
         actions=deploy_actions,
     )
+    _proxy_control(app, config, manifests, credentials, run_tokens, blob_backend, tool_bridge)
     sandboxes = ConversationSandbox(
         carrier=carrier,
         backend=config.sandbox.backend,
         off_cluster=carrier_spec.off_cluster,
         resume_carriers=carriers.resume,
         image_ref=config.sandbox.image_ref,
-        proxy=_proxy_endpoint(
-            app, config, manifests, credentials, run_tokens, blob_backend, tool_bridge
-        ),
         workspace_root=config.sandbox.workspace_root,
         terminals=_select_terminal_transport(config, manifests, fleet_blob),
         document_renderer=document_renderer,
@@ -1510,7 +1497,7 @@ def _preview_settings(config: Config) -> tuple[tuple[str, int], str] | None:
     return preview_service, preview_token
 
 
-def _proxy_endpoint(
+def _proxy_control(
     app: FastAPI,
     config: Config,
     manifests: tuple[Manifest, ...],
@@ -1518,26 +1505,7 @@ def _proxy_endpoint(
     run_tokens: RunTokenCodec,
     blob: FilesystemBlobStore | S3BlobStore,
     bridge: ToolBridge | None,
-) -> ProxyEndpoint:
-    """A local `ufoctl serve` with no `ufo-egress` beside it mounts the control RPC under a
-    throwaway CA, so an in-sandbox CONNECT to the unmanned proxy port is refused."""
-    if config.sandbox.proxy_url is not None:
-        ca_cert = os.environ.get(EGRESS_CA_CERT_ENV)
-        if not ca_cert:
-            raise RuntimeError(
-                f"{EGRESS_CA_CERT_ENV} must hold the shared egress CA certificate (PEM) so the "
-                "sandbox trusts the proxy's TLS; the egress wire runs as a separate `ufo-egress` "
-                "process that holds the matching key"
-            )
-        control_token = os.environ.get(EGRESS_CONTROL_TOKEN_ENV)
-        if not control_token:
-            raise RuntimeError(
-                f"{EGRESS_CONTROL_TOKEN_ENV} must be set so `ufo-egress` authenticates to serve's "
-                "egress-control RPC"
-            )
-    else:
-        ca_cert = os.environ.get(EGRESS_CA_CERT_ENV) or _ephemeral_egress_ca()
-        control_token = os.environ.get(EGRESS_CONTROL_TOKEN_ENV) or secrets.token_urlsafe(32)
+) -> EgressControl:
     preview = _preview_settings(config)
     model_hosts, model_binds = model_bindings(config)
     public_base_url = config.connect.public_base_url
@@ -1557,7 +1525,7 @@ def _proxy_endpoint(
         ),
     )
     control = EgressControl(
-        control_token=control_token,
+        control_token=secrets.token_urlsafe(32),
         cache_control_token=os.environ.get(CACHE_CONTROL_TOKEN_ENV) or secrets.token_urlsafe(32),
         resolver=resolver,
         run_tokens=run_tokens,
@@ -1565,30 +1533,7 @@ def _proxy_endpoint(
     )
     app.include_router(control.router())
     app.include_router(control.git_credential_router())
-    return ProxyEndpoint(
-        port=config.sandbox.proxy_port,
-        ca_cert=ca_cert,
-        public_url=config.sandbox.proxy_url,
-    )
-
-
-def _ephemeral_egress_ca() -> str:
-    """Cert only: the signing key lives in `ufo-egress`, and with none running a CONNECT is refused
-    before any leaf is validated."""
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ufo-egress-local")])
-    certificate = (
-        x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.now(UTC))
-        .not_valid_after(datetime.now(UTC) + timedelta(days=3650))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .sign(key, hashes.SHA256())
-    )
-    return certificate.public_bytes(serialization.Encoding.PEM).decode()
+    return control
 
 
 WILDCARD_BINDS = frozenset({"0.0.0.0", "::"})

@@ -17,7 +17,6 @@ from ufo.db import workspace_tx
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     ExecResult,
-    ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
 )
@@ -441,8 +440,6 @@ async def test_a_js_cell_over_its_budget_survives_in_the_real_local_carrier(
             conversation_id=uuid4(),
             image_ref="ufo-sandbox:latest",
             workspace_host_path=str(tmp_path / "workspace"),
-            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
-            run_token="run-token-abc",
         )
     )
     session = SandboxSession(carrier=carrier, handle=handle)
@@ -482,8 +479,6 @@ async def test_an_expired_cell_emitting_on_leaves_the_next_calls_images_alone(
             conversation_id=uuid4(),
             image_ref="ufo-sandbox:latest",
             workspace_host_path=str(tmp_path / "workspace"),
-            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
-            run_token="run-token-abc",
         )
     )
     ctx = _context(
@@ -519,8 +514,6 @@ async def test_global_modules_link_resolves_a_package_only_in_a_secondary_root(
             conversation_id=uuid4(),
             image_ref="ufo-sandbox:latest",
             workspace_host_path=str(tmp_path / "workspace"),
-            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
-            run_token="run-token-abc",
         )
     )
     session = SandboxSession(carrier=carrier, handle=handle)

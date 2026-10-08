@@ -28,7 +28,7 @@ from ufo_ext_redis_hub.stream_terminal import REPLY_INLINE_MAX_BYTES, RedisTermi
 from ufo_testsupport.plugin import integration_dependency_available
 
 from ufo.blob import BlobEntry, FilesystemBlobStore
-from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSpec
+from ufo.harness.sandbox.session import SandboxSpec
 from ufo.harness.sandbox.terminal import (
     TerminalAbsent,
     TerminalCarrier,
@@ -323,8 +323,6 @@ async def test_the_turn_pods_carrier_lands_a_write_on_the_connection_pods_machin
             conversation_id=conversation_id,
             image_ref="unused",
             workspace_host_path=str(project),
-            proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
-            run_token="run-token",
         )
     )
 
@@ -466,8 +464,6 @@ async def test_attach_finds_a_binding_a_peer_pod_holds(
             conversation_id=conversation_id,
             image_ref="unused",
             workspace_host_path="/proj",
-            proxy=ProxyEndpoint(port=0, ca_cert="ca-pem"),
-            run_token="run-token",
             resume_id="/proj",
         )
     )

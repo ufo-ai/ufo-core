@@ -34,6 +34,7 @@ CANNED_WS = f"ws://127.0.0.1:{ext.STACK_PORT_START}/devtools/browser/9f1c-abc-12
 FAKE_HOST = "9223-sbx123.e2b.app"
 BROWSER_DIR = "/var/tmp/ufo-browser"
 ALLOCATED = json.dumps({"slot": 0, "dir": BROWSER_DIR})
+PROXY_ENV = frozenset({"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"})
 
 
 @dataclass
@@ -330,6 +331,27 @@ async def test_a_prior_turn_token_survives_until_its_cleanup_succeeds() -> None:
         await provider.reattach(await original.token(), _session(carrier))
 
 
+def test_the_browser_takes_the_bridge_only_when_its_launch_shell_sees_a_proxy() -> None:
+    stack = _test_stack()
+    flag = f"--proxy-server=http://127.0.0.1:{stack.egress_bridge_port}"
+    launch = ext._browser_up_command(stack)
+    assert f"${{HTTPS_PROXY:+{flag}}}" in launch
+    assert launch.count(flag) == 1
+
+
+async def test_the_bridge_command_short_circuits_on_an_unset_proxy(tmp_path: Path) -> None:
+    stack = ext._stack("0" * 32, 0, str(tmp_path))
+    command = ext._egress_bridge_up_command(stack)
+    assert command.startswith('if [ -z "${HTTPS_PROXY:-}" ]; then echo unproxied; exit 0; fi\n')
+    env = {name: value for name, value in os.environ.items() if name not in PROXY_ENV}
+    process = await asyncio.create_subprocess_exec(
+        "bash", "-c", command, env=env, stdout=asyncio.subprocess.PIPE
+    )
+    stdout, _ = await process.communicate()
+    assert (process.returncode, stdout) == (0, b"unproxied\n")
+    assert not await asyncio.to_thread(Path(stack.bridge_script).exists)
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -419,6 +441,60 @@ async def test_egress_bridge_authenticates_and_tunnels_plain_http(tmp_path: Path
         b"GET /title HTTP/1.1",
     ]
     assert all(b"Connection: close\r\n" in head for head in origin_heads)
+
+
+async def test_an_unproxied_bridge_reaches_the_origin_directly(tmp_path: Path) -> None:
+    origin_heads: list[bytes] = []
+
+    async def origin(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        origin_heads.append(await reader.readuntil(b"\r\n\r\n"))
+        writer.write(b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 6\r\n\r\ndirect")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(origin, "127.0.0.1", 0)
+    origin_port = server.sockets[0].getsockname()[1]
+    bridge_port = _free_port()
+    script = tmp_path / "bridge-direct.py"
+    script.write_text(
+        f'LISTEN_HOST = "127.0.0.1"\nLISTEN_PORT = {bridge_port}\n' + ext.EGRESS_BRIDGE_PROGRAM
+    )
+    env = {name: value for name, value in os.environ.items() if name not in PROXY_ENV}
+    process = await asyncio.create_subprocess_exec(sys.executable, script, env=env)
+    try:
+        for _attempt in range(100):
+            try:
+                _probe_reader, probe_writer = await asyncio.open_connection(
+                    "127.0.0.1", bridge_port
+                )
+            except OSError:
+                await asyncio.sleep(0.01)
+                continue
+            probe_writer.close()
+            await probe_writer.wait_closed()
+            break
+        else:
+            raise AssertionError("egress bridge did not start")
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", bridge_port)
+        writer.write(
+            f"GET http://127.0.0.1:{origin_port}/title HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{origin_port}\r\nConnection: close\r\n\r\n".encode()
+        )
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=5)
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        process.terminate()
+        with contextlib.suppress(ProcessLookupError):
+            await process.wait()
+        server.close()
+        await server.wait_closed()
+
+    assert response.endswith(b"direct")
+    assert [head.split(b"\r\n", 1)[0] for head in origin_heads] == [b"GET /title HTTP/1.1"]
 
 
 async def test_plain_http_cannot_reuse_one_authoritys_tunnel_for_another(

@@ -15,7 +15,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.harness.context import ContextRemaining
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import SandboxSession, SandboxSpec
 from ufo.runtime.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
 from ufo.runtime.tools.registry import ToolRegistry
 from ufo.runtime.turns.audience import conversation_audience
@@ -61,8 +61,6 @@ async def _session(workspace: Path) -> SandboxSession:
             conversation_id=uuid4(),
             image_ref=SANDBOX_IMAGE_REF,
             workspace_host_path=str(workspace),
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
-            run_token="rollover-tools-test",
         )
     )
     return SandboxSession(carrier=carrier, handle=handle)

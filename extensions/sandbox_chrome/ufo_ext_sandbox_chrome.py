@@ -1,8 +1,9 @@
 """The sandbox_chrome cdp provider: Chrome driven inside each turn's conversation sandbox.
 
-A hosted turn owns one isolated stack inside the sandbox: an authenticated egress bridge, a
-headless Chrome, its profile and downloads, and a Host-rewriting DevTools proxy. Its durable turn
-id names the stack before any sandbox side effect, so a worker crash during launch is recoverable.
+A turn owns one isolated stack inside the sandbox: a headless Chrome, its profile and downloads,
+a Host-rewriting DevTools proxy, and, where the sandbox is proxied, an authenticated egress bridge.
+Its durable turn id names the stack before any sandbox side effect, so a worker crash during
+launch is recoverable.
 Sibling turns can share one conversation container, so no port, process journal, browser profile,
 credential, or cleanup target is sandbox-wide. An atomic slot directory assigns three ports to
 each lease and the lease releases only that slot and stack when it closes.
@@ -21,13 +22,16 @@ carrier's Seatbelt profile. A remote carrier's container holds the browser; the 
 confines only its writes, so a compromised renderer there reads what the member can and reaches
 the network.
 
+The bridge exists only where the sandbox is proxied. A sandbox whose env carries no `HTTPS_PROXY`
+starts none — its command prints `unproxied` and exits, which the readiness checks accept — and
+Chrome launches without `--proxy-server`, reaching the network directly. Where it is proxied,
 Chromium does not authenticate from credentials embedded in the standard proxy environment, while
-the egress proxy intentionally accepts only authenticated CONNECT requests. A loopback bridge
-therefore converts Chromium's HTTP proxy requests into CONNECT tunnels and adds the current turn's
-proxy authorization. Its detached `ufo run` supervisor stays alive with the lease, which keeps the
-turn's TLS loopback proxy and authorization alive. Plain HTTP is one request per bridge connection:
-the origin receives `Connection: close`, and a later request for another host must open its own
-authenticated tunnel instead of entering the first host's tunnel."""
+the proxy accepts only authenticated CONNECT requests. A loopback bridge therefore converts
+Chromium's HTTP proxy requests into CONNECT tunnels and adds the session's proxy authorization. Its
+detached `ufo run` supervisor stays alive with the lease, which keeps the session's TLS loopback
+proxy and authorization alive. Plain HTTP is one request per bridge connection: the origin receives
+`Connection: close`, and a later request for another host must open its own authenticated tunnel
+instead of entering the first host's tunnel."""
 
 import asyncio
 import base64
@@ -49,6 +53,7 @@ STACK_PORTS_PER_SLOT = 3
 CHROME_PORT_OFFSET = 0
 CDP_PROXY_PORT_OFFSET = 1
 EGRESS_BRIDGE_PORT_OFFSET = 2
+BRIDGE_UNPROXIED = "unproxied"
 CHROME_READY_BUDGET_SECONDS = 45
 """The wait for a cold chromium to bind its DevTools port."""
 PROXY_READY_BUDGET_SECONDS = 10
@@ -253,10 +258,10 @@ async def read_head(reader: asyncio.StreamReader) -> bytes:
     return head
 
 
-def proxy_config() -> tuple[str, int, ssl.SSLContext | None, str]:
+def proxy_config() -> tuple[str, int, ssl.SSLContext | None, str] | None:
     raw = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
     if not raw:
-        raise ValueError("the browser needs the sandbox egress proxy URL")
+        return None
     parsed = urlsplit(raw)
     if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
         raise ValueError("the sandbox proxy URL is invalid")
@@ -271,7 +276,15 @@ def proxy_config() -> tuple[str, int, ssl.SSLContext | None, str]:
 async def open_tunnel(
     authority: str,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, bytes, bool]:
-    host, port, context, authorization = proxy_config()
+    proxy = proxy_config()
+    if proxy is None:
+        origin = urlsplit(f"//{authority}")
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(origin.hostname, origin.port),
+            timeout=UPSTREAM_TIMEOUT_SECONDS,
+        )
+        return reader, writer, b"HTTP/1.1 200 Connection Established\r\n\r\n", True
+    host, port, context, authorization = proxy
     reader, writer = await asyncio.wait_for(
         asyncio.open_connection(
             host,
@@ -620,12 +633,23 @@ def port_open(port):
         return False
 
 
+def unproxied(exit_path, log_path):
+    try:
+        exited = Path(exit_path).read_text().strip()
+        said = Path(log_path).read_text(errors="replace").splitlines()
+    except OSError:
+        return False
+    return exited == "0" and said[-1:] == [BRIDGE_UNPROXIED]
+
+
 def await_port(port, exit_path, log_path, budget, what):
     deadline = time.monotonic() + budget
     while True:
         if port_open(port):
             return
         if Path(exit_path).exists():
+            if unproxied(exit_path, log_path):
+                return
             raise SystemExit(
                 f"{what} exited without serving port {port}\\n{tail(log_path)}"
             )
@@ -664,7 +688,7 @@ await_port(
 )
 serving(
     CHROME_URL,
-    [browser] + platform_argv + CHROME_ARGV_TAIL,
+    [browser] + platform_argv + sys.argv[1:] + CHROME_ARGV_TAIL,
     CHROME_LOG,
     CHROME_PID,
     CHROME_READY_BUDGET_SECONDS,
@@ -801,7 +825,8 @@ ABANDON_BROWSER_STACK"""
 def _egress_bridge_up_command(stack: BrowserStack) -> str:
     config = _assignments({"LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": stack.egress_bridge_port})
     script = shlex.quote(stack.bridge_script)
-    return f"""cat >{script} <<'EGRESS_BRIDGE'
+    return f"""if [ -z "${{HTTPS_PROXY:-}}" ]; then echo {BRIDGE_UNPROXIED}; exit 0; fi
+cat >{script} <<'EGRESS_BRIDGE'
 {config}
 {EGRESS_BRIDGE_PROGRAM}
 EGRESS_BRIDGE
@@ -833,7 +858,6 @@ def _browser_up_command(stack: BrowserStack) -> str:
                 "--remote-debugging-address=0.0.0.0",
                 f"--remote-debugging-port={stack.chrome_port}",
                 "--remote-allow-origins=*",
-                f"--proxy-server=http://127.0.0.1:{stack.egress_bridge_port}",
                 f"--user-data-dir={stack.chrome_profile}",
                 "about:blank",
             ],
@@ -846,6 +870,7 @@ def _browser_up_command(stack: BrowserStack) -> str:
             "EGRESS_BRIDGE_PORT": stack.egress_bridge_port,
             "EGRESS_BRIDGE_TASK_EXIT": f"{stack.task_base}.exit",
             "EGRESS_BRIDGE_TASK_LOG": f"{stack.task_base}.log",
+            "BRIDGE_UNPROXIED": BRIDGE_UNPROXIED,
             "PROBE_TIMEOUT_SECONDS": BROWSER_PROBE_TIMEOUT_SECONDS,
             "POLL_SLEEP_SECONDS": BROWSER_POLL_SLEEP_SECONDS,
             "CHROME_READY_BUDGET_SECONDS": CHROME_READY_BUDGET_SECONDS,
@@ -857,7 +882,8 @@ def _browser_up_command(stack: BrowserStack) -> str:
 {proxy_config}
 {PROXY_PROGRAM}
 CDP_PROXY
-python3 - <<'BRING_UP_BROWSER_STACK'
+python3 - ${{HTTPS_PROXY:+--proxy-server=http://127.0.0.1:{stack.egress_bridge_port}}} \
+<<'BRING_UP_BROWSER_STACK'
 # sandbox_chrome bring up
 {browser_config}
 {BROWSER_LOOKUP_PROGRAM}
@@ -911,6 +937,7 @@ def _resolve_command(stack: BrowserStack) -> str:
             "BRIDGE_PORT": stack.egress_bridge_port,
             "TASK_EXIT": f"{stack.task_base}.exit",
             "TASK_LOG": f"{stack.task_base}.log",
+            "BRIDGE_UNPROXIED": BRIDGE_UNPROXIED,
             "PROBE_TIMEOUT_SECONDS": BROWSER_PROBE_TIMEOUT_SECONDS,
             "WAIT_SECONDS": PROXY_READY_BUDGET_SECONDS,
             "POLL_SECONDS": BROWSER_POLL_SLEEP_SECONDS,
@@ -934,10 +961,13 @@ while True:
     except OSError:
         if Path(TASK_EXIT).exists():
             try:
+                exited = Path(TASK_EXIT).read_text().strip()
                 lines = Path(TASK_LOG).read_text(errors="replace").splitlines()
                 detail = "\\n".join(lines[-LOG_TAIL_LINES:])
             except OSError:
-                detail = "the bridge wrote no log"
+                exited, lines, detail = "", [], "the bridge wrote no log"
+            if exited == "0" and lines[-1:] == [BRIDGE_UNPROXIED]:
+                break
             raise SystemExit(f"the browser egress bridge exited before reattach\\n{{detail}}")
         if time.monotonic() >= deadline:
             raise SystemExit("the browser egress bridge did not restart before reattach")

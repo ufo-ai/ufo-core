@@ -24,12 +24,10 @@ from ufo.harness.sandbox.select import select_carriers
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.sandbox import (
-    NO_PROXY_HOSTS,
+    PROXY_SESSION_ENV_NAMES,
     SANDBOX_GID,
     SANDBOX_UID,
-    SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
-    ProxyEndpoint,
     SandboxHandle,
     SandboxSpec,
     sandbox_runtime_root,
@@ -84,9 +82,7 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
         conversation_id=uuid4(),
         image_ref="ufo-sandbox:latest",
         workspace_host_path="/tmp/ws",
-        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
-        run_token="turn-a",
-        env={"GH_TOKEN": "UFO_SENTINEL_GRANT_acct-1"},
+        env={"GH_TOKEN": "ufo-sentinel-gh"},
     )
     carrier = DockerCarrier()
     handle = await carrier.create(spec)
@@ -124,18 +120,13 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
     await carrier.exec(handle, ("bash", "-lc", "gh api user"), 30)
 
     exec_argv = calls[-1]
-    proxy_url = "http://turn-a:ufo@host.docker.internal:8080"
-    assert f"HTTPS_PROXY={proxy_url}" in exec_argv
-    assert f"https_proxy={proxy_url}" in exec_argv
-    assert f"NO_PROXY={NO_PROXY_HOSTS}" in exec_argv
-    assert f"no_proxy={NO_PROXY_HOSTS}" in exec_argv
-    assert f"ANTHROPIC_API_KEY={SENTINEL_MODEL_KEY}" in exec_argv
-    assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-1" in exec_argv
-    assert exec_argv.index("cid1") > exec_argv.index(f"HTTPS_PROXY={proxy_url}")
+    assert "GH_TOKEN=ufo-sentinel-gh" in exec_argv
+    assert exec_argv.index("cid1") > exec_argv.index("GH_TOKEN=ufo-sentinel-gh")
     assert exec_argv[exec_argv.index("--workdir") + 1] == WORKSPACE_DIR
-    assert "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" in exec_argv
-    assert "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt" in exec_argv
-    assert "NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/ufo-proxy.crt" in exec_argv
+    exported = {arg.split("=", 1)[0] for arg in exec_argv if "=" in arg}
+    assert PROXY_SESSION_ENV_NAMES.isdisjoint(exported)
+    assert not {"SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "ANTHROPIC_API_KEY"} & exported
+    assert not [argv for argv in calls if "ca-certificates" in " ".join(argv)]
 
 
 async def test_missing_conversation_network_is_created(
@@ -188,8 +179,6 @@ async def test_failed_create_removes_the_conversation_network(
         conversation_id=conversation,
         image_ref="ufo-sandbox:latest",
         workspace_host_path="/tmp/ws",
-        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
-        run_token="turn-a",
     )
 
     with pytest.raises(RuntimeError, match="image unavailable"):
@@ -208,7 +197,7 @@ async def test_failed_provision_removes_the_container_and_network(
         if argv[0] == "run":
             return 0, b"cid1\n", b""
         if argv[0] == "exec":
-            return 1, b"", b"trust update failed"
+            return 1, b"", b"chown: /workspace: Operation not permitted"
         return 0, b"", b""
 
     monkeypatch.setattr(docker_ext, "_docker", fake_docker)
@@ -217,11 +206,9 @@ async def test_failed_provision_removes_the_container_and_network(
         conversation_id=conversation,
         image_ref="ufo-sandbox:latest",
         workspace_host_path="/tmp/ws",
-        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
-        run_token="turn-a",
     )
 
-    with pytest.raises(RuntimeError, match="trust update failed"):
+    with pytest.raises(RuntimeError, match="Operation not permitted"):
         await DockerCarrier().create(spec)
 
     assert calls[-2:] == [
@@ -402,8 +389,6 @@ def _reclaim_spec(conversation_id: UUID) -> SandboxSpec:
         conversation_id=conversation_id,
         image_ref="ufo-sandbox:latest",
         workspace_host_path="/tmp/ws",
-        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
-        run_token="turn-a",
     )
 
 
@@ -488,7 +473,6 @@ async def test_entries_lists_container_paths_workspace_relative(
         backend="docker",
         off_cluster=False,
         image_ref="ufo-sandbox:latest",
-        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
         workspace_root=tmp_path / "workspaces",
     )
     (tmp_path / "workspaces" / str(conversation_id)).mkdir(parents=True)
@@ -569,29 +553,6 @@ async def test_concurrent_network_creates_converge_like_the_container_race(
 
     assert handle.container_id
     assert ("network", "create", network) in daemon.calls
-
-
-async def test_a_name_race_loser_installs_the_ca_before_answering(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    daemon = _FakeDaemon()
-    daemon.conflict_on_existing = True
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    conversation = uuid4()
-    carrier = DockerCarrier()
-    winner = await carrier.create(_reclaim_spec(conversation))
-    daemon.hide_from_ps = True
-    daemon.calls.clear()
-
-    loser = await carrier.create(_reclaim_spec(conversation))
-
-    assert loser.container_id == winner.container_id
-    ca_installs = [
-        argv
-        for argv in daemon.calls
-        if argv[0] == "exec" and winner.container_id in argv and "ca-certificates" in argv[-1]
-    ]
-    assert ca_installs
 
 
 async def test_a_revive_never_interleaves_inside_a_reclaims_release(

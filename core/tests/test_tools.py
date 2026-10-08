@@ -25,7 +25,6 @@ from ufo.harness.models.pricing import ModelPrice
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     ExecResult,
-    ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
     workspace_path,
@@ -359,8 +358,6 @@ async def test_bash_keeps_the_carrier_python_after_the_login_profile_resets_path
             conversation_id=uuid4(),
             image_ref="ufo-sandbox:latest",
             workspace_host_path=str(workspace),
-            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
-            run_token="run-token",
         )
     )
     raw = await asyncio.create_subprocess_exec(
@@ -544,8 +541,6 @@ async def test_write_and_edit_land_bounded_results(tmp_path: Path, sandbox_clien
             conversation_id=uuid4(),
             image_ref="ufo-sandbox:latest",
             workspace_host_path=str(workspace),
-            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
-            run_token="run-token",
         )
     )
     ctx = make_context(SandboxSession(carrier=carrier, handle=handle), tmp_path)
@@ -641,8 +636,6 @@ async def _local_session(workspace: Path) -> SandboxSession:
         conversation_id=uuid4(),
         image_ref="ufo-sandbox:latest",
         workspace_host_path=str(workspace),
-        proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
-        run_token="run-token",
     )
     return SandboxSession(carrier=carrier, handle=await carrier.create(spec))
 

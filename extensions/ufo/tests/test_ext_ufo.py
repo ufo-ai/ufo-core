@@ -52,7 +52,7 @@ from ufo.harness.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.harness.sandbox.session import RunTokenCodec
 from ufo.harness.sandbox.terminal import TerminalOp, TerminalOpFailed
 from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import skill_registry
@@ -880,7 +880,6 @@ def runtime(
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
         workspace_root=config.blob.root.parent / "workspaces",
     )
     dbos_client = replay_safe_client(config.database.system_url)
