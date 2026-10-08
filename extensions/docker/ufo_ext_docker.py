@@ -1,13 +1,9 @@
 """The Docker carrier extension: a per-conversation container reached only through the egress proxy.
 
-Core's default is the local carrier; a deploy that sets `[sandbox] backend = "docker"` runs its
-sandboxes as sibling containers. `/workspace` is a host bind mount, so this carrier reclaims its
-own idle containers by stopping them on each create — memory and bridge subnets are the contended
-resources, so the stop releases the conversation's network with it, and a stopped container with
-its workspace persists for any later touch to reconnect and start again: a conversation whose
-turn was merely quiet survives its own reclaim at the cost of one restart. Core
-reclaims nothing, because for a carrier whose `/workspace` lives inside its sandbox the container
-*is* the workspace. Every command runs through `docker exec`
+Core's default is the local carrier. Docker containers use host-mounted workspaces and isolated
+conversation networks. The carrier stops unpinned containers to bound its warm network cache and
+release idle subnets. A later operation reconnects and starts the retained container.
+Every command runs through `docker exec`
 under its turn's egress env: HTTP(S)_PROXY points at the egress proxy running on the host, reached
 at `host.docker.internal`, and carries the turn's run token as its basic-auth username so the proxy
 attributes each metered request to the turn; the proxy refuses any host its rules do not allow and
@@ -21,6 +17,7 @@ import os
 import time
 from collections import Counter, defaultdict
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from uuid import UUID
@@ -61,6 +58,7 @@ COPY_IN_SCRIPT = (
 RUNTIME_ROOT_TIMEOUT_SECONDS = 30
 READ_CHUNK_BYTES = 1024 * 1024
 IDLE_RECLAIM_SECONDS = 1800
+WARM_NETWORK_LIMIT = 16
 NAME_CONFLICT_MARKER = "is already in use"
 NOT_RUNNING_MARKER = "is not running"
 REASON_ERRNO: dict[str, int] = {os.strerror(code): code for code in errno.errorcode}
@@ -69,7 +67,6 @@ INSPECT_TIMEOUT_SECONDS = 10
 NO_SUCH_NETWORK_MARKER = "not found"
 STOP_TIMEOUT_SECONDS = 30
 START_TIMEOUT_SECONDS = 30
-UUID_NAME_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 DEFAULT_NETWORK = "ufo-sandbox"
 HOST_GATEWAY_NAME = "host.docker.internal"
 HOST_GATEWAY_MAPPING = f"{HOST_GATEWAY_NAME}:host-gateway"
@@ -106,23 +103,21 @@ class DockerCarrier:
     clock: Callable[[], float] = time.monotonic
     _touched: dict[UUID, float] = field(default_factory=dict)
     _inflight: Counter[UUID] = field(default_factory=Counter)
+    _allocation: asyncio.Lock = field(default_factory=asyncio.Lock)
     _lifecycle: defaultdict[UUID, asyncio.Lock] = field(
         default_factory=lambda: defaultdict(asyncio.Lock)
     )
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        """Create-or-attach the conversation's container. The egress env is never baked into the
-        container — a container outliving its first turn must not pin that turn's run token — it
-        rides the returned handle and every exec carries it, so each turn's commands run under its
-        own token and sentinel entries.
+        """Create or attach the conversation's container and install the proxy CA.
 
-        The daemon arbitrates concurrent creates for one conversation: both race `docker run` under
-        the same deterministic name, the loser's run answers a name conflict, and the loser attaches
-        to the winner's container — nothing here holds a lock, and no second container ever exists.
-        The CA installs on every path out, not only the fresh run: a container outliving a serve
-        restart still trusts the dead process's proxy CA, and the local proxy mints a fresh one per
-        process, so every request from a reused container would fail TLS until the new CA lands."""
-        await self._reclaim_idle(spec.conversation_id)
+        Egress credentials stay in the returned handle. Each exec uses its turn's token and
+        sentinel entries. Installing the CA on reused containers keeps TLS bound to this proxy.
+        Docker's deterministic container name resolves concurrent creates to one container."""
+        async with self._pin(spec.conversation_id):
+            return await self._create(spec)
+
+    async def _create(self, spec: SandboxSpec) -> SandboxHandle:
         name = f"{CONTAINER_NAME_PREFIX}{spec.conversation_id}"
         proxy_url = (
             f"http://{spec.run_token}:{PROXY_PASSWORD}@{HOST_GATEWAY_NAME}:{spec.proxy.port}"
@@ -169,7 +164,7 @@ class DockerCarrier:
         if stopped is not None:
             await _docker("rm", "-f", stopped)
         network = self._network_name(spec.conversation_id)
-        await self._ensure_network(network)
+        await self._allocate_network(spec.conversation_id)
         argv = [
             "run",
             "-d",
@@ -228,6 +223,10 @@ class DockerCarrier:
         again whenever the revive cannot deliver a running container, refused or raising: a read
         promises absence, never an error. No egress env: a read runs `ufo fs` and `cat`, nothing
         that leaves the box."""
+        async with self._pin(spec.conversation_id):
+            return await self._attach(spec)
+
+    async def _attach(self, spec: SandboxSpec) -> SandboxHandle | None:
         name = f"{CONTAINER_NAME_PREFIX}{spec.conversation_id}"
         running = await self._running_id(name)
         if running is None:
@@ -253,20 +252,24 @@ class DockerCarrier:
             runtime_root=sandbox_runtime_root(spec.conversation_id),
         )
 
+    @asynccontextmanager
+    async def _pin(self, conversation_id: UUID) -> AsyncIterator[None]:
+        async with self._lifecycle[conversation_id]:
+            self._inflight[conversation_id] += 1
+            self._touched[conversation_id] = self.clock()
+        try:
+            yield
+        finally:
+            self._inflight[conversation_id] -= 1
+            self._touched[conversation_id] = self.clock()
+
+    async def _allocate_network(self, conversation_id: UUID) -> None:
+        async with self._allocation:
+            await self._reclaim_idle(conversation_id)
+            await self._ensure_network(self._network_name(conversation_id))
+
     async def _reclaim_idle(self, opening: UUID) -> None:
-        """A stop, never a removal: the carrier has no view of turn liveness, so a quiet turn must
-        survive its own reclaim, and every later touch starts the container again."""
         self._touched[opening] = self.clock()
-        code, stdout, stderr = await _docker(
-            "ps",
-            "--filter",
-            f"name=^{CONTAINER_NAME_PREFIX}{UUID_NAME_PATTERN}$",
-            "--format",
-            "{{.Names}}",
-        )
-        if code != 0:
-            raise RuntimeError(f"docker ps failed: {stderr.decode().strip()}")
-        held = [(stdout, CONTAINER_NAME_PREFIX)]
         code, stdout, stderr = await _docker(
             "network",
             "ls",
@@ -277,30 +280,22 @@ class DockerCarrier:
         )
         if code != 0:
             raise RuntimeError(f"docker network ls failed: {stderr.decode().strip()}")
-        held.append((stdout, f"{self.network}-"))
-        for listing, prefix in held:
-            for name in listing.decode().split():
-                self._touched.setdefault(UUID(name.removeprefix(prefix)), self.clock())
-        stale = [
-            conversation_id
-            for conversation_id, touched in self._touched.items()
-            if not self._inflight[conversation_id]
-            and self.clock() - touched >= IDLE_RECLAIM_SECONDS
-        ]
-        for conversation_id in stale:
-            container_id = await self._held_id(f"{CONTAINER_NAME_PREFIX}{conversation_id}")
-            touched = self._touched.get(conversation_id)
-            if (
-                touched is None
-                or self._inflight[conversation_id]
-                or self.clock() - touched < IDLE_RECLAIM_SECONDS
-            ):
-                continue
-            del self._touched[conversation_id]
+        networks = {UUID(name.removeprefix(f"{self.network}-")) for name in stdout.decode().split()}
+        owned = networks & self._touched.keys()
+        candidates = sorted(owned - {opening}, key=self._touched.__getitem__)
+        held = len(owned | {opening})
+        for conversation_id in candidates:
             async with self._lifecycle[conversation_id]:
-                released = await self._release(conversation_id, container_id)
-            if not released:
-                self._touched.setdefault(conversation_id, touched)
+                touched = self._touched[conversation_id]
+                if self._inflight[conversation_id] or (
+                    held <= WARM_NETWORK_LIMIT and self.clock() - touched < IDLE_RECLAIM_SECONDS
+                ):
+                    continue
+                container_id = await self._held_id(f"{CONTAINER_NAME_PREFIX}{conversation_id}")
+                if not await self._release(conversation_id, container_id):
+                    continue
+                del self._touched[conversation_id]
+                held -= 1
 
     async def exec(
         self,
@@ -311,8 +306,8 @@ class DockerCarrier:
     ) -> ExecResult:
         """A call in flight pins its container: the in-flight count parks the conversation outside
         reclaim's reach for exactly the call's duration, whatever that duration is, and the
-        completion stamp then grants a full idle span after it — so a container is stoppable only
-        when genuinely between calls."""
+        completion stamp sets its place in the warm network cache. Reclaim stops a container only
+        between calls."""
         env_args = tuple(
             arg for name, value in handle.egress_env.items() for arg in ("--env", f"{name}={value}")
         )
@@ -331,9 +326,7 @@ class DockerCarrier:
         timeout_s: int,
         options: tuple[str, ...],
     ) -> ExecResult:
-        self._inflight[handle.conversation_id] += 1
-        self._touched[handle.conversation_id] = self.clock()
-        try:
+        async with self._pin(handle.conversation_id):
             code, stdout, stderr = await _docker(
                 "exec",
                 "--workdir",
@@ -361,9 +354,6 @@ class DockerCarrier:
                 exit_code=EXEC_TIMEOUT_CODE if timed_out else code,
                 timed_out_after_s=timeout_s if timed_out else None,
             )
-        finally:
-            self._inflight[handle.conversation_id] -= 1
-            self._touched[handle.conversation_id] = self.clock()
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         """`docker exec -i` gives the container a real stdin, so the bytes stream in over it and
@@ -371,18 +361,13 @@ class DockerCarrier:
         renamed onto it, so a reader sees the whole of one write or the whole of the one before,
         a copy-in that stops part-way leaves the target as it was, and an overwrite keeps the
         file's mode."""
-        self._inflight[handle.conversation_id] += 1
-        self._touched[handle.conversation_id] = self.clock()
-        try:
+        async with self._pin(handle.conversation_id):
             code, stderr = await self._write_started(handle, path, content)
             if code != 0 and NOT_RUNNING_MARKER in stderr.decode(errors="replace"):
                 if await self._revive(handle.conversation_id, handle.container_id):
                     code, stderr = await self._write_started(handle, path, content)
             if code != 0:
                 raise OSError(stderr.decode(errors="replace").strip() or f"write failed: {path}")
-        finally:
-            self._inflight[handle.conversation_id] -= 1
-            self._touched[handle.conversation_id] = self.clock()
 
     async def _write_started(
         self, handle: SandboxHandle, path: str, content: bytes
@@ -413,29 +398,26 @@ class DockerCarrier:
         anything else — including a `cat` killed mid-stream, which exits non-zero with empty
         stderr — raises with the exit code and the container's own reported state rather than
         masquerading as a filesystem refusal."""
-        self._inflight[handle.conversation_id] += 1
-        self._touched[handle.conversation_id] = self.clock()
-        chunks, detail = self._read_started(handle, path)
-        try:
-            async for chunk in chunks:
-                yield chunk
-            if detail and NOT_RUNNING_MARKER in detail[0][1]:
-                if await self._revive(handle.conversation_id, handle.container_id):
-                    chunks, detail = self._read_started(handle, path)
-                    async for chunk in chunks:
-                        yield chunk
-            if detail:
-                code, stderr_text = detail[0]
-                reason = stderr_text.splitlines()[-1].rsplit(": ", 1)[-1] if stderr_text else ""
-                refused = REASON_ERRNO.get(reason)
-                if refused is not None:
-                    raise OSError(refused, stderr_text)
-                cause = f": {stderr_text}" if stderr_text else await self._death_report(handle)
-                raise RuntimeError(f"read of {path} died: cat exited {code}{cause}")
-        finally:
-            await chunks.aclose()
-            self._inflight[handle.conversation_id] -= 1
-            self._touched[handle.conversation_id] = self.clock()
+        async with self._pin(handle.conversation_id):
+            chunks, detail = self._read_started(handle, path)
+            try:
+                async for chunk in chunks:
+                    yield chunk
+                if detail and NOT_RUNNING_MARKER in detail[0][1]:
+                    if await self._revive(handle.conversation_id, handle.container_id):
+                        chunks, detail = self._read_started(handle, path)
+                        async for chunk in chunks:
+                            yield chunk
+                if detail:
+                    code, stderr_text = detail[0]
+                    reason = stderr_text.splitlines()[-1].rsplit(": ", 1)[-1] if stderr_text else ""
+                    refused = REASON_ERRNO.get(reason)
+                    if refused is not None:
+                        raise OSError(refused, stderr_text)
+                    cause = f": {stderr_text}" if stderr_text else await self._death_report(handle)
+                    raise RuntimeError(f"read of {path} died: cat exited {code}{cause}")
+            finally:
+                await chunks.aclose()
 
     def _read_started(
         self, handle: SandboxHandle, path: str
@@ -517,10 +499,10 @@ class DockerCarrier:
     async def _revive(self, conversation_id: UUID, container_id: str) -> bool:
         """A daemon that cannot give the network back raises; only `attach` converts that to
         absence, because only the read path promises None over an error."""
+        await self._allocate_network(conversation_id)
         async with self._lifecycle[conversation_id]:
             self._touched[conversation_id] = self.clock()
             network = self._network_name(conversation_id)
-            await self._ensure_network(network)
             code, _, stderr = await _docker("network", "connect", network, container_id)
             if code != 0 and NETWORK_EXISTS_MARKER not in stderr.decode():
                 return False

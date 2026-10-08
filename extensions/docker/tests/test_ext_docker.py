@@ -820,10 +820,6 @@ async def test_the_scan_admits_only_exact_uuid_container_names(
     assert imposter in daemon.running
 
 
-def _scan_ps(argv: tuple[str, ...]) -> bool:
-    return argv[0] == "ps" and "--format" in argv
-
-
 def _scan_network_ls(argv: tuple[str, ...]) -> bool:
     return argv[:2] == ("network", "ls") and "--format" in argv
 
@@ -839,7 +835,6 @@ def _resolve_exited(argv: tuple[str, ...]) -> bool:
 @pytest.mark.parametrize(
     ("fails", "message"),
     [
-        (_scan_ps, "docker ps failed"),
         (_scan_network_ls, "docker network ls failed"),
         (_resolve_any_state, "docker ps failed"),
         (_resolve_exited, "docker ps failed"),
