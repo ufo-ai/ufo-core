@@ -4025,11 +4025,6 @@ class TurnEngine:
             context = await self._authorize_context(context)
         except TerminalAbsent as error:
             raise TerminalGone(str(error)) from error
-        except SandboxProviderUnavailable as error:
-            parked = sandbox_provider_park(self.turn)
-            if parked is None:
-                raise
-            raise parked from error
         except Exception as error:
             return _DispatchGate(
                 target,

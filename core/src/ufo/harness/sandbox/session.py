@@ -791,6 +791,10 @@ def _resolve_parts(parts: tuple[str, ...]) -> list[str]:
     return stack
 
 
+type EgressEnv = Callable[[], Awaitable[Mapping[str, str]]]
+"""Answers the proxy env one authorization of an enforced sandbox egresses under."""
+
+
 class Sandbox:
     """What a caller reaches a conversation's `/workspace` through: run a command in it, write bytes
     in, stream bytes out, dial a port something inside it opened.
@@ -818,9 +822,13 @@ class Sandbox:
         """Whether a sandbox exists to run an operation against."""
         raise NotImplementedError
 
-    def authorize(self, cleared_env: frozenset[str], env: Mapping[str, str]) -> "Sandbox":
+    async def authorize(
+        self, cleared_env: frozenset[str], env: Mapping[str, str], egress: EgressEnv | None = None
+    ) -> "Sandbox":
         """The same sandbox under exact connection capabilities: the variables in `cleared_env`
-        dropped from the base environment, and `env` exported over what remains."""
+        dropped from the base environment, and `env` exported over what remains. On a sandbox whose
+        carrier enforces egress, `egress` is asked once, when the sandbox first binds, for the proxy
+        env its commands egress under, laid beneath `env`; an unenforced sandbox never asks it."""
         raise NotImplementedError
 
     async def _bound(self) -> "SandboxSession":
@@ -1138,6 +1146,10 @@ class SandboxSession(Sandbox):
     carrier: Carrier
     handle: SandboxHandle
     system_skill_archive: bytes = b""
+    enforced: bool = False
+    """Whether the carrier enforces this sandbox's egress through a proxy session — the member's
+    terminal or an off-cluster carrier — so an authorization lays the acting member's session env
+    over it."""
 
     @property
     def conversation_id(self) -> UUID:
@@ -1154,14 +1166,18 @@ class SandboxSession(Sandbox):
     async def _bound(self) -> "SandboxSession":
         return self
 
-    def authorize(self, cleared_env: frozenset[str], env: Mapping[str, str]) -> "SandboxSession":
+    async def authorize(
+        self, cleared_env: frozenset[str], env: Mapping[str, str], egress: EgressEnv | None = None
+    ) -> "SandboxSession":
+        session_env = await egress() if egress is not None and self.enforced else {}
         kept = {
             key: value for key, value in self.handle.egress_env.items() if key not in cleared_env
         }
         return SandboxSession(
             carrier=self.carrier,
-            handle=replace(self.handle, egress_env=kept | dict(env)),
+            handle=replace(self.handle, egress_env=kept | dict(session_env) | dict(env)),
             system_skill_archive=self.system_skill_archive,
+            enforced=self.enforced,
         )
 
 
@@ -1192,8 +1208,10 @@ class _LateSandbox(Sandbox):
     def created(self) -> bool:
         return self._session is not None
 
-    def authorize(self, cleared_env: frozenset[str], env: Mapping[str, str]) -> Sandbox:
-        return _AuthorizedSandbox(late=self, cleared_env=cleared_env, env=env)
+    async def authorize(
+        self, cleared_env: frozenset[str], env: Mapping[str, str], egress: EgressEnv | None = None
+    ) -> Sandbox:
+        return _AuthorizedSandbox(self, cleared_env, env, egress)
 
     async def _bound(self) -> SandboxSession:
         if self._session is None:
@@ -1208,26 +1226,43 @@ class _LateSandbox(Sandbox):
             await bound.carrier.stop_commands(replace(bound.handle, turn_id=self._turn_id))
 
 
-@dataclass(frozen=True)
 class _AuthorizedSandbox(Sandbox):
-    late: _LateSandbox
-    cleared_env: frozenset[str]
-    env: Mapping[str, str]
+    def __init__(
+        self,
+        late: _LateSandbox,
+        cleared_env: frozenset[str],
+        env: Mapping[str, str],
+        egress: EgressEnv | None,
+    ) -> None:
+        self._late = late
+        self._cleared_env = cleared_env
+        self._env = env
+        self._egress = egress
+        self._lock = asyncio.Lock()
+        self._session: SandboxSession | None = None
 
     @property
     def conversation_id(self) -> UUID:
-        return self.late.conversation_id
+        return self._late.conversation_id
 
     @property
     def turn_id(self) -> UUID:
-        return self.late.turn_id
+        return self._late.turn_id
 
     @property
     def created(self) -> bool:
-        return self.late.created
+        return self._late.created
 
-    def authorize(self, cleared_env: frozenset[str], env: Mapping[str, str]) -> Sandbox:
-        return self.late.authorize(cleared_env, env)
+    async def authorize(
+        self, cleared_env: frozenset[str], env: Mapping[str, str], egress: EgressEnv | None = None
+    ) -> Sandbox:
+        return await self._late.authorize(cleared_env, env, egress)
 
     async def _bound(self) -> SandboxSession:
-        return (await self.late._bound()).authorize(self.cleared_env, self.env)
+        if self._session is None:
+            async with self._lock:
+                if self._session is None:
+                    self._session = await (await self._late._bound()).authorize(
+                        self._cleared_env, self._env, self._egress
+                    )
+        return self._session

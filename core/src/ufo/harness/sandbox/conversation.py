@@ -149,7 +149,7 @@ class ConversationSandbox:
         none exists there, and an e2b one idles into a paused, unbilled husk."""
         stored, size = await self._binding(conversation_id)
         for _ in range(OPEN_CLAIM_ATTEMPTS):
-            backend, carrier, handle = await self._opened(
+            backend, carrier, handle, enforced = await self._opened(
                 conversation_id, turn_id, stored, env, size, proxied
             )
             persisted = f"{backend}{SANDBOX_HANDLE_SEP}{handle.container_id}"
@@ -158,6 +158,7 @@ class ConversationSandbox:
                     carrier=carrier,
                     handle=handle,
                     system_skill_archive=self.system_skill_archive,
+                    enforced=enforced,
                 )
             winner = await self._claim(conversation_id, stored, persisted)
             if winner == persisted:
@@ -165,6 +166,7 @@ class ConversationSandbox:
                     carrier=carrier,
                     handle=handle,
                     system_skill_archive=self.system_skill_archive,
+                    enforced=enforced,
                 )
             stored = winner
         raise RuntimeError(
@@ -201,6 +203,7 @@ class ConversationSandbox:
                     carrier=carrier,
                     handle=handle,
                     system_skill_archive=self.system_skill_archive,
+                    enforced=True,
                 )
             )
         routed, backend, off_cluster = self._route(stored)
@@ -229,6 +232,7 @@ class ConversationSandbox:
                 carrier=routed,
                 handle=handle,
                 system_skill_archive=self.system_skill_archive,
+                enforced=off_cluster,
             )
         )
 
@@ -366,7 +370,7 @@ class ConversationSandbox:
         env: Mapping[str, str],
         size: str,
         proxied: SessionOpener | None,
-    ) -> tuple[str, Carrier, SandboxHandle]:
+    ) -> tuple[str, Carrier, SandboxHandle, bool]:
         """The terminal carrier's `create` waits out a reconnect and raises `TerminalGone` when no
         terminal is connected at the bound directory."""
         bound_path = None if stored is None else sandbox_handle_id(CLIENT_BACKEND, stored)
@@ -388,7 +392,7 @@ class ConversationSandbox:
                     turn_id=turn_id,
                 )
             )
-            return CLIENT_BACKEND, carrier, handle
+            return CLIENT_BACKEND, carrier, handle, True
         routed, backend, off_cluster = self._route(stored)
         if off_cluster:
             host_path = (self.workspace_root / str(conversation_id)).resolve()
@@ -410,7 +414,7 @@ class ConversationSandbox:
                 turn_id=turn_id,
             )
         )
-        return backend, routed, handle
+        return backend, routed, handle, off_cluster
 
     @staticmethod
     async def _proxied(

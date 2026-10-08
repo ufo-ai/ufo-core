@@ -60,7 +60,7 @@ from ufo.runtime.access.member_authorization import (
     MEMBER_AUTHORIZATION_MODEL,
     MemberAuthorization,
 )
-from ufo.runtime.access.proxy_sessions import ProxySessions
+from ufo.runtime.access.proxy_sessions import ProxySessions, SessionCreated
 from ufo.runtime.access.turn_sessions import SandboxAuthorizer, TurnSessions
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
@@ -1088,105 +1088,109 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             clis=clis,
             turn=turn,
         )
-        await _SandboxSetup(runtime.hub, runtime.blob, turn, attempt).run(
-            sandbox, preload, assembled.files
-        )
-        engine = TurnEngine(
-            turn=turn,
-            agent=resolved,
-            byok=byok,
-            system_prompt=system_prompt,
-            serving=serving,
-            activity_summarizer=ActivitySummarizer(
-                ModelAccess(
-                    replace(
-                        runtime.registry,
-                        auto_model=runtime.config.models.background_jobs_model,
-                    ),
-                    ACTIVITY_JOB,
-                    runtime.spend,
-                    runtime.ledger,
-                )
-            ),
-            transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
-            context=boundary.build(
-                BoundaryInputs(
-                    serving=serving,
-                    blob=runtime.blob,
-                    conversation_id=turn.conversation_id,
-                    hooks=hooks,
-                    turn=turn,
-                    agent=resolved,
-                    sandbox=sandbox,
-                )
-            ),
-            hub=runtime.hub,
-            lineage=lineage,
-            sandbox=sandbox,
-            sandbox_for=(
-                None if turn.admission_source == INTENT_ADMISSION else sandbox_authorizer.authorize
-            ),
-            cdp_provider=runtime.cdp_provider,
-            search_provider=runtime.search_provider,
-            memory=runtime.memory,
-            connectors=runtime.connectors,
-            connector_read_only=connector_read_only,
-            tools=tools,
-            tool_ext=tool_ext,
-            workspace_slots=runtime.environment.slots(),
-            requestable_credentials=(
-                None
-                if runtime.credentials is None
-                else CredentialRequests(
-                    fernet=runtime.credentials.fernet,
-                    declared=frozenset(
-                        slot.name for manifest in runtime.manifests for slot in manifest.credentials
-                    ),
-                )
-            ),
-            models=(AUTO_MODEL, *sorted(runtime.registry.specs)),
-            model_specs=runtime.registry.specs,
-            auto_model=runtime.registry.auto_model,
-            sign_in_path=runtime.config.serve.sign_in_path,
-            page_kit=runtime.config.sites.page_kit,
-            public_base_url=runtime.config.connect.public_base_url,
-            spend=runtime.spend,
-            ledger=runtime.ledger,
-            hooks=hooks,
-            blob=runtime.blob,
-            spawn=subagents.spawn,
-            subagents=subagents,
-            audience=audience,
-            artifact_token_secret=runtime.artifact_token_secret,
-            site_previewer=runtime.site_previewer,
-            grants=grants,
-            member_authorization=MemberAuthorization(
-                ModelAccess(
-                    replace(runtime.registry, auto_model=MEMBER_AUTHORIZATION_MODEL),
-                    MEMBER_AUTHORIZATION_JOB,
-                    runtime.spend,
-                    runtime.ledger,
-                ),
-                runtime.run_tokens.secret,
-            ),
-            previous_turn_ended_at=previous_turn_ended_at,
-            pricing=billing.pricing(),
-            attempt=attempt,
-            max_rounds=max_rounds,
-            skills=assembled.skills,
-            member_skill_block=member_skill_block,
-            preload=preload,
-            output_model=output_model,
-            adoption=AdoptionReplay(
-                replaying=claim == ADOPTED_CLAIM
-                and not turn.spawned
-                and turn.admission_source != INTENT_ADMISSION
-            ),
-            verbs=verbs,
-            granted_actions=assembled.granted_actions,
-        )
-        run = engine.run_intent if turn.admission_source == INTENT_ADMISSION else engine.run
         try:
+            await _SandboxSetup(runtime.hub, runtime.blob, turn, attempt).run(
+                sandbox, preload, assembled.files
+            )
+            engine = TurnEngine(
+                turn=turn,
+                agent=resolved,
+                byok=byok,
+                system_prompt=system_prompt,
+                serving=serving,
+                activity_summarizer=ActivitySummarizer(
+                    ModelAccess(
+                        replace(
+                            runtime.registry,
+                            auto_model=runtime.config.models.background_jobs_model,
+                        ),
+                        ACTIVITY_JOB,
+                        runtime.spend,
+                        runtime.ledger,
+                    )
+                ),
+                transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
+                context=boundary.build(
+                    BoundaryInputs(
+                        serving=serving,
+                        blob=runtime.blob,
+                        conversation_id=turn.conversation_id,
+                        hooks=hooks,
+                        turn=turn,
+                        agent=resolved,
+                        sandbox=sandbox,
+                    )
+                ),
+                hub=runtime.hub,
+                lineage=lineage,
+                sandbox=sandbox,
+                sandbox_for=(
+                    None
+                    if turn.admission_source == INTENT_ADMISSION
+                    else sandbox_authorizer.authorize
+                ),
+                cdp_provider=runtime.cdp_provider,
+                search_provider=runtime.search_provider,
+                memory=runtime.memory,
+                connectors=runtime.connectors,
+                connector_read_only=connector_read_only,
+                tools=tools,
+                tool_ext=tool_ext,
+                workspace_slots=runtime.environment.slots(),
+                requestable_credentials=(
+                    None
+                    if runtime.credentials is None
+                    else CredentialRequests(
+                        fernet=runtime.credentials.fernet,
+                        declared=frozenset(
+                            slot.name
+                            for manifest in runtime.manifests
+                            for slot in manifest.credentials
+                        ),
+                    )
+                ),
+                models=(AUTO_MODEL, *sorted(runtime.registry.specs)),
+                model_specs=runtime.registry.specs,
+                auto_model=runtime.registry.auto_model,
+                sign_in_path=runtime.config.serve.sign_in_path,
+                page_kit=runtime.config.sites.page_kit,
+                public_base_url=runtime.config.connect.public_base_url,
+                spend=runtime.spend,
+                ledger=runtime.ledger,
+                hooks=hooks,
+                blob=runtime.blob,
+                spawn=subagents.spawn,
+                subagents=subagents,
+                audience=audience,
+                artifact_token_secret=runtime.artifact_token_secret,
+                site_previewer=runtime.site_previewer,
+                grants=grants,
+                member_authorization=MemberAuthorization(
+                    ModelAccess(
+                        replace(runtime.registry, auto_model=MEMBER_AUTHORIZATION_MODEL),
+                        MEMBER_AUTHORIZATION_JOB,
+                        runtime.spend,
+                        runtime.ledger,
+                    ),
+                    runtime.run_tokens.secret,
+                ),
+                previous_turn_ended_at=previous_turn_ended_at,
+                pricing=billing.pricing(),
+                attempt=attempt,
+                max_rounds=max_rounds,
+                skills=assembled.skills,
+                member_skill_block=member_skill_block,
+                preload=preload,
+                output_model=output_model,
+                adoption=AdoptionReplay(
+                    replaying=claim == ADOPTED_CLAIM
+                    and not turn.spawned
+                    and turn.admission_source != INTENT_ADMISSION
+                ),
+                verbs=verbs,
+                granted_actions=assembled.granted_actions,
+            )
+            run = engine.run_intent if turn.admission_source == INTENT_ADMISSION else engine.run
             frame = await run()
         except TurnParked:
             return "parked"
@@ -1514,15 +1518,23 @@ async def _open_sandbox(
 ) -> SandboxSession:
     """git's default `http.proxyAuthMethod=anyauth` waits for a `407` the proxy never sends;
     `GIT_PROXY_AUTH_CONFIG` presents the token on the first CONNECT."""
+
+    async def proxied() -> SessionCreated | None:
+        session = await sessions.open()
+        if session is None:
+            return None
+        return session.model_copy(
+            update={"env": {**session.env, TOOL_BRIDGE_URL_ENV: TOOL_BRIDGE_URL}}
+        )
+
     with span("sandbox.open"):
         return await sandboxes.open(
             turn.sandbox_conversation_id or turn.conversation_id,
             turn.id,
             {
                 CONVERSATION_ID_ENV: str(turn.conversation_id),
-                **({TOOL_BRIDGE_URL_ENV: TOOL_BRIDGE_URL} if sessions.proxy is not None else {}),
                 **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cli_git_config(clis))),
                 **await keyed_host_env(credentials, slots, turn.workspace_id),
             },
-            proxied=sessions.open,
+            proxied=proxied,
         )

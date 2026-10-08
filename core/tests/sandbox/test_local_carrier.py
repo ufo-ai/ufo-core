@@ -706,8 +706,8 @@ async def test_background_descendant_keeps_its_authority_across_later_execs(
     workspace = tmp_path / "workspace"
     carrier = LocalCarrier()
     base = SandboxSession(carrier=carrier, handle=await carrier.create(_spec(workspace)))
-    first = base.authorize(frozenset(("GH_TOKEN",)), {"GH_TOKEN": "sent-a"})
-    second = base.authorize(frozenset(("GH_TOKEN",)), {"GH_TOKEN": "sent-b"})
+    first = await base.authorize(frozenset(("GH_TOKEN",)), {"GH_TOKEN": "sent-a"})
+    second = await base.authorize(frozenset(("GH_TOKEN",)), {"GH_TOKEN": "sent-b"})
 
     launched = await first.bash(
         "nohup sh -c 'while [ ! -f release ]; do :; done; "

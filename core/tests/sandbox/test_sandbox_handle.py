@@ -1107,9 +1107,13 @@ async def test_concurrent_first_opens_converge_on_one_persisted_sandbox(
 
 
 def _late(
-    carrier: _UniqueIdCarrier, turn: Turn, tmp_path: Path, sessions: TurnSessions
+    carrier: _UniqueIdCarrier,
+    turn: Turn,
+    tmp_path: Path,
+    sessions: TurnSessions,
+    backend: str = "e2b",
 ) -> _LateSandbox:
-    sandboxes = _sandboxes(cast(Carrier, carrier), "e2b", tmp_path)
+    sandboxes = _sandboxes(cast(Carrier, carrier), backend, tmp_path)
     return _LateSandbox(
         conversation_id=turn.sandbox_conversation_id or turn.conversation_id,
         turn_id=turn.id,
@@ -1173,6 +1177,47 @@ async def test_an_authorized_view_binds_the_turns_one_create(
     assert carrier.created == 1
     member_sentinel = sessions.opened[member_id].session.env["HUB_TOKEN"]
     assert [hub_token for _, hub_token in carrier.execs] == [member_sentinel, None]
+
+
+async def test_a_dispatch_that_never_reaches_the_sandbox_opens_no_session(
+    db: None, tmp_path: Path, proxy: ProxySessions
+) -> None:
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
+    turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
+    carrier = _UniqueIdCarrier()
+    sessions = _proxied(proxy, turn, {"hub": HUB_CLI})
+
+    with ws(workspace_id), agent(agent_id):
+        authorizer = SandboxAuthorizer(
+            _late(carrier, turn, tmp_path, sessions), sessions, GrantStore(), {"hub": HUB_CLI}, turn
+        )
+        await authorizer.authorize(member_id)
+        await authorizer.authorize(None)
+
+    assert carrier.created == 0
+    assert sessions.opened == {}
+
+
+async def test_an_in_cluster_carrier_with_a_proxy_opens_no_session(
+    db: None, tmp_path: Path, proxy: ProxySessions
+) -> None:
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
+    turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
+    carrier = _UniqueIdCarrier()
+    sessions = _proxied(proxy, turn, {"hub": HUB_CLI})
+
+    with ws(workspace_id), agent(agent_id):
+        sandbox = _late(carrier, turn, tmp_path, sessions, backend="docker")
+        authorizer = SandboxAuthorizer(sandbox, sessions, GrantStore(), {"hub": HUB_CLI}, turn)
+        await (await authorizer.authorize(member_id)).bash("true")
+        await sandbox.bash("true")
+
+    assert sessions.opened == {}
+    assert len(carrier.envs) == 2
+    for env in carrier.envs:
+        assert {"HTTPS_PROXY", "https_proxy", "HUB_TOKEN", TOOL_BRIDGE_URL_ENV}.isdisjoint(env)
 
 
 async def test_a_recovered_cancel_stops_commands_without_creating_a_sandbox(

@@ -3,8 +3,9 @@ acting member's session over a turn's sandbox.
 
 A turn holds one session per acting member, so a dispatch acting for one member never runs under a
 session bound to another's private connections. Each is opened on first use under an idempotency
-key a recovered workflow's replay reuses, reconciled and renewed at every dispatch, and narrowed or
-revoked when the turn ends. A probe holds one session for one exec, revoked when the exec ends."""
+key a recovered workflow's replay reuses, reconciled and renewed at every dispatch that reaches an
+enforced sandbox, and narrowed or revoked when the turn ends. A probe holds one session for one
+exec, revoked when the exec ends."""
 
 import asyncio
 import math
@@ -56,7 +57,8 @@ class _Held:
 class TurnSessions:
     """The proxy sessions one turn holds, one per acting member: opened on first use under an
     idempotency key the replay of a recovered workflow reuses, reconciled and renewed at every
-    dispatch, narrowed or revoked when the turn ends. With no `proxy` it opens nothing."""
+    dispatch that reaches an enforced sandbox, narrowed or revoked when the turn ends. With no
+    `proxy` it opens nothing."""
 
     proxy: ProxySessions | None
     rules: PerAgentRules
@@ -213,8 +215,10 @@ class TurnSessions:
 
 @dataclass(frozen=True)
 class SandboxAuthorizer:
-    """Lay the acting member's session env and committer identity over the turn's sandbox for one
-    dispatch, after dropping every connector CLI variable and identity a previous authority set."""
+    """Lay the acting member's committer identity over the turn's sandbox for one dispatch, after
+    dropping every connector CLI variable and identity a previous authority set, and, on a carrier
+    that enforces egress, the acting member's session env, reconciled when the dispatch first
+    reaches the sandbox: a dispatch that never does, or an in-cluster carrier, opens no session."""
 
     sandbox: Sandbox
     sessions: TurnSessions
@@ -223,13 +227,16 @@ class SandboxAuthorizer:
     turn: Turn
 
     async def authorize(self, acting_member_id: UUID | None) -> Sandbox:
-        session = await self.sessions.reconcile(self.sessions.actor(acting_member_id))
-        env = {
-            **(session.env if session is not None else {}),
-            **await git_identity_env(self.grants, self.clis, self.turn.id, acting_member_id),
-        }
-        return self.sandbox.authorize(
-            frozenset(cli.env for cli in self.clis.values()) | GIT_IDENTITY_ENV, env
+        actor = self.sessions.actor(acting_member_id)
+
+        async def egress() -> Mapping[str, str]:
+            session = await self.sessions.reconcile(actor)
+            return {} if session is None else session.env
+
+        return await self.sandbox.authorize(
+            frozenset(cli.env for cli in self.clis.values()) | GIT_IDENTITY_ENV,
+            await git_identity_env(self.grants, self.clis, self.turn.id, acting_member_id),
+            egress,
         )
 
 

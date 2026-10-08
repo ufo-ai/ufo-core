@@ -50,7 +50,7 @@ from ufo.harness.models.interface import (
 from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ExecResult, RunTokenCodec
+from ufo.harness.sandbox.session import ExecResult, RunTokenCodec, Sandbox
 from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
@@ -223,6 +223,7 @@ def _install_runtime(
     registry: ModelRegistry,
     workspace_root: Path,
     sessions: ProxySessions | None = None,
+    off_cluster: bool = False,
 ) -> None:
     recovery_dbos = replay_safe_client(config.database.system_url)
     loop_queue.init_runtime(
@@ -232,7 +233,7 @@ def _install_runtime(
             sandboxes=ConversationSandbox(
                 carrier=LocalCarrier(),
                 backend="local",
-                off_cluster=False,
+                off_cluster=off_cluster,
                 image_ref=SANDBOX_IMAGE_REF,
                 workspace_root=workspace_root,
             ),
@@ -485,6 +486,7 @@ async def test_a_recovered_turn_revokes_the_session_its_crashed_run_opened(
             _registry(_CrashOnceModel(crashed=[False])),
             tmp_path / "workspaces",
             ProxySessions(PROXY_URL, _Bearer(), http),
+            off_cluster=True,
         )
         try:
             with SetWorkflowID(str(turn_id)):
@@ -525,6 +527,7 @@ async def test_a_turn_parked_by_a_proxy_outage_keeps_its_session(
             _registry(_ParkOnSecondDispatchModel(fake)),
             tmp_path / "workspaces",
             ProxySessions(PROXY_URL, _Bearer(), http),
+            off_cluster=True,
         )
         try:
             with SetWorkflowID(str(turn_id)):
@@ -541,6 +544,46 @@ async def test_a_turn_parked_by_a_proxy_outage_keeps_its_session(
     assert session["revoked_at"] is None
     assert not [target for _, target, _, _ in fake.state.calls if target.endswith("/revoke")]
     assert not [method for method, _, _, _ in fake.state.calls if method == "GET"]
+
+
+@pytest.mark.serial
+async def test_a_turn_failing_after_its_sandbox_opened_revokes_its_session(
+    db: None, dbos_launched: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run(setup: loop_queue._SandboxSetup, sandbox: Sandbox, *args: object) -> None:
+        await sandbox.write_file("seed.txt", b"seed")
+        raise RuntimeError("the seed did not land")
+
+    monkeypatch.setattr(loop_queue._SandboxSetup, "run", run)
+    fake = proxy_app(PROXY_BEARER)
+    workspace_id, _, turn_id = await _seed_turn()
+    saved = loop_queue._runtime
+    loop_queue.reset_runtime()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=fake), base_url=PROXY_URL
+    ) as http:
+        _install_runtime(
+            dbos_launched,
+            _registry(_CrashOnceModel(crashed=[True])),
+            tmp_path / "workspaces",
+            ProxySessions(PROXY_URL, _Bearer(), http),
+            off_cluster=True,
+        )
+        try:
+            with SetWorkflowID(str(turn_id)):
+                status = await loop_queue.turn_workflow(str(workspace_id), str(turn_id))
+        finally:
+            asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+            loop_queue._runtime.dbos.destroy()
+            loop_queue.reset_runtime()
+            if saved is not None:
+                loop_queue.init_runtime(saved)
+
+    assert status == "failed"
+    assert (await _await_terminal(turn_id)).error_class == "RuntimeError"
+    (session,) = fake.state.sessions.values()
+    assert session["labels"]["turn"] == str(turn_id)
+    assert session["revoked_at"] is not None
 
 
 GUIDANCE_PROBE = "guidance-probe"

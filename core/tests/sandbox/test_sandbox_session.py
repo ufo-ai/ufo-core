@@ -122,7 +122,9 @@ def _check_run_token_rejects_a_valid_shape_signed_by_another_deployment() -> Non
         RUN_TOKENS.from_proxy_auth(_basic(forged))
 
 
-def _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base() -> None:
+async def _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base() -> (
+    None
+):
     base_env = {
         "HTTPS_PROXY": "https://ufo-session-turn:ufo@proxy.test",
         "ALICE_KEY": "alice",
@@ -134,7 +136,7 @@ def _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_
         handle=SandboxHandle(conversation_id=uuid4(), container_id="c", egress_env=base_env),
     )
 
-    authorized = base.authorize(
+    authorized = await base.authorize(
         frozenset(("ALICE_KEY", "BOB_KEY")),
         {"BOB_KEY": "bob", "HTTPS_PROXY": "https://ufo-session-member:ufo@proxy.test"},
     )
@@ -148,7 +150,7 @@ def _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_
     assert base.handle.egress_env == base_env
 
 
-def _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
+async def _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
     """A tool runs commands through a member-authorized session while cancel uses the base one.
     Both name the same turn, so the stop reaches its command groups alone."""
     turn_id = uuid4()
@@ -157,9 +159,36 @@ def _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
         handle=SandboxHandle(conversation_id=uuid4(), container_id="c", turn_id=turn_id),
     )
 
-    authorized = base.authorize(frozenset(), {})
+    authorized = await base.authorize(frozenset(), {})
 
     assert authorized.handle.turn_id == turn_id
+
+
+async def _check_only_an_enforced_session_lays_the_egress_env_beneath_the_authority() -> None:
+    asked: list[str] = []
+
+    async def egress() -> dict[str, str]:
+        asked.append("egress")
+        return {"HTTPS_PROXY": "https://ufo-session-member:ufo@proxy.test", "GH_TOKEN": "session"}
+
+    handle = SandboxHandle(
+        conversation_id=uuid4(), container_id="c", egress_env={"UNRELATED": "kept"}
+    )
+    unenforced = SandboxSession(carrier=_RecordingCarrier(), handle=handle)
+    enforced = SandboxSession(carrier=_RecordingCarrier(), handle=handle, enforced=True)
+
+    plain = await unenforced.authorize(frozenset(), {"GIT_AUTHOR_NAME": "B"}, egress)
+    assert asked == []
+    assert plain.handle.egress_env == {"UNRELATED": "kept", "GIT_AUTHOR_NAME": "B"}
+
+    proxied = await enforced.authorize(frozenset(), {"GH_TOKEN": "identity"}, egress)
+    assert asked == ["egress"]
+    assert proxied.enforced
+    assert proxied.handle.egress_env == {
+        "UNRELATED": "kept",
+        "HTTPS_PROXY": "https://ufo-session-member:ufo@proxy.test",
+        "GH_TOKEN": "identity",
+    }
 
 
 def _check_host_argv_names_a_logical_path_under_the_host_root() -> None:
@@ -1332,8 +1361,6 @@ def test_sandbox_session_sync_contract() -> None:
         _check_from_proxy_auth_rejects_missing_header,
         _check_from_proxy_auth_rejects_a_malformed_run_token,
         _check_run_token_rejects_a_valid_shape_signed_by_another_deployment,
-        _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base,
-        _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to,
         _check_host_argv_names_a_logical_path_under_the_host_root,
         _check_host_argv_leaves_the_substring_that_is_not_this_workspace,
         _check_runtime_relative_refuses_an_escape,
@@ -1344,6 +1371,9 @@ def test_sandbox_session_sync_contract() -> None:
 
 async def test_sandbox_session_async_contract() -> None:
     for check in (
+        _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base,
+        _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to,
+        _check_only_an_enforced_session_lays_the_egress_env_beneath_the_authority,
         _check_a_carrier_that_declares_no_stop_is_never_asked_for_one,
         _check_skills_load_from_one_staged_container_payload,
         _check_large_skill_payload_never_enters_a_container_command_argument,
