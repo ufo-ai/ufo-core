@@ -1264,6 +1264,9 @@ async def test_route_reaches_its_scoped_context(db: None, monkeypatch: pytest.Mo
     assert response.status_code == 200
     assert response.text == "ping"
     assert no_bearer.status_code == 401
+    assert no_bearer.json() == {
+        "error": {"code": "unauthorized", "message": "The request names no workspace."}
+    }
     assert forged.status_code == 401
     with ws(workspace_id):
         scoped = ScopedStore(extension=sample.NAME)

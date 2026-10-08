@@ -987,6 +987,7 @@ def test_the_wire_streams_the_answer_then_spend_reports_the_burn(
     spent = runner.invoke(cli.main, ["spend"])
     assert spent.exit_code == 0, spent.output
     assert "$0.000110" in spent.output
+    assert f"by service:\n  {'models':<32}$0.000110\n" in spent.output
 
 
 def test_migrate_prefers_owner_dsn_env_as_asyncpg(monkeypatch: pytest.MonkeyPatch) -> None:
