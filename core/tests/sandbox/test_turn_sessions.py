@@ -38,7 +38,7 @@ from ufo.runtime.billing.accounting import TURN_LABEL
 from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Turn
+from ufo.schema.records import NON_TERMINAL_STATUSES, Turn
 
 BEARER = "ufo_turn-sessions-system-token"
 PROXY_URL = "https://proxy.test"
@@ -201,6 +201,18 @@ def _sessions(seeded: _Seeded, proxy: ProxySessions | None) -> TurnSessions:
     )
 
 
+async def _commit(seeded: _Seeded, status: str) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == seeded.turn.id)
+            .values(
+                status=status,
+                terminal=None if status in NON_TERMINAL_STATUSES else {"status": status},
+            )
+        )
+
+
 def _calls(fake: Starlette) -> list[tuple[str, str]]:
     return [(method, target) for method, target, _, _ in fake.state.calls]
 
@@ -302,6 +314,7 @@ async def test_close_revokes_every_session(
     acting = await sessions.reconcile(seeded.member_b)
     assert base is not None and acting is not None
 
+    await _commit(seeded, "done")
     await sessions.close()
 
     assert {
@@ -317,6 +330,7 @@ async def test_close_revokes_an_earlier_runs_session(
     crashed = await _sessions(seeded, proxy).reconcile(seeded.member_b)
     assert crashed is not None
 
+    await _commit(seeded, "done")
     await _sessions(seeded, proxy).close()
 
     assert fake.state.sessions[crashed.id]["revoked_at"] is not None
@@ -333,6 +347,7 @@ async def test_close_narrows_and_renews_a_detached_turn(
         await mark_detached(seeded.turn, "build", "/home/user/.ufo/runs/build")
     sent = len(fake.state.calls)
 
+    await _commit(seeded, "done")
     await sessions.close()
 
     closing = fake.state.calls[sent:]
@@ -363,7 +378,8 @@ async def test_close_logs_and_never_raises(
     fake.state.fault = 503
 
     with caplog.at_level(logging.WARNING, logger="ufo"):
-        await sessions.close()
+        await _commit(seeded, "done")
+    await sessions.close()
 
     failed = [
         record.ufo
@@ -452,3 +468,22 @@ async def test_reconcile_never_reopens_a_revoked_session(
 
     assert refused.value.error.code == SESSION_REVOKED_CODE
     assert len(fake.state.sessions) == 1
+
+
+async def test_close_leaves_the_sessions_of_a_turn_whose_terminal_is_not_committed(
+    fake: Starlette, proxy: ProxySessions, seeded: _Seeded
+) -> None:
+    sessions = _sessions(seeded, proxy)
+    opened = await sessions.reconcile("turn")
+    assert opened is not None
+    sent = len(fake.state.calls)
+
+    for status in ("running", "parked", "queued"):
+        await _commit(seeded, status)
+        await sessions.close()
+    left = fake.state.calls[sent:]
+    await _commit(seeded, "cancelled")
+    await sessions.close()
+
+    assert left == []
+    assert fake.state.sessions[opened.id]["revoked_at"] is not None

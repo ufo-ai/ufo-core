@@ -40,7 +40,7 @@ from ufo.runtime.agent_scope import agent
 from ufo.runtime.billing.accounting import TURN_LABEL
 from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
-from ufo.schema.records import Turn
+from ufo.schema.records import NON_TERMINAL_STATUSES, Turn, TurnStatus
 
 POLICY_KEY_DIGEST_CHARS = 16
 PROBE_SESSION_MARGIN_SECONDS = 60
@@ -106,13 +106,18 @@ class TurnSessions:
         """End the turn's authority once its terminal is committed: a turn that left detached
         commands keeps each session this run opened narrowed to a policy that binds no model key
         and no route, until the last command's follow ends; any other has every session under its
-        label revoked, an earlier run's included. A fault is logged and never raised, since each
-        session's deadline bounds what it leaves behind."""
+        label revoked, an earlier run's included. A turn whose row is not terminal yet, as when a
+        cancel has stopped the workflow but not committed `cancelled`, keeps its sessions until
+        their deadline. A fault is logged and never raised, since each session's deadline bounds
+        what it leaves behind."""
         if self.proxy is None:
             return
         try:
-            detached_until = await self._detached_until()
+            status, detached_until = await self._ending()
             now = datetime.now(UTC)
+            if status in NON_TERMINAL_STATUSES:
+                log("turn.sessions.left_open", turn_id=str(self.turn.id), status=status)
+                return
             if detached_until is None or detached_until <= now:
                 revoked = await self.proxy.revoke_labelled(
                     self.turn.workspace_id, TURN_LABEL, str(self.turn.id)
@@ -207,20 +212,21 @@ class TurnSessions:
             case _:
                 return actor
 
-    async def _detached_until(self) -> datetime | None:
+    async def _ending(self) -> tuple[TurnStatus, datetime | None]:
         with ws(self.turn.workspace_id):
             async with workspace_tx() as connection:
-                until = (
+                row = (
                     await connection.execute(
-                        sa.select(tables.turn.c.detached_until).where(
+                        sa.select(tables.turn.c.status, tables.turn.c.detached_until).where(
                             tables.turn.c.id == self.turn.id,
                             tables.turn.c.workspace_id == self.turn.workspace_id,
                         )
                     )
-                ).scalar_one_or_none()
-        if until is None:
-            return None
-        return until if until.tzinfo is not None else until.replace(tzinfo=UTC)
+                ).one()
+        until = row.detached_until
+        if until is None or until.tzinfo is not None:
+            return row.status, until
+        return row.status, until.replace(tzinfo=UTC)
 
 
 @dataclass(frozen=True)
