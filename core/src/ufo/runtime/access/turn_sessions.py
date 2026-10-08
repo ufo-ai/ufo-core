@@ -57,6 +57,16 @@ class _Held:
 
 
 @dataclass(frozen=True)
+class DeploySessions:
+    """The deploy's proxy session client and what compiles a turn's policy: what a cancel, which
+    runs outside the turn's own run, closes that turn's sessions with."""
+
+    proxy: ProxySessions
+    rules: PerAgentRules
+    run_tokens: RunTokenCodec
+
+
+@dataclass(frozen=True)
 class TurnSessions:
     """The proxy sessions one turn holds, one per acting member: opened on first use under an
     idempotency key the replay of a recovered workflow reuses, reconciled and renewed at every
@@ -108,8 +118,8 @@ class TurnSessions:
         commands keeps every live session under its label, an earlier run's included, narrowed to
         a policy that binds no model key and no route, until the last command's follow ends; any
         other has every session under its label revoked. A turn whose row is not terminal, as
-        when a later attempt has claimed it, keeps its sessions. A cancelled turn's are revoked
-        by the cancel that commits `cancelled`. A fault is logged and never raised, since each
+        when a later attempt has claimed it, keeps its sessions; a cancelled turn's are closed by
+        the cancel that commits `cancelled`. A fault is logged and never raised, since each
         session's deadline bounds what it leaves behind."""
         if self.proxy is None:
             return

@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from dbos import DBOSClient
 
 from ufo.db import workspace_tx
-from ufo.runtime.access.proxy_sessions import ProxySessions
+from ufo.runtime.access.turn_sessions import DeploySessions
 from ufo.runtime.ext.surface import Stopped
 from ufo.runtime.hub import Hub, Terminal
 from ufo.runtime.surfaces.admission import Admission
@@ -32,7 +32,7 @@ class MemberStop:
     client: DBOSClient
     hub: Hub
     admission: Admission
-    sessions: ProxySessions | None
+    sessions: DeploySessions | None
 
     async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> Stopped:
         async with workspace_tx() as connection:

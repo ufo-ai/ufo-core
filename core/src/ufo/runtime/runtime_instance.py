@@ -23,7 +23,7 @@ from dbos import error as dbos_error
 
 from ufo.db import owner_tx
 from ufo.harness.o11y import log
-from ufo.runtime.access.proxy_sessions import ProxySessions
+from ufo.runtime.access.turn_sessions import DeploySessions
 from ufo.runtime.turns.cancellation import cancel_one_turn
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
@@ -182,7 +182,7 @@ class CancelReconciler:
     cancels; a failed tick is logged and the loop continues, mirroring the recovery sweep."""
 
     client: DBOSClient
-    sessions: ProxySessions | None
+    sessions: DeploySessions | None
     interval_seconds: float = CANCEL_RECONCILE_INTERVAL_SECONDS
 
     async def run(self) -> None:
@@ -275,7 +275,7 @@ class StrandedTurnReconciler:
     a sweep racing a turn's own commit cannot disturb it."""
 
     client: DBOSClient
-    sessions: ProxySessions | None
+    sessions: DeploySessions | None
     interval_seconds: float = STRANDED_RECONCILE_INTERVAL_SECONDS
     grace_seconds: float = STRANDED_TURN_GRACE_SECONDS
 

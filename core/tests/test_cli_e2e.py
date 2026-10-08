@@ -924,7 +924,7 @@ def wire_server(
             ambient_reply=UNREACHED_AMBIENT_REPLY,
             skills=EMPTY_SKILL_REGISTRY,
             member_skill_listing=no_member_skills,
-            proxy_sessions=None,
+            deploy_sessions=None,
         )
         server = _ThreadedServer(app, port)
         server.start()

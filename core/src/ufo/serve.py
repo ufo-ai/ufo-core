@@ -27,9 +27,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ufo.blob import (
     BlobStore,
-    FilesystemBlobStore,
     FleetBlobStore,
-    S3BlobStore,
     WorkspaceBlobStore,
     blob_store_for,
 )
@@ -106,13 +104,14 @@ from ufo.runtime.access.egress_control import (
 )
 from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import (
+    HostEntry,
     connector_transfer_hosts,
     derive_artifact_store_hosts,
     derive_manifest_internet,
 )
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from ufo.runtime.access.proxy_sessions import PROXY_CALL_TIMEOUT_SECONDS, ProxySessions
-from ufo.runtime.access.turn_sessions import ProbeSessions
+from ufo.runtime.access.turn_sessions import DeploySessions, ProbeSessions
 from ufo.runtime.access.vault import VaultReads
 from ufo.runtime.background_tasks import BackgroundTaskSweep
 from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger
@@ -425,18 +424,22 @@ def run(fleet: Fleet) -> None:
     app = FastAPI(lifespan=_serve_lifespan)
     tailer = HubTailer(hub=hub, spend=spend)
     proxy_sessions = deploy_proxy_sessions(config, manifests)
+    rules = deploy_rules(
+        config, manifests, credentials, _one_shot(derive_artifact_store_hosts(blob_backend))
+    )
+    deploy_sessions = (
+        None if proxy_sessions is None else DeploySessions(proxy_sessions, rules, run_tokens)
+    )
     tool_bridge = ToolBridge(
         dbos=dbos_client,
         tailer=tailer,
         tools=bridge_tools(manifests),
         subagents=subagents,
         subagent_grants=subagent_grants,
-        sessions=proxy_sessions,
+        sessions=deploy_sessions,
         actions=deploy_actions,
     )
-    _, rules = _proxy_control(
-        app, config, manifests, credentials, run_tokens, blob_backend, tool_bridge, proxy_sessions
-    )
+    _proxy_control(app, config, rules, run_tokens, tool_bridge, proxy_sessions)
     sandboxes = ConversationSandbox(
         carrier=carrier,
         backend=config.sandbox.backend,
@@ -543,7 +546,7 @@ def run(fleet: Fleet) -> None:
     app.state.fleet = fleet
     app.state.hub = hub
     app.state.dbos = dbos_client
-    app.state.proxy_sessions = proxy_sessions
+    app.state.deploy_sessions = deploy_sessions
     app.state.instance_id = instance_id
     app.state.durable_surfaces = durable_surfaces(manifests)
     app.state.writeback_poller = None
@@ -609,7 +612,7 @@ def run(fleet: Fleet) -> None:
         config.connect.public_base_url,
         config.sandbox.ingress_public_url,
         (AUTO_MODEL, *sorted(registry.specs)),
-        proxy_sessions=proxy_sessions,
+        deploy_sessions=deploy_sessions,
         probes=probes,
         runtime_identity=runtime_identity,
         connectors=connectors,
@@ -1300,7 +1303,7 @@ def _mount_shared_surfaces(
     ingress_public_url: str | None,
     models: tuple[str, ...],
     *,
-    proxy_sessions: ProxySessions | None,
+    deploy_sessions: DeploySessions | None,
     probes: ConversationProbes | None = None,
     runtime_identity: RuntimeIdentity | None = None,
     connectors: ConnectorRegistry | None = None,
@@ -1325,7 +1328,7 @@ def _mount_shared_surfaces(
         )
     admission = _admission(dbos_client, manifests, hub, spend)
     tailer = HubTailer(hub=hub, spend=spend)
-    stopper = MemberStop(client=dbos_client, hub=hub, admission=admission, sessions=proxy_sessions)
+    stopper = MemberStop(client=dbos_client, hub=hub, admission=admission, sessions=deploy_sessions)
     turn_steps = DurableTurnSteps(client=dbos_client)
     system_skill_bundle = SystemSkillBundle.from_skills(skills.bundled_skills())
     registered: dict[str, SurfaceSpec] = {}
@@ -1494,11 +1497,13 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
             tasks = [
                 group.create_task(ExecutorRecovery().run()),
                 group.create_task(
-                    CancelReconciler(client=app.state.dbos, sessions=app.state.proxy_sessions).run()
+                    CancelReconciler(
+                        client=app.state.dbos, sessions=app.state.deploy_sessions
+                    ).run()
                 ),
                 group.create_task(
                     StrandedTurnReconciler(
-                        client=app.state.dbos, sessions=app.state.proxy_sessions
+                        client=app.state.dbos, sessions=app.state.deploy_sessions
                     ).run()
                 ),
             ]
@@ -1532,22 +1537,20 @@ def _preview_settings(config: Config) -> tuple[tuple[str, int], str] | None:
     return preview_service, preview_token
 
 
-def _proxy_control(
-    app: FastAPI,
+def deploy_rules(
     config: Config,
     manifests: tuple[Manifest, ...],
     credentials: CredentialStore | None,
-    run_tokens: RunTokenCodec,
-    blob: FilesystemBlobStore | S3BlobStore,
-    bridge: ToolBridge | None,
-    sessions: ProxySessions | None,
-) -> tuple[EgressControl, PerAgentRules]:
+    artifact_hosts: tuple[HostEntry, ...],
+) -> PerAgentRules:
+    """What compiles the deploy's session policies: its model hosts and binds, `artifact_hosts`,
+    and the grant, slot and CLI sources of `manifests`."""
     preview = _preview_settings(config)
     model_hosts, model_binds = model_bindings(config)
     public_base_url = config.connect.public_base_url
     served = None if public_base_url is None else public_base_url.rstrip("/")
-    resolver = PerAgentRules(
-        hosts=(*model_hosts, *_one_shot(derive_artifact_store_hosts(blob))),
+    return PerAgentRules(
+        hosts=(*model_hosts, *artifact_hosts),
         binds=model_binds,
         grants=GrantStore() if credentials is not None else None,
         credentials=credentials,
@@ -1560,6 +1563,18 @@ def _proxy_control(
             None if served is None or preview is None else f"{served}/internal/egress/preview"
         ),
     )
+
+
+def _proxy_control(
+    app: FastAPI,
+    config: Config,
+    rules: PerAgentRules,
+    run_tokens: RunTokenCodec,
+    bridge: ToolBridge | None,
+    sessions: ProxySessions | None,
+) -> EgressControl:
+    preview = _preview_settings(config)
+    public_base_url = config.connect.public_base_url
     proxy_url = config.sandbox.proxy_url
     if proxy_url is not None and (
         public_base_url is None or not public_base_url.startswith("https://")
@@ -1571,7 +1586,7 @@ def _proxy_control(
     stamp_key = None if proxy_url is None else _proxy_public_key()
     control = EgressControl(
         cache_control_token=os.environ.get(CACHE_CONTROL_TOKEN_ENV) or None,
-        resolver=resolver,
+        resolver=rules,
         run_tokens=run_tokens,
         bridge=bridge,
         stamp_key=stamp_key,
@@ -1589,7 +1604,7 @@ def _proxy_control(
         *(() if control.preview is None else (control.preview.http,)),
         *(() if sessions is None else (sessions.http,)),
     )
-    return control, resolver
+    return control
 
 
 def deploy_proxy_sessions(config: Config, manifests: tuple[Manifest, ...]) -> ProxySessions | None:

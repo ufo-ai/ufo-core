@@ -27,7 +27,7 @@ from ufo.runtime.access.proxy_sessions import (
     ProxyRefused,
     ProxySessions,
 )
-from ufo.runtime.access.turn_sessions import TurnSessions
+from ufo.runtime.access.turn_sessions import DeploySessions, TurnSessions
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.background_tasks import mark_detached
@@ -509,6 +509,10 @@ async def test_close_leaves_the_sessions_of_a_turn_whose_terminal_is_not_committ
     assert fake.state.sessions[opened.id]["revoked_at"] is not None
 
 
+def _deploy(seeded: _Seeded, proxy: ProxySessions) -> DeploySessions:
+    return DeploySessions(proxy, seeded.rules, RUN_TOKENS)
+
+
 @dataclass
 class _CancelWitness:
     fake: Starlette
@@ -535,7 +539,7 @@ async def test_a_cancel_revokes_the_turns_sessions_once_cancelled_is_committed(
     witness = _CancelWitness(fake)
 
     with ws(seeded.turn.workspace_id):
-        frame = await cancel_one_turn(witness, proxy, seeded.turn.id)
+        frame = await cancel_one_turn(witness, _deploy(seeded, proxy), seeded.turn.id)
 
     assert frame is not None and frame.status == "cancelled"
     assert witness.seen == [("running", False)]
@@ -545,14 +549,28 @@ async def test_a_cancel_revokes_the_turns_sessions_once_cancelled_is_committed(
     } == {base.id: True, acting.id: True}
 
 
-async def test_a_cancel_leaves_the_sessions_of_a_turn_with_a_followed_detached_command(
+async def test_a_cancel_narrows_the_sessions_of_a_turn_with_a_followed_detached_command(
     fake: Starlette, proxy: ProxySessions, seeded: _Seeded
 ) -> None:
     base = await _sessions(seeded, proxy).reconcile("turn")
     assert base is not None
     with ws(seeded.turn.workspace_id):
         await mark_detached(seeded.turn, "build", "/home/user/.ufo/runs/build")
-        frame = await cancel_one_turn(_CancelWitness(fake), proxy, seeded.turn.id)
+    sent = len(fake.state.calls)
+    with ws(seeded.turn.workspace_id):
+        frame = await cancel_one_turn(_CancelWitness(fake), _deploy(seeded, proxy), seeded.turn.id)
 
     assert frame is not None
+    closing = fake.state.calls[sent:]
+    assert [(method, target) for method, target, _, _ in closing] == [
+        ("GET", f"/v1/sessions?labels.turn={seeded.turn.id}&limit=200"),
+        ("PATCH", f"/v1/sessions/{base.id}"),
+        ("POST", f"/v1/sessions/{base.id}/renew"),
+    ]
+    (narrowed,) = [
+        json.loads(body)["policy"] for method, _, _, body in closing if method == "PATCH"
+    ]
+    assert narrowed["routes"] == []
+    assert UFO_MODELS_SECRET not in {bind["secret"] for bind in narrowed["bind"]}
+    assert "acme_api_key" in {bind["secret"] for bind in narrowed["bind"]}
     assert fake.state.sessions[base.id]["revoked_at"] is None

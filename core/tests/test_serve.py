@@ -69,6 +69,7 @@ from ufo.runtime.access.egress_rules import (
     PolicyScope,
     Route,
     SessionPolicy,
+    derive_artifact_store_hosts,
 )
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
@@ -134,10 +135,6 @@ def _local_config() -> Config:
         blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
         sandbox=SandboxConfig(backend="local"),
     )
-
-
-def _blob() -> FilesystemBlobStore:
-    return FilesystemBlobStore(root=Path("/tmp/blobs"))
 
 
 def test_runtime_identity_of_an_unpackaged_process_carries_no_image() -> None:
@@ -374,7 +371,7 @@ async def test_serve_lifespan_waits_for_background_shutdown(
         state=SimpleNamespace(
             fleet=serve.WHOLE_FLEET,
             dbos=object(),
-            proxy_sessions=None,
+            deploy_sessions=None,
             writeback_poller=poller,
             mid_turn_reply_poller=speaker,
             surface_listeners=(listener,),
@@ -416,7 +413,7 @@ async def test_the_jobs_fleet_runs_the_reconcilers_and_none_of_the_surface_deliv
         state=SimpleNamespace(
             fleet=serve.JOBS_FLEET,
             dbos=object(),
-            proxy_sessions=None,
+            deploy_sessions=None,
             writeback_poller=poller,
             mid_turn_reply_poller=speaker,
             surface_listeners=(listener,),
@@ -451,7 +448,7 @@ async def test_a_surface_boot_starts_its_work_before_the_first_request(
             state=SimpleNamespace(
                 fleet=fleet,
                 dbos=object(),
-                proxy_sessions=None,
+                deploy_sessions=None,
                 writeback_poller=None,
                 mid_turn_reply_poller=None,
                 surface_listeners=(),
@@ -483,7 +480,7 @@ async def test_serve_lifespan_propagates_a_background_failure(
         state=SimpleNamespace(
             fleet=serve.WHOLE_FLEET,
             dbos=object(),
-            proxy_sessions=None,
+            deploy_sessions=None,
             writeback_poller=None,
             mid_turn_reply_poller=None,
             surface_listeners=(),
@@ -524,7 +521,7 @@ async def test_the_lifespan_registers_configured_sources_into_the_one_workspace(
         state=SimpleNamespace(
             fleet=serve.JOBS_FLEET,
             dbos=object(),
-            proxy_sessions=None,
+            deploy_sessions=None,
             writeback_poller=None,
             mid_turn_reply_poller=None,
             surface_listeners=(),
@@ -730,9 +727,8 @@ def test_proxy_control_mounts_the_stamp_routes_and_builds_the_client(
     app = FastAPI()
 
     sessions = serve.deploy_proxy_sessions(_proxied_config(), ())
-    control, rules = serve._proxy_control(
-        app, _proxied_config(), (), None, RUN_TOKENS, _blob(), None, sessions
-    )
+    rules = serve.deploy_rules(_proxied_config(), (), None, ())
+    control = serve._proxy_control(app, _proxied_config(), rules, RUN_TOKENS, None, sessions)
 
     client = TestClient(app)
     assert control.resolver is rules
@@ -769,7 +765,12 @@ def test_proxy_control_requires_the_proxy_public_key_when_a_proxy_is_set(
             monkeypatch.setenv(PROXY_PUBLIC_KEY_ENV, value)
         with pytest.raises(RuntimeError, match=PROXY_PUBLIC_KEY_ENV):
             serve._proxy_control(
-                FastAPI(), _proxied_config(), (), None, RUN_TOKENS, _blob(), None, None
+                FastAPI(),
+                _proxied_config(),
+                serve.deploy_rules(_proxied_config(), (), None, ()),
+                RUN_TOKENS,
+                None,
+                None,
             )
 
 
@@ -780,7 +781,12 @@ def test_proxy_control_requires_an_https_public_base_url_when_a_proxy_is_set(
     for base in (None, "http://serve.test"):
         with pytest.raises(RuntimeError, match=r"\[connect\] public_base_url"):
             serve._proxy_control(
-                FastAPI(), _proxied_config(base), (), None, RUN_TOKENS, _blob(), None, None
+                FastAPI(),
+                _proxied_config(base),
+                serve.deploy_rules(_proxied_config(base), (), None, ()),
+                RUN_TOKENS,
+                None,
+                None,
             )
 
 
@@ -820,8 +826,13 @@ def test_proxy_control_boots_with_no_proxy_url_and_no_stamp_routes(
     app = FastAPI()
 
     sessions = serve.deploy_proxy_sessions(_local_config(), ())
-    control, _ = serve._proxy_control(
-        app, _local_config(), (), None, RUN_TOKENS, _blob(), None, sessions
+    control = serve._proxy_control(
+        app,
+        _local_config(),
+        serve.deploy_rules(_local_config(), (), None, ()),
+        RUN_TOKENS,
+        None,
+        sessions,
     )
 
     client = TestClient(app)
@@ -843,7 +854,14 @@ def test_proxy_control_mounts_the_git_credential_route_only_behind_its_token(
     for token in ("cache-control-secret", ""):
         monkeypatch.setenv(CACHE_CONTROL_TOKEN_ENV, token)
         app = FastAPI()
-        serve._proxy_control(app, _local_config(), (), None, RUN_TOKENS, _blob(), None, None)
+        serve._proxy_control(
+            app,
+            _local_config(),
+            serve.deploy_rules(_local_config(), (), None, ()),
+            RUN_TOKENS,
+            None,
+            None,
+        )
         mounted[token] = TestClient(app).post(
             "/internal/git-credential",
             json={},
@@ -863,7 +881,7 @@ async def test_serve_lifespan_closes_the_proxy_clients(monkeypatch: pytest.Monke
         state=SimpleNamespace(
             fleet=serve.JOBS_FLEET,
             dbos=object(),
-            proxy_sessions=None,
+            deploy_sessions=None,
             configured_sources=(),
             http_clients=clients,
         )
@@ -902,17 +920,6 @@ def test_shared_owner_dsn_fails_loud_when_unset(monkeypatch: pytest.MonkeyPatch)
         serve._shared_owner_dsn(_local_config())
 
 
-def _captured_rules(monkeypatch: pytest.MonkeyPatch) -> list[PerAgentRules]:
-    built: list[PerAgentRules] = []
-
-    def capture(**fields: object) -> PerAgentRules:
-        built.append(PerAgentRules(**fields))
-        return built[-1]
-
-    monkeypatch.setattr(serve, "PerAgentRules", capture)
-    return built
-
-
 async def _compiled(rules: PerAgentRules, workspace_id: UUID, agent_id: UUID) -> SessionPolicy:
     with ws(workspace_id), agent(agent_id):
         return await rules.session_policy(PolicyScope(workspace_id, None, True, True, "run-token"))
@@ -929,20 +936,8 @@ async def test_the_proxy_resolver_reads_keyed_slots_per_workspace(
         injection=InjectionTarget(host="api.inj.test", header="authorization", env="BYOK_KEY"),
     )
     manifest = Manifest(name="inj", version="1", credentials=(slot,))
-    built = _captured_rules(monkeypatch)
     credentials = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    await asyncio.to_thread(
-        serve._proxy_control,
-        FastAPI(),
-        _local_config(),
-        (manifest,),
-        credentials,
-        RUN_TOKENS,
-        _blob(),
-        None,
-        None,
-    )
-    (rules,) = built
+    rules = serve.deploy_rules(_local_config(), (manifest,), credentials, ())
     claims = deploy_claims((manifest,))
     assert rules.slots == WorkspaceSlots(
         deploy=(slot,), claimed_slots=claims.slots, claimed_env=claims.env
@@ -991,12 +986,12 @@ def test_the_proxy_resolver_base_admits_the_s3_artifact_store_host(
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "serve-test")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "serve-test")
     monkeypatch.delenv("AWS_PROFILE", raising=False)
-    built = _captured_rules(monkeypatch)
     store = S3BlobStore(bucket="ufo-blobs", region="us-east-1")
 
-    serve._proxy_control(FastAPI(), _local_config(), (), None, RUN_TOKENS, store, None, None)
+    rules = serve.deploy_rules(
+        _local_config(), (), None, asyncio.run(derive_artifact_store_hosts(store))
+    )
 
-    (rules,) = built
     policy = asyncio.run(_compiled(rules, uuid4(), uuid4()))
     assert policy.hosts == (
         HostEntry(host="api.anthropic.com"),
@@ -1010,7 +1005,6 @@ def test_the_proxy_resolver_routes_the_bridge_and_preview_to_the_public_base_url
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.setenv(serve.PREVIEW_TOKEN_ENV, "preview-real")
-    built = _captured_rules(monkeypatch)
     previewing = SandboxConfig(backend="local", preview_service="ufo-preview.test:8930")
     served = _local_config().model_copy(
         update={
@@ -1020,10 +1014,9 @@ def test_the_proxy_resolver_routes_the_bridge_and_preview_to_the_public_base_url
     )
     unserved = served.model_copy(update={"connect": ConnectConfig()})
 
-    serve._proxy_control(FastAPI(), served, (), None, RUN_TOKENS, _blob(), None, None)
-    serve._proxy_control(FastAPI(), unserved, (), None, RUN_TOKENS, _blob(), None, None)
+    routed = serve.deploy_rules(served, (), None, ())
+    unrouted = serve.deploy_rules(unserved, (), None, ())
 
-    routed, unrouted = built
     stamp = {RUN_HEADER: "run-token"}
     assert asyncio.run(_compiled(routed, uuid4(), uuid4())).routes == (
         Route(

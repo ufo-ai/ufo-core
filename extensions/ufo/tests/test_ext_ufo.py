@@ -951,7 +951,7 @@ async def _ufo_client(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
-        proxy_sessions=None,
+        deploy_sessions=None,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
         yield client
@@ -999,7 +999,7 @@ async def shared_ufo(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
-        proxy_sessions=None,
+        deploy_sessions=None,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
         yield client
@@ -1633,7 +1633,7 @@ async def ufo_delivering_artifacts(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
-        proxy_sessions=None,
+        deploy_sessions=None,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
         yield client, workspace_id
@@ -1904,7 +1904,7 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
-        proxy_sessions=None,
+        deploy_sessions=None,
     )
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     foreign = _mint(SECRET, workspace_id, "late@example.com", _future())

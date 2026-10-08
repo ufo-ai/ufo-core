@@ -15,7 +15,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import ToolSchema
 from ufo.harness.o11y import current_traceparent, log
-from ufo.runtime.access.proxy_sessions import ProxySessions
+from ufo.runtime.access.turn_sessions import DeploySessions
 from ufo.runtime.ext.surface import TurnTailer
 from ufo.runtime.hub import Parked, Terminal
 from ufo.runtime.objects import BoundAction
@@ -63,7 +63,7 @@ class ToolBridge:
     tools: tuple[ToolDef, ...]
     subagents: SubagentRegistry
     subagent_grants: dict[str, frozenset[str]]
-    sessions: ProxySessions | None
+    sessions: DeploySessions | None
     actions: Mapping[str, Mapping[str, BoundAction]] = field(default_factory=dict)
 
     async def request(

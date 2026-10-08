@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo.db import workspace_tx
 from ufo.harness.o11y import current_traceparent, log
 from ufo.harness.untrusted import wall
-from ufo.runtime.access.proxy_sessions import ProxySessions
+from ufo.runtime.access.turn_sessions import DeploySessions
 from ufo.runtime.billing.spend import NO_SPEND_GATES, PARK, REJECT, SPAWN_MOMENT, SpendGates
 from ufo.runtime.engine import TurnParked
 from ufo.runtime.ext.context import TurnInvoker
@@ -236,7 +236,7 @@ class Subagents:
     registry: SubagentRegistry
     parent: Turn
     audience: Audience
-    sessions: ProxySessions | None
+    sessions: DeploySessions | None
     hub: Hub | None = None
     invoker: TurnInvoker | None = None
     spend: SpendGates = NO_SPEND_GATES
