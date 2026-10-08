@@ -21,7 +21,6 @@ import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory_manifest
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
-from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.condenser import (
     DEDUP_CURSOR_KEY,
@@ -69,7 +68,7 @@ from ufo_ext_memory.store import (
     mem_page,
     memory_item,
 )
-from ufo_testsupport.index import default_index
+from ufo_testsupport.index import StubEmbed, default_index, vec
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -141,23 +140,6 @@ EDITED_PAGE_BODY = "The acquisition codename is meridian and the deal closes in 
 MACHINE_STATUS_ROW = "the nightly billing build ran for twelve minutes"
 MACHINE_STATUS_REDERIVED = "the nightly billing build ran for eleven minutes"
 LAST_PUBLISHABLE_CHECK = 2
-
-
-def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
-    values = [0.0] * EMBED_DIM
-    for index, value in axes:
-        values[index] = value
-    return tuple(values)
-
-
-class StubEmbed:
-    """Deterministic stand-in EmbedClient: a dependency of clustering and recall, never asserted."""
-
-    def __init__(self, vector: tuple[float, ...]) -> None:
-        self._vector = vector
-
-    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-        return tuple(self._vector for _ in texts)
 
 
 @dataclass

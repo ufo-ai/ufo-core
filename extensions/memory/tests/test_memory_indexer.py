@@ -6,12 +6,12 @@ job's context. The embed client is a real dependency counted (never asserted) to
 overlapping runs embed each row once."""
 
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory_manifest
-from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_memory.store import (
     MemoryIndexer,
     MemoryStore,
@@ -19,7 +19,7 @@ from ufo_ext_memory.store import (
     memory_item,
     recall_subjects,
 )
-from ufo_testsupport.index import default_index
+from ufo_testsupport.index import StubEmbed, default_index, vec
 
 from ufo.db import workspace_tx
 from ufo.runtime.ext.context import PageState, context_for
@@ -39,24 +39,6 @@ pytestmark = [
 
 def _reader(subjects: frozenset[str]) -> SourceReader:
     return SourceReader(agent_id=uuid4(), requesting_member_id=None, subjects=subjects)
-
-
-def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
-    values = [0.0] * EMBED_DIM
-    for index, value in axes:
-        values[index] = value
-    return tuple(values)
-
-
-class StubEmbed:
-    """Deterministic stand-in EmbedClient the indexer embeds through and recall queries through; the
-    tests assert the derived chunk rows and the Recalled items, never this stand-in."""
-
-    def __init__(self, vector: tuple[float, ...]) -> None:
-        self._vector = vector
-
-    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-        return tuple(self._vector for _ in texts)
 
 
 class CountingEmbed:
@@ -112,6 +94,7 @@ class ReclassifyingPage:
                 backend="github",
                 source_id=UUID(int=1),
                 connection_id=UUID(int=2),
+                created_at=datetime(2026, 3, 1, tzinfo=UTC),
             )
         }
 

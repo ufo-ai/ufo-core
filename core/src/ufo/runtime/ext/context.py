@@ -1126,8 +1126,8 @@ class PageRecord:
 @dataclass(frozen=True)
 class PageState:
     """One live page's state: its visibility subject, revision and content digest, browse
-    metadata, the date it states itself as of, its provider, and the source and core connection it
-    belongs to."""
+    metadata, the date it states itself as of, its provider, the source and core connection it
+    belongs to, and when it was first synced."""
 
     subject: str
     revision: int
@@ -1139,6 +1139,7 @@ class PageState:
     backend: str
     source_id: UUID
     connection_id: UUID
+    created_at: datetime
 
 
 def _page_as_of(
@@ -1533,6 +1534,15 @@ class ExtensionContext:
         if self.cloud is None:
             raise RuntimeError("[cloud] api_url is unset.")
         return self.cloud.bound(self.store.workspace_id)
+
+    def cloud_selects(self, service: str) -> bool:
+        """Whether the deploy reads `service` through the cloud API, as `UFO_CLOUD_CLIENTS`
+        selects. Only a manifest declaring `cloud_client` asks."""
+        if not self.cloud_client_allowed:
+            raise PermissionError(
+                f"The extension {self.store.extension!r} does not declare cloud_client."
+            )
+        return self.cloud is not None and service in self.cloud.clients
 
     async def scheduled_runs(
         self,
@@ -2417,6 +2427,7 @@ class ExtensionContext:
                     backend=page.provider,
                     source_id=page.source_id,
                     connection_id=link.connection_id,
+                    created_at=page.created_at,
                 )
                 for page in pages
                 if (link := links.get(page.source_id)) is not None
@@ -2459,6 +2470,7 @@ class ExtensionContext:
                 tables.page.c.indexed,
                 tables.page.c.record_created_at,
                 tables.page.c.record_updated_at,
+                tables.page.c.created_at,
                 tables.page.c.updated_at,
                 tables.source.c.backend,
                 tables.source.c.connection_id,
@@ -2493,6 +2505,11 @@ class ExtensionContext:
                 backend=row.backend,
                 source_id=row.source_uid,
                 connection_id=row.connection_id,
+                created_at=(
+                    row.created_at
+                    if row.created_at.tzinfo is not None
+                    else row.created_at.replace(tzinfo=UTC)
+                ),
             )
             for row in rows
         }

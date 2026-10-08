@@ -320,6 +320,8 @@ def test_cloud_clients_reads_the_selection(monkeypatch: pytest.MonkeyPatch) -> N
     assert serve._cloud_clients() == frozenset()
     monkeypatch.setenv("UFO_CLOUD_CLIENTS", " sources , ")
     assert serve._cloud_clients() == frozenset({"sources"})
+    monkeypatch.setenv("UFO_CLOUD_CLIENTS", "memory,sources")
+    assert serve._cloud_clients() == frozenset({"memory", "sources"})
     monkeypatch.setenv("UFO_CLOUD_CLIENTS", "sources,traces")
     with pytest.raises(RuntimeError, match=r"UFO_CLOUD_CLIENTS names unknown services: traces\."):
         serve._cloud_clients()

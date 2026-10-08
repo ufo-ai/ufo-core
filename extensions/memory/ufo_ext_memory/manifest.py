@@ -39,6 +39,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 from ufo_ext_sources.pages import PAGE_KIND
 
+from ufo.sdk.accounting import MEMORY_SERVICE
 from ufo.sdk.context import ExtensionContext, PageState, SourceReader
 from ufo.sdk.index import TextChunker
 from ufo.sdk.jobs import PAGE_CHANGE_CURSOR_KEY, JobSpec, owner_candidates, stored_key_workspaces
@@ -74,6 +75,7 @@ from ufo.sdk.tools import (
     ToolDef,
     ToolResult,
 )
+from ufo_ext_memory.client import MemoryApi
 from ufo_ext_memory.condenser import (
     DEDUP_MIN_AGE,
     MIN_CLUSTER_FACTS,
@@ -104,6 +106,7 @@ from ufo_ext_memory.objects import (
     PAGE_OBJECT_KIND,
     PROFILE_OBJECT,
 )
+from ufo_ext_memory.pages import PageIndex
 from ufo_ext_memory.store import (
     DEFAULT_CONFIDENCE,
     FACT,
@@ -856,13 +859,22 @@ async def index_memory(ctx: ExtensionContext) -> None:
 
 
 async def index_pages(ctx: HookContext) -> HookOutcome:
-    """The `page_change` consumer: derive index chunks + a `mem_page` mirror from each replayed
-    source-page change the core runner delivers. The runner owns the cursor and batch loop; this
-    applies one delivered batch through the extension's jobs-way context (index + embed wired)."""
+    """The `page_change` consumer: derive index chunks from each replayed source-page change the
+    core runner delivers, and mirror the page's state into the memory service where the deploy
+    selects it, into `mem_page` otherwise. The runner owns the cursor and batch loop; this applies
+    one delivered batch through the extension's jobs-way context (index + embed wired)."""
     if not isinstance(ctx.payload, PageChangeBatch):
         return None
     if ctx.ext.index is None or ctx.ext.embed is None:
         raise RuntimeError("page_change indexing requires the index and embed backends; none wired")
+    if ctx.ext.cloud_selects(MEMORY_SERVICE):
+        await PageIndex(
+            index=ctx.ext.index,
+            embed=ctx.ext.embed,
+            memory=MemoryApi(cloud=ctx.ext.cloud_api()),
+            ctx=ctx.ext,
+        ).apply(ctx.payload.changes)
+        return None
     await PageIndexer(
         index=ctx.ext.index,
         embed=ctx.ext.embed,
@@ -1229,6 +1241,7 @@ def manifest() -> Manifest:
             ),
         ),
         objects=(MEMORY_OBJECT, PROFILE_OBJECT),
+        cloud_client=True,
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
         hooks=(
             HookSpec(event="user_prompt_submit", handler=recall_hook, best_effort=True),

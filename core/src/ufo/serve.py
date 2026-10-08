@@ -118,7 +118,12 @@ from ufo.runtime.access.egress_rules import (
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from ufo.runtime.access.vault import VaultReads
 from ufo.runtime.background_tasks import BackgroundTaskSweep
-from ufo.runtime.billing.accounting import SOURCES_SERVICE, UNGATED_LEDGER, Ledger
+from ufo.runtime.billing.accounting import (
+    MEMORY_SERVICE,
+    SOURCES_SERVICE,
+    UNGATED_LEDGER,
+    Ledger,
+)
 from ufo.runtime.billing.spend import NO_SPEND_GATES, GateDeploy, SpendGates, built_gates
 from ufo.runtime.cloud import (
     CLOUD_CONNECT_TIMEOUT_SECONDS,
@@ -254,7 +259,7 @@ DEPLOY_ROUTE_PREFIX = "/internal"
 RUNTIME_REVISION_ENV = "UFO_RUNTIME_REVISION"
 RUNTIME_IMAGE_ENV = "UFO_RUNTIME_IMAGE"
 CLOUD_CLIENTS_ENV = "UFO_CLOUD_CLIENTS"
-CLOUD_CLIENT_SERVICES = frozenset({SOURCES_SERVICE})
+CLOUD_CLIENT_SERVICES = frozenset({MEMORY_SERVICE, SOURCES_SERVICE})
 
 
 @dataclass(frozen=True)
@@ -419,6 +424,7 @@ def run(fleet: Fleet) -> None:
                 timeout=httpx.Timeout(CLOUD_TIMEOUT_SECONDS, connect=CLOUD_CONNECT_TIMEOUT_SECONDS),
             ),
             proxy_bearer(bearer_source),
+            clients,
         )
     )
     sources_service = _sources_service(cloud, clients)

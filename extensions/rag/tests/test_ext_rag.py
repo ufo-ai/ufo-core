@@ -183,6 +183,7 @@ def _store(
                 backend="notion",
                 source_id=uuid4(),
                 connection_id=uuid4(),
+                created_at=datetime(2026, 3, 1, tzinfo=UTC),
             )
             for page_id in page_ids
             if page_id in pages and subject in reader.subjects

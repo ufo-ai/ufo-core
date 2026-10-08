@@ -160,11 +160,13 @@ class CloudApi:
 
 @dataclass(frozen=True)
 class CloudApis:
-    """The deploy's cloud API, bound per workspace."""
+    """The deploy's cloud API, bound per workspace. `clients` names the services
+    `UFO_CLOUD_CLIENTS` selects for the deploy's own reads through it."""
 
     base_url: str
     client: httpx.AsyncClient
     bearer_for: Callable[[UUID], Awaitable[str]]
+    clients: frozenset[str]
 
     def bound(self, workspace_id: UUID) -> CloudApi:
         """The client that calls as `workspace_id`."""

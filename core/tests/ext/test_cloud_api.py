@@ -5,7 +5,7 @@ import logging
 import secrets
 import threading
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from uuid import UUID, uuid4
 
 import httpx
@@ -142,7 +142,7 @@ async def apis(store: CredentialStore, recorder: Starlette) -> AsyncIterator[Clo
     credentials = proxy_credentials((DECLARING,))
     assert credentials is not None
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=recorder)) as client:
-        yield CloudApis(API_URL, client, proxy_bearer(credentials))
+        yield CloudApis(API_URL, client, proxy_bearer(credentials), frozenset())
 
 
 async def _slot(store: CredentialStore, workspace_id: UUID) -> str:
@@ -192,7 +192,7 @@ async def test_a_bearer_read_that_raises_surfaces_as_unavailable(recorder: Starl
     )
     assert credentials is not None
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=recorder)) as client:
-        apis = CloudApis(API_URL, client, proxy_bearer(credentials))
+        apis = CloudApis(API_URL, client, proxy_bearer(credentials), frozenset())
         with pytest.raises(CloudUnavailable) as raised:
             await apis.bound(await _workspace()).send("GET", SEARCH_PATH, answer=Echo)
 
@@ -278,7 +278,7 @@ async def test_a_5xx_a_timeout_and_a_refused_connection_raise_unavailable() -> N
         (httpx.ConnectError("refused"), "ConnectError"),
     ):
         async with httpx.AsyncClient(transport=raising(error)) as client:
-            apis = CloudApis(API_URL, client, unavailable.bearer_for)
+            apis = CloudApis(API_URL, client, unavailable.bearer_for, frozenset())
             with pytest.raises(CloudUnavailable) as raised:
                 await apis.bound(workspace_id).send("GET", SEARCH_PATH, answer=Echo)
         assert raised.value.reason == reason
@@ -314,6 +314,22 @@ def test_cloud_api_needs_the_manifest_flag(apis: CloudApis) -> None:
 
     with pytest.raises(PermissionError, match="'acme' does not declare cloud_client"):
         context.cloud_api()
+
+
+def test_cloud_selects_reads_the_deploys_selection(apis: CloudApis) -> None:
+    selecting = replace(apis, clients=frozenset({"memory"}))
+
+    assert context_for("acme", frozenset(), cloud_client=True, cloud=selecting).cloud_selects(
+        "memory"
+    )
+    assert not context_for("acme", frozenset(), cloud_client=True, cloud=apis).cloud_selects(
+        "memory"
+    )
+    assert not context_for("acme", frozenset(), cloud_client=True, cloud=None).cloud_selects(
+        "memory"
+    )
+    with pytest.raises(PermissionError, match="'acme' does not declare cloud_client"):
+        context_for("acme", frozenset(), cloud=selecting).cloud_selects("memory")
 
 
 def test_cloud_api_without_a_base_raises() -> None:
@@ -390,7 +406,7 @@ async def test_no_bearer_reaches_a_log_record(
     refusing = cloud_apis_for(_recorder(403, b'{"error": {"code": "forbidden", "message": "No."}}'))
     with pytest.raises(CloudRefused):
         await (
-            CloudApis(API_URL, refusing.client, apis.bearer_for)
+            CloudApis(API_URL, refusing.client, apis.bearer_for, frozenset())
             .bound(workspace_id)
             .send("GET", SEARCH_PATH, answer=Echo)
         )

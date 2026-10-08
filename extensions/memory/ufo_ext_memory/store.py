@@ -30,7 +30,6 @@ from collections.abc import Awaitable, Callable, Iterable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from itertools import chain
 from typing import Literal, Protocol, Self
 from uuid import UUID
 
@@ -57,26 +56,17 @@ from ufo.sdk.index import (
 from ufo.sdk.sources import PageChange
 from ufo.sdk.subjects import member_subject
 from ufo_ext_memory.client import ItemClass, MemoryKind
+from ufo_ext_memory.pages import (
+    RECALL_CANDIDATE_POOL,
+    RECALL_COSINE_FLOOR,
+    Fused,
+    fuse_hits,
+    fuse_legs,
+)
 
-RRF_K = 60
 RRF_WEIGHT = 0.7
 COSINE_WEIGHT = 0.3
-"""How near something must be for a query the lexical legs matched nowhere to recall anything. A
-vector search answers every query with its closest chunks however far away they are, so without a
-floor a meaningless string recalls whatever it happens to sit nearest.
-
-The bar judges the query, never a row inside a wordful query's pool. A cosine height means
-something only within one corpus on one embedding model — measured across three corpora, correct
-answers sit at 0.44 where garbage tops 0.16, and garbage reaches 0.50 where a terse question's
-answer sits at 0.34 — so a constant held against each row cuts real answers wherever the corpus
-runs cool, and the rows it cuts first are the ones worded unlike their question: a memory filed
-under a full name, asked for by handle. What a constant can judge is total lexical silence, because
-across those same corpora every real question matched some word and no random string matched any.
-The value sits just above the highest garbage measured: 200 random strings in five shapes against
-the largest live corpus (29k items, `text-embedding-3-large`) reached 0.5038 at the very top."""
-RECALL_COSINE_FLOOR = 0.52
 TAIL_SCAN_MAX = 200
-RECALL_CANDIDATE_POOL = 200
 DUE_BATCH_MAX_ITEMS = 200
 SWEEP_MAX_ROWS = 2_000
 """How many live rows one declared name may reach, set between the widest real correction and the
@@ -498,50 +488,6 @@ class MemoryItem(BaseModel):
     retired_at: datetime | None = None
 
 
-@dataclass(frozen=True)
-class Fused:
-    owner_id: str
-    score: float
-    text: str
-
-
-def _fuse(
-    legs: tuple[tuple[Hit, ...], ...], cosine_leg: tuple[Hit, ...]
-) -> dict[str, tuple[float, float, str]]:
-    ranks = tuple(
-        {hit.chunk_digest: rank for rank, hit in enumerate(leg, start=1) if hit.score > 0}
-        for leg in legs
-    )
-    cosine: dict[str, float] = {}
-    for hit in cosine_leg:
-        cosine[hit.owner_id] = max(cosine.get(hit.owner_id, 0.0), hit.score)
-    best: dict[str, tuple[float, str]] = {}
-    for hit in chain.from_iterable(legs):
-        rrf = sum(1.0 / (RRF_K + leg[hit.chunk_digest]) for leg in ranks if hit.chunk_digest in leg)
-        current = best.get(hit.owner_id)
-        if current is None or rrf > current[0]:
-            best[hit.owner_id] = (rrf, hit.text)
-    return {
-        owner_id: (rrf, cosine.get(owner_id, 0.0), text) for owner_id, (rrf, text) in best.items()
-    }
-
-
-def fuse_hits(lexical: tuple[Hit, ...], vector: tuple[Hit, ...], limit: int) -> tuple[Fused, ...]:
-    """Pure reciprocal-rank fusion collapsed to one score per owning row — source-page search's
-    ranking, where the fused rank across the lexical and vector legs is the whole signal.
-
-    A query whose lexical leg matched nothing is held to `RECALL_COSINE_FLOOR`, as recall is: this
-    search answers the same box and the same tool, so a query with no meaning must come back empty
-    here too. Fused rank cannot carry that bar, being relative to whatever the legs returned; and
-    once any page is worded the query is a real question, so the fusion ranks everything — the page
-    a member wants is not always the page carrying their words."""
-    fused = _fuse((lexical, vector), vector)
-    floor = 0.0 if lexical else RECALL_COSINE_FLOOR
-    kept = {owner_id: held for owner_id, held in fused.items() if held[1] >= floor}
-    ranked = sorted(kept.items(), key=lambda item: item[1][0], reverse=True)[:limit]
-    return tuple(Fused(owner_id, rrf, text) for owner_id, (rrf, _cosine, text) in ranked)
-
-
 def fuse_recall(
     lexical: tuple[Hit, ...], vector: tuple[Hit, ...], tail: tuple[Hit, ...], limit: int
 ) -> tuple[Fused, ...]:
@@ -561,7 +507,7 @@ def fuse_recall(
     for the whole pool: the query is one a member means, and the row it wants is not always a row
     carrying its words — a memory filed under a full name, asked for by handle, sits under any bar
     high enough to stop garbage."""
-    fused = _fuse((lexical, vector, tail), vector)
+    fused = fuse_legs((lexical, vector, tail), vector)
     floor = 0.0 if lexical or tail else RECALL_COSINE_FLOOR
     top_rrf = max((rrf for rrf, _cosine, _text in fused.values()), default=0.0) or 1.0
     scored = [

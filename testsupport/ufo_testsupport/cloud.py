@@ -18,9 +18,11 @@ async def _test_bearer(_workspace_id: UUID) -> str:
     return TEST_BEARER
 
 
-def cloud_apis_for(*apps: Starlette, base_url: str = "https://api.test") -> CloudApis:
+def cloud_apis_for(
+    *apps: Starlette, base_url: str = "https://api.test", clients: frozenset[str] = frozenset()
+) -> CloudApis:
     """`CloudApis` over every app's routes, the first app whose route matches a request answering
-    it, so each stand-in keeps its own state."""
+    it, so each stand-in keeps its own state; `clients` is the deploy's selection."""
 
     async def routed(scope: Scope, receive: Receive, send: Send) -> None:
         matched = [
@@ -37,4 +39,4 @@ def cloud_apis_for(*apps: Starlette, base_url: str = "https://api.test") -> Clou
         await PlainTextResponse("Not Found", status_code=404)(scope, receive, send)
 
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=routed), base_url=base_url)
-    return CloudApis(base_url=base_url, client=client, bearer_for=_test_bearer)
+    return CloudApis(base_url=base_url, client=client, bearer_for=_test_bearer, clients=clients)

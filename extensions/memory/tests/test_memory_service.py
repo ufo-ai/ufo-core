@@ -17,7 +17,6 @@ import ufo_ext_memory.manifest as memory_manifest
 import ufo_ext_memory.store as memory_store
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
-from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import (
     FACT,
@@ -37,7 +36,7 @@ from ufo_ext_memory.store import (
     mem_page,
     memory_item,
 )
-from ufo_testsupport.index import default_index
+from ufo_testsupport.index import StubEmbed, default_index, vec
 
 from ufo.db import workspace_tx
 from ufo.runtime.ext.context import PageState, context_for
@@ -70,24 +69,6 @@ def _at_cosine(target: float) -> tuple[float, ...]:
     """A unit vector whose cosine against `_at_cosine(1.0)` is `target`, so a test can sit a row an
     exact distance either side of the recall floor rather than hand-rolling axes."""
     return vec((0, target), (1, math.sqrt(max(0.0, 1.0 - target * target))))
-
-
-def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
-    values = [0.0] * EMBED_DIM
-    for index, value in axes:
-        values[index] = value
-    return tuple(values)
-
-
-class StubEmbed:
-    """Deterministic stand-in EmbedClient: a dependency of recall's vector leg, never the asserted
-    thing — the tests assert the Recalled items recall returns via public surfaces."""
-
-    def __init__(self, vector: tuple[float, ...]) -> None:
-        self._vector = vector
-
-    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-        return tuple(self._vector for _ in texts)
 
 
 class BrokenEmbed:
@@ -129,6 +110,7 @@ class ReclassifyingPage:
                 backend="github",
                 source_id=UUID(int=1),
                 connection_id=UUID(int=2),
+                created_at=datetime(2026, 3, 1, tzinfo=UTC),
             )
         }
 

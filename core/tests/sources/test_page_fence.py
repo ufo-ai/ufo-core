@@ -122,6 +122,7 @@ async def test_page_states_read_live_pages_from_the_sources_service() -> None:
             backend=PAGE["provider"],
             source_id=UUID(PAGE["source_id"]),
             connection_id=UUID(SOURCE["labels"]["connection"]),
+            created_at=datetime(2026, 10, 1, 9, tzinfo=UTC),
         )
     }
 
