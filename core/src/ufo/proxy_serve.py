@@ -7,6 +7,7 @@ through the same resolution."""
 import os
 
 from ufo.config import Config
+from ufo.harness.models.catalog import ANTHROPIC_KEY_ENV, OPENAI_KEY_ENV
 from ufo.runtime.access.credentials import deploy_env
 from ufo.runtime.access.egress_rules import (
     ANTHROPIC_HOST,
@@ -24,8 +25,12 @@ OTLP_ENDPOINT_ENV = "UFO_OTLP_ENDPOINT"
 OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
 
 
+SANDBOX_KEY_ENVS = {ANTHROPIC_HOST: ANTHROPIC_KEY_ENV, OPENAI_HOST: OPENAI_KEY_ENV}
+
+
 def MODEL_KEY_ENVS(config: Config) -> dict[str, str]:
-    """The env each model provider's platform key is read from, by the host it is bound on."""
+    """The deploy env each model provider's platform key is read from, by the host it is bound on:
+    what the vault resolves `ufo/models` from, never what a sandbox exports."""
     return {
         ANTHROPIC_HOST: config.models.anthropic_api_key_env,
         OPENAI_HOST: config.models.openai_api_key_env,
@@ -35,14 +40,20 @@ def MODEL_KEY_ENVS(config: Config) -> dict[str, str]:
 
 def model_bindings(config: Config) -> tuple[tuple[HostEntry, ...], tuple[Bind, ...]]:
     """The model providers every sandbox session reaches: each of the Anthropic and OpenAI hosts
-    whose key is set in env is admitted and binds `ufo/models` under its key's env name. No key set
-    anywhere would leave the sandbox no model route, so it fails loud."""
+    whose key is set in the deploy's env is admitted and binds `ufo/models` under the env name a
+    sandbox's model clients read, whatever the deploy names its own. No key set anywhere would leave
+    the sandbox no model route, so it fails loud."""
     envs = MODEL_KEY_ENVS(config)
     keyed = tuple(host for host in (ANTHROPIC_HOST, OPENAI_HOST) if deploy_env(envs[host]))
     if not keyed:
         raise RuntimeError("no model provider key set; the sandbox would have no model route")
     return policy_hosts(*keyed), tuple(
-        Bind(host=host, header=PROVIDER_AUTH[host], secret=UFO_MODELS_SECRET, env=envs[host])
+        Bind(
+            host=host,
+            header=PROVIDER_AUTH[host],
+            secret=UFO_MODELS_SECRET,
+            env=SANDBOX_KEY_ENVS[host],
+        )
         for host in keyed
     )
 

@@ -44,8 +44,14 @@ from ufo.config import (
 )
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.catalog import (
+    ANTHROPIC_KEY_ENV,
+    CORE_MODEL_SPECS,
+    CORE_PRICING,
+    OPENAI_KEY_ENV,
+)
 from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.sandbox.exec_env import sandbox_exported_env
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import RunTokenCodec
 from ufo.host.ext.loader import deploy_claims, load_manifests
@@ -648,6 +654,28 @@ def test_model_key_envs_name_each_provider_hosts_key_env() -> None:
     )
     assert MODEL_KEY_ENVS(renamed)["api.anthropic.com"] == "DEPLOY_ANTHROPIC"
     assert MODEL_KEY_ENVS(renamed)["api.openai.com"] == "DEPLOY_OPENAI"
+
+
+def test_model_bindings_export_the_sandbox_key_envs_when_the_deploy_renames_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEPLOY_ANTHROPIC", "sk-ant-deploy")
+    monkeypatch.setenv("DEPLOY_OPENAI", "sk-openai-deploy")
+    renamed = _hosted_config().model_copy(
+        update={
+            "models": ModelsConfig(
+                anthropic_api_key_env="DEPLOY_ANTHROPIC", openai_api_key_env="DEPLOY_OPENAI"
+            )
+        }
+    )
+
+    _, binds = model_bindings(renamed)
+
+    assert [(bind.host, bind.env) for bind in binds] == [
+        ("api.anthropic.com", ANTHROPIC_KEY_ENV),
+        ("api.openai.com", OPENAI_KEY_ENV),
+    ]
+    assert {bind.env for bind in binds} <= sandbox_exported_env({})
 
 
 def test_model_bindings_fails_loud_with_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
