@@ -104,12 +104,12 @@ class TurnSessions:
 
     async def close(self) -> None:
         """End the turn's authority once its terminal is committed: a turn that left detached
-        commands keeps each session this run opened narrowed to a policy that binds no model key
-        and no route, until the last command's follow ends; any other has every session under its
-        label revoked, an earlier run's included. A turn whose row is not terminal yet, as when a
-        cancel has stopped the workflow but not committed `cancelled`, keeps its sessions until
-        their deadline. A fault is logged and never raised, since each session's deadline bounds
-        what it leaves behind."""
+        commands keeps every live session under its label, an earlier run's included, narrowed to
+        a policy that binds no model key and no route, until the last command's follow ends; any
+        other has every session under its label revoked. A turn whose row is not terminal yet, as
+        when a cancel has stopped the workflow but not committed `cancelled`, keeps its sessions
+        until their deadline. A fault is logged and never raised, since each session's deadline
+        bounds what it leaves behind."""
         if self.proxy is None:
             return
         try:
@@ -133,16 +133,31 @@ class TurnSessions:
             return
         remaining = math.ceil((detached_until - now).total_seconds())
         ttl_s = min(remaining, PROXY_SESSION_MAX_TTL_SECONDS)
-        for actor, held in self.opened.items():
+        try:
+            listed = await self.proxy.labelled(
+                self.turn.workspace_id, TURN_LABEL, str(self.turn.id)
+            )
+        except Exception as error:
+            warn(
+                "turn.sessions.close_failed",
+                turn_id=str(self.turn.id),
+                error_class=type(error).__name__,
+            )
+            return
+        for session in listed:
+            if session.expires_at <= now:
+                continue
+            member = session.labels.get(MEMBER_LABEL)
+            actor = self.actor(None if member is None else UUID(member))
             try:
                 narrowed = await self._policy(actor, running=False)
-                await self.proxy.update(self.turn.workspace_id, held.session.id, narrowed)
-                await self.proxy.renew(self.turn.workspace_id, held.session.id, ttl_s)
+                await self.proxy.update(self.turn.workspace_id, session.id, narrowed)
+                await self.proxy.renew(self.turn.workspace_id, session.id, ttl_s)
             except Exception as error:
                 warn(
                     "turn.sessions.close_failed",
                     turn_id=str(self.turn.id),
-                    session_id=str(held.session.id),
+                    session_id=str(session.id),
                     error_class=type(error).__name__,
                 )
 

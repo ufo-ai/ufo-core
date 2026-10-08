@@ -321,6 +321,24 @@ async def test_update_renew_revoke_and_revoke_labelled_hit_their_routes(
     assert renewed.expires_at < first.expires_at
 
 
+async def test_labelled_lists_the_unrevoked_sessions_under_a_label_newest_first(
+    fake: Starlette, sessions: ProxySessions, workspace_id: UUID
+) -> None:
+    turn = str(uuid4())
+    older, newer, ended, expired = [
+        await sessions.open(workspace_id, key=key, labels={"turn": turn}, policy=POLICY)
+        for key in ("older", "newer", "ended", "expired")
+    ]
+    await sessions.open(workspace_id, key="elsewhere", labels={"turn": str(uuid4())}, policy=POLICY)
+    await sessions.revoke(workspace_id, ended.id)
+    fake.state.sessions[expired.id]["expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
+    fake.state.page_size = 1
+
+    listed = await sessions.labelled(workspace_id, "turn", turn)
+
+    assert [session.id for session in listed] == [expired.id, newer.id, older.id]
+
+
 async def test_revoke_labelled_follows_every_page(
     fake: Starlette, sessions: ProxySessions, workspace_id: UUID
 ) -> None:

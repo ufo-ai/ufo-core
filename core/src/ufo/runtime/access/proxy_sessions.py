@@ -204,25 +204,18 @@ class ProxySessions:
         """End the session; ending it again changes nothing."""
         await self._revoke(await self._bearer(workspace_id), session_id)
 
+    async def labelled(self, workspace_id: UUID, label: str, value: str) -> list[SessionView]:
+        """Every unrevoked session whose `label` holds `value`, newest first, expired ones
+        included. A listing filters on one label, the most the session API takes."""
+        return await self._labelled(await self._bearer(workspace_id), label, value)
+
     async def revoke_labelled(self, workspace_id: UUID, label: str, value: str) -> int:
         """Revoke every unrevoked session whose `label` holds `value`, expired ones included, and
-        answer how many. A listing filters on one label, the most the session API takes."""
+        answer how many."""
         bearer = await self._bearer(workspace_id)
-        params: dict[str, str | int] = {
-            f"labels.{label}": value,
-            "limit": PROXY_SESSION_PAGE_LIMIT,
-        }
-        live: list[UUID] = []
-        while True:
-            page = SessionPage.model_validate_json(
-                (await self._send(bearer, "GET", SESSIONS_PATH, params=params)).content
-            )
-            live.extend(session.id for session in page.items if session.revoked_at is None)
-            if page.next_cursor is None:
-                break
-            params["cursor"] = page.next_cursor
-        for session_id in live:
-            await self._revoke(bearer, session_id)
+        live = await self._labelled(bearer, label, value)
+        for session in live:
+            await self._revoke(bearer, session.id)
         return len(live)
 
     async def _bearer(self, workspace_id: UUID) -> str:
@@ -232,6 +225,21 @@ class ProxySessions:
             )
         with ws(workspace_id):
             return await self.credentials.bearer()
+
+    async def _labelled(self, bearer: str, label: str, value: str) -> list[SessionView]:
+        params: dict[str, str | int] = {
+            f"labels.{label}": value,
+            "limit": PROXY_SESSION_PAGE_LIMIT,
+        }
+        live: list[SessionView] = []
+        while True:
+            page = SessionPage.model_validate_json(
+                (await self._send(bearer, "GET", SESSIONS_PATH, params=params)).content
+            )
+            live.extend(session for session in page.items if session.revoked_at is None)
+            if page.next_cursor is None:
+                return live
+            params["cursor"] = page.next_cursor
 
     async def _update(self, bearer: str, session_id: UUID, policy: SessionPolicy) -> SessionWithEnv:
         path = f"{SESSIONS_PATH}/{session_id}"

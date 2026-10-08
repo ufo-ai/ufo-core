@@ -336,13 +336,13 @@ async def test_close_revokes_an_earlier_runs_session(
     assert fake.state.sessions[crashed.id]["revoked_at"] is not None
 
 
-async def test_close_narrows_and_renews_a_detached_turn(
+async def test_close_narrows_and_renews_every_session_of_a_detached_turn(
     fake: Starlette, proxy: ProxySessions, seeded: _Seeded
 ) -> None:
+    earlier = await _sessions(seeded, proxy).reconcile(seeded.member_b)
     sessions = _sessions(seeded, proxy)
     base = await sessions.reconcile("turn")
-    acting = await sessions.reconcile(seeded.member_b)
-    assert base is not None and acting is not None
+    assert earlier is not None and base is not None
     with ws(seeded.turn.workspace_id):
         await mark_detached(seeded.turn, "build", "/home/user/.ufo/runs/build")
     sent = len(fake.state.calls)
@@ -352,19 +352,41 @@ async def test_close_narrows_and_renews_a_detached_turn(
 
     closing = fake.state.calls[sent:]
     assert [(method, target) for method, target, _, _ in closing] == [
+        ("GET", f"/v1/sessions?labels.turn={seeded.turn.id}&limit=200"),
         ("PATCH", f"/v1/sessions/{base.id}"),
         ("POST", f"/v1/sessions/{base.id}/renew"),
-        ("PATCH", f"/v1/sessions/{acting.id}"),
-        ("POST", f"/v1/sessions/{acting.id}/renew"),
+        ("PATCH", f"/v1/sessions/{earlier.id}"),
+        ("POST", f"/v1/sessions/{earlier.id}/renew"),
     ]
     patches = [json.loads(body)["policy"] for method, _, _, body in closing if method == "PATCH"]
     for policy in patches:
         assert policy["routes"] == []
         assert UFO_MODELS_SECRET not in {bind["secret"] for bind in policy["bind"]}
         assert "acme_api_key" in {bind["secret"] for bind in policy["bind"]}
+    assert "GH_TOKEN" in {bind["env"] for bind in patches[1]["bind"]}
+    assert "GH_TOKEN" not in {bind["env"] for bind in patches[0]["bind"]}
     renewals = [json.loads(body)["ttl_s"] for method, _, _, body in closing if method == "POST"]
     assert all(0 < ttl_s <= PROXY_SESSION_MAX_TTL_SECONDS for ttl_s in renewals)
     assert all(held["revoked_at"] is None for held in fake.state.sessions.values())
+
+
+async def test_close_leaves_a_revoked_or_expired_session_of_a_detached_turn(
+    fake: Starlette, proxy: ProxySessions, seeded: _Seeded
+) -> None:
+    sessions = _sessions(seeded, proxy)
+    base = await sessions.reconcile("turn")
+    acting = await sessions.reconcile(seeded.member_b)
+    assert base is not None and acting is not None
+    fake.state.sessions[base.id]["revoked_at"] = datetime.now(UTC)
+    fake.state.sessions[acting.id]["expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
+    with ws(seeded.turn.workspace_id):
+        await mark_detached(seeded.turn, "build", "/home/user/.ufo/runs/build")
+    sent = len(fake.state.calls)
+
+    await _commit(seeded, "done")
+    await sessions.close()
+
+    assert _calls(fake)[sent:] == [("GET", f"/v1/sessions?labels.turn={seeded.turn.id}&limit=200")]
 
 
 async def test_close_logs_and_never_raises(
