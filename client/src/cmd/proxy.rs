@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::env;
-use std::fs::{self, OpenOptions};
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::fs::{self, File, OpenOptions};
+use std::io::ErrorKind;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -21,6 +22,7 @@ const PID_FILE: &str = "daemon.pid";
 const PORT_FILE: &str = "daemon.port";
 const UPSTREAM_FILE: &str = "daemon.upstream";
 const LOG_FILE: &str = "daemon.log";
+const LOCK_FILE: &str = "daemon.lock";
 const CA_FILE: &str = "ca.pem";
 const PROXY_PASSWORD: &str = "ufo";
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -165,6 +167,7 @@ fn start(session: &str, export: bool, url_default: Option<&str>) -> Result<(), S
     let ca_path = state.join(CA_FILE);
     fs::write(&ca_path, trust::trust_bundle(&ca.ca_pem)?)
         .map_err(|error| format!("could not write {}: {error}", ca_path.display()))?;
+    let _launching = locked(&state)?;
     let local = match running(&state) {
         Some(daemon) if daemon.upstream.as_deref() == Some(&relay(&host, port)) => daemon.port,
         Some(daemon) => {
@@ -185,13 +188,30 @@ fn upstream(url: &str) -> Result<(String, u16), String> {
         .split(['/', '?', '#'])
         .next()
         .unwrap_or_default();
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port)) => (host, port.parse().map_err(|_| invalid())?),
-        None => (authority, HTTPS_PORT),
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(bracketed) => {
+            let (host, rest) = bracketed.split_once(']').ok_or_else(invalid)?;
+            host.parse::<Ipv6Addr>().map_err(|_| invalid())?;
+            let port = match rest {
+                "" => HTTPS_PORT,
+                _ => rest
+                    .strip_prefix(':')
+                    .and_then(|port| port.parse().ok())
+                    .ok_or_else(invalid)?,
+            };
+            (host, port)
+        }
+        None => {
+            let (host, port) = match authority.rsplit_once(':') {
+                Some((host, port)) => (host, port.parse().map_err(|_| invalid())?),
+                None => (authority, HTTPS_PORT),
+            };
+            if host.is_empty() || host.contains(['@', ':', '[', ']']) {
+                return Err(invalid());
+            }
+            (host, port)
+        }
     };
-    if host.is_empty() || host.contains('@') {
-        return Err(invalid());
-    }
     Ok((host.to_string(), port))
 }
 
@@ -225,7 +245,32 @@ fn shell_name(name: &str) -> bool {
 }
 
 fn relay(host: &str, port: u16) -> String {
-    format!("{host}:{port}")
+    match host.contains(':') {
+        true => format!("[{host}]:{port}"),
+        false => format!("{host}:{port}"),
+    }
+}
+
+fn locked(state: &Path) -> Result<File, String> {
+    let path = state.join(LOCK_FILE);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+    file.lock()
+        .map_err(|error| format!("could not lock {}: {error}", path.display()))?;
+    Ok(file)
+}
+
+fn removed(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != ErrorKind::NotFound => {
+            Err(format!("could not remove {}: {error}", path.display()))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn running(state: &Path) -> Option<Daemon> {
@@ -247,7 +292,7 @@ fn launched(state: &Path, host: &str, port: u16) -> Result<u16, String> {
         state.join(UPSTREAM_FILE),
         port_path.clone(),
     ] {
-        let _ = fs::remove_file(stale);
+        removed(&stale)?;
     }
     let log = OpenOptions::new()
         .create(true)
@@ -357,11 +402,15 @@ fn serve(state: &Path, host: String, port: u16) -> Result<(), String> {
 
 fn stop() -> Result<(), String> {
     let state = Home::resolve().root.join(STATE_DIR);
+    if !state.is_dir() {
+        return Ok(());
+    }
+    let _stopping = locked(&state)?;
     if let Some(daemon) = running(&state) {
         halted(&daemon)?;
     }
     for name in [PID_FILE, PORT_FILE, UPSTREAM_FILE] {
-        let _ = fs::remove_file(state.join(name));
+        removed(&state.join(name))?;
     }
     Ok(())
 }
@@ -519,6 +568,63 @@ mod tests {
         ] {
             assert!(upstream(refused).is_err(), "{refused}");
         }
+    }
+
+    #[test]
+    fn a_bracketed_ipv6_authority_is_its_address() {
+        assert_eq!(
+            upstream("https://[::1]:8443/base").unwrap(),
+            ("::1".to_string(), 8443)
+        );
+        assert_eq!(
+            upstream("https://[2001:db8::1]").unwrap(),
+            ("2001:db8::1".to_string(), 443)
+        );
+        assert_eq!(relay("::1", 8443), "[::1]:8443");
+        for refused in [
+            "https://::1",
+            "https://[::1",
+            "https://[::1]8443",
+            "https://[proxy.test]:443",
+            "https://[]:443",
+        ] {
+            assert!(upstream(refused).is_err(), "{refused}");
+        }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("ufo-proxy-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_state_lock_admits_one_launcher_at_a_time() {
+        let state = scratch("lock");
+        let held = locked(&state).unwrap();
+        let other = OpenOptions::new()
+            .write(true)
+            .open(state.join(LOCK_FILE))
+            .unwrap();
+        assert!(matches!(
+            other.try_lock(),
+            Err(fs::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        assert!(other.try_lock().is_ok());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn removing_a_missing_file_succeeds_and_any_other_failure_is_reported() {
+        let state = scratch("remove");
+        assert!(removed(&state.join(PID_FILE)).is_ok());
+        let directory = state.join(PORT_FILE);
+        fs::create_dir_all(&directory).unwrap();
+        assert!(removed(&directory)
+            .unwrap_err()
+            .starts_with(&format!("could not remove {}", directory.display())));
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]
