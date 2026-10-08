@@ -87,6 +87,7 @@ from ufo.host.ext.loader import (
     member_object_registry,
     member_skill_listing,
     memory_search,
+    proxy_credentials,
     skill_registry,
     turn_subagent_grants,
     turn_subagents,
@@ -117,6 +118,7 @@ from ufo.runtime.access.vault import VaultReads
 from ufo.runtime.background_tasks import BackgroundTaskSweep
 from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger
 from ufo.runtime.billing.spend import NO_SPEND_GATES, GateDeploy, SpendGates, built_gates
+from ufo.runtime.cloud import CloudApis, LoopClients, proxy_bearer
 from ufo.runtime.context_boundary import (
     CORE_FLAGS,
     select_context_boundary,
@@ -387,6 +389,13 @@ def run(fleet: Fleet) -> None:
     ).start()
     deploy_actions = validate_ext_tools(manifests, credentials)
     _validate_requires(config, manifests, credentials)
+    _require_cloud(config, manifests)
+    bearer_source = proxy_credentials(manifests)
+    cloud = (
+        None
+        if config.cloud.api_url is None or bearer_source is None
+        else CloudApis(config.cloud.api_url, LoopClients(), proxy_bearer(bearer_source))
+    )
     init_workspace_credentials(credentials)
     init_flags(_select_flag_provider(config, manifests))
     blob_backend = blob_store_for(config.blob)
@@ -399,9 +408,9 @@ def run(fleet: Fleet) -> None:
     carrier, carrier_spec = carriers.carrier, carriers.spec
     runtime_identity = _runtime_identity(config, carrier_spec)
     registry = model_registry(config, manifests)
-    embed = embed_backend(manifests, config.memory.embed_backend, credentials)
-    index = index_backend(manifests, config.memory.index_backend, credentials)
-    memory = memory_search(manifests, credentials, index, embed)
+    embed = embed_backend(manifests, config.memory.embed_backend, credentials, cloud=cloud)
+    index = index_backend(manifests, config.memory.index_backend, credentials, cloud=cloud)
+    memory = memory_search(manifests, credentials, index, embed, cloud=cloud)
     search = _select_search_provider(config, manifests, credentials)
     subagents = SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests)))
     subagent_grants = turn_subagent_grants(manifests)
@@ -485,6 +494,7 @@ def run(fleet: Fleet) -> None:
             probes=probes,
             spend=spend,
             ledger=ledger,
+            cloud=cloud,
         ),
         registry=registry,
         skills=skills,
@@ -519,6 +529,7 @@ def run(fleet: Fleet) -> None:
             ConnectResume(admission),
             spend=spend,
             ledger=ledger,
+            cloud=cloud,
         )
     )
     dbos = DBOS(
@@ -575,7 +586,7 @@ def run(fleet: Fleet) -> None:
         raise RuntimeError(f"[[sources]] names unknown backends: {', '.join(unknown_backends)}")
     app.state.configured_sources = config.sources
     page_feed = CorePageFeed(blob=blob)
-    _launch_jobs(runtime, invoker_for, sync_driver, page_feed, probes)
+    _launch_jobs(runtime, invoker_for, sync_driver, page_feed, probes, cloud)
     _mount_ext_routes(
         app,
         manifests,
@@ -585,6 +596,7 @@ def run(fleet: Fleet) -> None:
         config.connect.public_base_url,
         spend,
         ledger,
+        cloud=cloud,
         vault=VaultReads(
             credentials,
             workspace_slot_source(manifests),
@@ -633,7 +645,9 @@ def run(fleet: Fleet) -> None:
         ),
         sandbox_sizes=carrier_spec.sizes,
         skills=skills,
-        member_skill_listing=lambda: member_skill_listing(manifests, credentials, index, embed),
+        member_skill_listing=lambda: member_skill_listing(
+            manifests, credentials, index, embed, cloud=cloud
+        ),
         memory=memory,
         sign_in_path=config.serve.sign_in_path,
         sites=config.sites,
@@ -646,7 +660,9 @@ def run(fleet: Fleet) -> None:
             artifact_token_secret=artifact_secret,
             spend=spend,
             ledger=ledger,
+            cloud=cloud,
         ),
+        cloud=cloud,
     )
     _assert_no_reserved_routes(app, config.serve.gateway_prefixes)
     log("serve.started", fleet=fleet.name, host=config.serve.host, port=config.serve.port)
@@ -704,6 +720,7 @@ def _launch_jobs(
     sync_driver: SyncDriver,
     page_feed: CorePageFeed,
     probes: ConversationProbes,
+    cloud: CloudApis | None,
 ) -> None:
     page_change_runner = PageChangeRunner(
         manifests=runtime.manifests,
@@ -718,6 +735,7 @@ def _launch_jobs(
         background_model=runtime.config.models.background_jobs_model,
         spend=runtime.spend,
         ledger=runtime.ledger,
+        cloud=cloud,
     )
     preview_url = os.environ.get(PREVIEW_SERVICE_URL_ENV)
     preview_renderer = (
@@ -756,6 +774,7 @@ def _launch_jobs(
         background_model=runtime.config.models.background_jobs_model,
         spend=runtime.spend,
         ledger=runtime.ledger,
+        cloud=cloud,
         public_base_url=runtime.config.connect.public_base_url,
         home_surface=home_surface(runtime.manifests),
     ).launch()
@@ -911,6 +930,23 @@ def _validate_requires(
                     f"extension {manifest.name!r} requires the {seam!r} seam but it is "
                     f"unavailable: {error}"
                 ) from error
+
+
+def _require_cloud(config: Config, manifests: tuple[Manifest, ...]) -> None:
+    """A `cloud_client` extension calls the cloud API under `[cloud] api_url` with the bearer the
+    extension declaring `proxy_credentials` answers, so it boots only where both are present."""
+    clients = sorted(manifest.name for manifest in manifests if manifest.cloud_client)
+    if not clients:
+        return
+    if config.cloud.api_url is None:
+        raise RuntimeError(
+            f"The extension {clients[0]!r} declares cloud_client, so [cloud] api_url must be set."
+        )
+    if not any(manifest.proxy_credentials is not None for manifest in manifests):
+        raise RuntimeError(
+            f"The extension {clients[0]!r} declares cloud_client, so an extension must declare "
+            "proxy_credentials."
+        )
 
 
 def _require_cdp_provider(
@@ -1094,6 +1130,7 @@ def _mount_ext_routes(
     spend: SpendGates,
     ledger: Ledger,
     *,
+    cloud: CloudApis | None = None,
     vault: VaultReads | None = None,
 ) -> None:
     for manifest in manifests:
@@ -1116,6 +1153,8 @@ def _mount_ext_routes(
             ledger=ledger,
             vault_read=manifest.vault_read,
             vault=vault,
+            cloud_client=manifest.cloud_client,
+            cloud=cloud,
         )
         for spec in manifest.routes:
 
@@ -1309,6 +1348,7 @@ def _mount_shared_surfaces(
     spend: SpendGates = NO_SPEND_GATES,
     ledger: Ledger = UNGATED_LEDGER,
     ambient_reply_for: "Callable[[str], AmbientReplyClassifier] | None" = None,
+    cloud: CloudApis | None = None,
 ) -> None:
     app.add_middleware(WorkspaceScopeBoundary)
     if connectors is None:
@@ -1337,6 +1377,8 @@ def _mount_shared_surfaces(
                 minted=minted_slots(manifest),
                 spend=spend,
                 ledger=ledger,
+                cloud_client=manifest.cloud_client,
+                cloud=cloud,
             ),
         )
         for manifest, provider in conversation_slot_declarations(manifests)
@@ -1634,6 +1676,7 @@ def _connect_flow(
     *,
     spend: SpendGates,
     ledger: Ledger,
+    cloud: CloudApis | None = None,
 ) -> ConnectFlow | None:
     if credentials is None:
         return None
@@ -1653,7 +1696,7 @@ def _connect_flow(
         portal_url=portal_url(config.connect.public_base_url, home_surface(manifests)),
         resolver=open_connector_namespace(manifests),
         connections=connection_hooks(
-            manifests, credentials, index, embed, spend=spend, ledger=ledger
+            manifests, credentials, index, embed, spend=spend, ledger=ledger, cloud=cloud
         ),
         resumption=resumption,
         labels={

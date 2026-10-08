@@ -920,8 +920,9 @@ class Manifest:
     rule `[operator] rule` names, and only a first-party distribution may register one.
     `vault_read` lets the extension resolve a bound secret's value on the host its declaration
     admits (`ExtensionContext.resolve_secret`), and `proxy_credentials` answers the bearer the
-    runtime presents to the proxy service; only a first-party distribution declares either, and
-    one extension at most declares `proxy_credentials`."""
+    runtime presents to the proxy service; `cloud_client` lets the extension call the cloud API as
+    its bound workspace (`ExtensionContext.cloud_api`). Only a first-party distribution declares
+    any of the three, and one extension at most declares `proxy_credentials`."""
 
     name: str
     version: str
@@ -962,6 +963,7 @@ class Manifest:
     proxy_credentials: ProxyCredentialSpec | None = None
     member_context_read: bool = False
     vault_read: bool = False
+    cloud_client: bool = False
     sandbox_internet: bool = False
     requires: tuple[str, ...] = field(default_factory=tuple)
     deploy_keys: tuple[str, ...] = field(default_factory=tuple)

@@ -172,6 +172,31 @@ class ConnectConfig(BaseModel):
     public_base_url: str | None = None
 
 
+class CloudConfig(BaseModel):
+    """The cloud API core and a `cloud_client` extension call: `api_url` is its base, a scheme and
+    a host alone (`https://api.example.com`, or `http://api-router:8080` in a local stack), under
+    which every service serves its own `/v1/<service>` routes."""
+
+    model_config = ConfigDict(extra="forbid")
+    api_url: str | None = None
+
+    @model_validator(mode="after")
+    def _a_scheme_and_a_host(self) -> "CloudConfig":
+        if self.api_url is None:
+            return self
+        split = urlsplit(self.api_url)
+        if (
+            split.scheme not in {"http", "https"}
+            or not split.hostname
+            or split.username is not None
+            or split.path
+            or split.query
+            or split.fragment
+        ):
+            raise ValueError("[cloud] api_url must be https://<host> or http://<host>")
+        return self
+
+
 class MemoryConfig(BaseModel):
     """Memory retrieval settings. `index_backend` names a vector-index backend an extension
     contributes through its `indexes` Manifest point; `embed_backend` names an
@@ -573,6 +598,7 @@ class Config(BaseModel):
     credentials: CredentialsConfig = CredentialsConfig()
     serve: ServeConfig = ServeConfig()
     connect: ConnectConfig = ConnectConfig()
+    cloud: CloudConfig = CloudConfig()
     memory: MemoryConfig = MemoryConfig()
     skills: SkillsConfig = SkillsConfig()
     o11y: O11yConfig = O11yConfig()

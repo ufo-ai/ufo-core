@@ -70,6 +70,7 @@ from ufo.runtime.billing.spend import (
     composed,
 )
 from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
+from ufo.runtime.cloud import CloudApi, CloudApis
 from ufo.runtime.ext.json_value import JsonValue
 from ufo.runtime.ext.operator import installed_operator
 from ufo.runtime.ext.source_reader import SourceReader
@@ -1372,6 +1373,8 @@ class ExtensionContext:
     ledger: Ledger | None = None
     vault_read_allowed: bool = False
     vault: "VaultReads | None" = None
+    cloud_client_allowed: bool = False
+    cloud: CloudApis | None = None
 
     @property
     def workspace_id(self) -> UUID:
@@ -1503,6 +1506,18 @@ class ExtensionContext:
         if self.vault is None:
             raise RuntimeError("resolve_secret requires the deploy's vault; none is wired.")
         return await self.vault.resolve(self.workspace_id, name, host)
+
+    def cloud_api(self) -> CloudApi:
+        """The cloud API's client as the bound workspace, presenting the deploy's bearer for it.
+        Only a manifest declaring `cloud_client` asks, and only a deploy that sets `[cloud]
+        api_url` answers."""
+        if not self.cloud_client_allowed:
+            raise PermissionError(
+                f"The extension {self.store.extension!r} does not declare cloud_client."
+            )
+        if self.cloud is None:
+            raise RuntimeError("[cloud] api_url is unset.")
+        return self.cloud.bound(self.store.workspace_id)
 
     async def scheduled_runs(
         self,
@@ -2901,6 +2916,8 @@ def context_for(
     ledger: Ledger | None = None,
     vault_read: bool = False,
     vault: "VaultReads | None" = None,
+    cloud_client: bool = False,
+    cloud: CloudApis | None = None,
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
@@ -2921,7 +2938,8 @@ def context_for(
     `ledger` are the deploy's gates and ledger, which the metered model seam and a handler's own
     metering and spend reads go through; a context wired with neither refuses both reads.
     `vault_read` is the manifest's privileged capability to resolve a bound secret through the
-    deploy's `vault`, which a context without it never carries."""
+    deploy's `vault`, which a context without it never carries, and `cloud_client` its capability
+    to call the deploy's `cloud` API as the bound workspace."""
     if model_resolver is not None and model_job is None:
         raise ValueError("a wired model_resolver needs the model_job its spend is attributed to")
     if model_resolver is not None and (spend is None or ledger is None):
@@ -2961,4 +2979,6 @@ def context_for(
         ledger=ledger,
         vault_read_allowed=vault_read,
         vault=vault if vault_read else None,
+        cloud_client_allowed=cloud_client,
+        cloud=cloud if cloud_client else None,
     )

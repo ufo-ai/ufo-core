@@ -41,6 +41,7 @@ def test_the_runtime_distribution_is_always_first_party(monkeypatch: pytest.Monk
     [
         Manifest(name="acme", version="0", member_context_read=True),
         Manifest(name="acme", version="0", vault_read=True),
+        Manifest(name="acme", version="0", cloud_client=True),
         Manifest(name="acme", version="0", proxy_credentials=BEARER),
         Manifest(
             name="acme",
@@ -63,6 +64,7 @@ def test_the_runtime_distribution_is_always_first_party(monkeypatch: pytest.Monk
     ids=[
         "member_context_read",
         "vault_read",
+        "cloud_client",
         "proxy_credentials",
         "census",
         "spend_gates",

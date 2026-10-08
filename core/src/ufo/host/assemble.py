@@ -54,6 +54,7 @@ from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger
 from ufo.runtime.billing.spend import NO_SPEND_GATES, SpendGates
+from ufo.runtime.cloud import CloudApis
 from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, TurnInvoker
 from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.ext.manifest import Manifest
@@ -134,6 +135,9 @@ class HostEnvironment:
     spend: SpendGates = NO_SPEND_GATES
     ledger: Ledger = UNGATED_LEDGER
     """The deploy's spend gates and ledger, which every extension context a turn builds carries."""
+    cloud: CloudApis | None = None
+    """The deploy's cloud API, which every extension context a turn builds carries for a manifest
+    declaring `cloud_client`."""
 
     async def assemble(self, request: AssembleRequest) -> AssembledTurn:
         turn, agent, profile = request.turn, request.agent, request.profile
@@ -162,7 +166,11 @@ class HostEnvironment:
         )
         held = render_workspace_facts(
             await turn_workspace_facts(
-                self.manifests, audience=request.audience, spend=self.spend, ledger=self.ledger
+                self.manifests,
+                audience=request.audience,
+                spend=self.spend,
+                ledger=self.ledger,
+                cloud=self.cloud,
             )
         )
         if held:
@@ -276,6 +284,7 @@ class HostEnvironment:
             probes=self.probes,
             spend=self.spend,
             ledger=self.ledger,
+            cloud=self.cloud,
         )
 
     def hooks(self, *, audience: Audience) -> HookChain:
@@ -290,6 +299,7 @@ class HostEnvironment:
             search=self.search,
             spend=self.spend,
             ledger=self.ledger,
+            cloud=self.cloud,
         )
 
     async def member_skills(
@@ -301,6 +311,7 @@ class HostEnvironment:
             self.index,
             self.embed,
             agent_name=agent_name,
+            cloud=self.cloud,
         )
 
     async def environment_model(self, environment: str, profile: str | None) -> str | None:

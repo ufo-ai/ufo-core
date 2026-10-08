@@ -210,6 +210,7 @@ def _served_jobs(
         SyncDriver(backends={}, blob=blob, postgres=False),
         CorePageFeed(blob=blob),
         None,
+        None,
     )
     return launched[0]
 

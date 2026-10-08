@@ -69,6 +69,7 @@ from ufo.runtime.access.grants import ConnectionRecorded
 from ufo.runtime.access.workspace_slots import SlotProvider, WorkspaceSlots
 from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger
 from ufo.runtime.billing.spend import NO_SPEND_GATES, SpendGates
+from ufo.runtime.cloud import CloudApis
 from ufo.runtime.ext.context import (
     ConversationProbes,
     DeployCredentials,
@@ -205,6 +206,7 @@ def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
         if (
             manifest.member_context_read
             or manifest.vault_read
+            or manifest.cloud_client
             or manifest.proxy_credentials is not None
             or manifest.workspace_founded
             or manifest.deploy_routes
@@ -569,6 +571,7 @@ def turn_tools(
     probes: ConversationProbes | None = None,
     spend: SpendGates = NO_SPEND_GATES,
     ledger: Ledger = UNGATED_LEDGER,
+    cloud: CloudApis | None = None,
 ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext], ObjectVerbs]:
     """The full tool set a turn dispatches against — core builtins plus every extension's declared
     tools and connector tools — the workspace-scoped ExtensionContext each extension tool's
@@ -632,6 +635,8 @@ def turn_tools(
             minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
+            cloud_client=manifest.cloud_client,
+            cloud=cloud,
         )
         for tool in declared_tools:
             if tool.bound is not None:
@@ -678,6 +683,7 @@ def member_object_registry(
     artifact_token_secret: str = "",
     spend: SpendGates,
     ledger: Ledger,
+    cloud: CloudApis | None = None,
 ) -> MemberObjectRegistry:
     """The deploy's object kinds and actions bound for member reads outside a turn — the portal's
     registry. The same kinds and the same boot validation as `turn_tools`, but each extension
@@ -724,6 +730,8 @@ def member_object_registry(
             minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
+            cloud_client=manifest.cloud_client,
+            cloud=cloud,
         )
         actions.extend(
             BoundAction(action=tool, extension=manifest.name, context=context)
@@ -894,6 +902,7 @@ async def turn_member_skills(
     embed: EmbedClient | None = None,
     *,
     agent_name: str,
+    cloud: CloudApis | None = None,
 ) -> tuple[tuple[SkillCard, ...], SkillMaterializer]:
     """The bound agent's member tier: every active extension's saved-skill routing cards, in load
     order, and one materializer that routes a name back to the provider that contributed it (an
@@ -912,7 +921,15 @@ async def turn_member_skills(
                 f"extension {manifest.name!r} provides member skills but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(manifest.name, declared, index, embed, minted=minted_slots(manifest))
+        context = context_for(
+            manifest.name,
+            declared,
+            index,
+            embed,
+            minted=minted_slots(manifest),
+            cloud_client=manifest.cloud_client,
+            cloud=cloud,
+        )
         for card in await manifest.member_skills.cards(context):
             if card.agents and agent_name not in card.agents:
                 continue
@@ -937,6 +954,8 @@ async def member_skill_listing(
     credential_store: CredentialStore | None,
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
+    *,
+    cloud: CloudApis | None = None,
 ) -> tuple[RuntimeSkill, ...]:
     """Every provider's member skills materialized whole — the portal's management listing read:
     one store read per provider through `materialize_all`, a corrupt row skipped by the provider
@@ -952,7 +971,15 @@ async def member_skill_listing(
                 f"extension {manifest.name!r} provides member skills but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(manifest.name, declared, index, embed, minted=minted_slots(manifest))
+        context = context_for(
+            manifest.name,
+            declared,
+            index,
+            embed,
+            minted=minted_slots(manifest),
+            cloud_client=manifest.cloud_client,
+            cloud=cloud,
+        )
         for skill in await manifest.member_skills.materialize_all(context):
             if skill.name in listed:
                 log("skill.member_card_collision", skill=skill.name, extension=manifest.name)
@@ -968,6 +995,8 @@ def index_backend(
     manifests: tuple[Manifest, ...],
     configured: str | None,
     credential_store: CredentialStore | None,
+    *,
+    cloud: CloudApis | None = None,
 ) -> IndexBackend:
     """The workspace's index backend: the named backend an extension contributes through its
     `indexes` Manifest point, or — the config knob unset — the base-pinned `index_default`
@@ -982,7 +1011,13 @@ def index_backend(
             declared = frozenset(slot.name for slot in manifest.credentials)
             if declared and credential_store is None:
                 raise RuntimeError(f"index backend {name!r} needs a credential key but none is set")
-            context = context_for(manifest.name, declared, minted=minted_slots(manifest))
+            context = context_for(
+                manifest.name,
+                declared,
+                minted=minted_slots(manifest),
+                cloud_client=manifest.cloud_client,
+                cloud=cloud,
+            )
             return spec.factory(context)
     raise NotRegisteredError(f"config selects index backend {name!r} but no extension registers it")
 
@@ -991,6 +1026,8 @@ def embed_backend(
     manifests: tuple[Manifest, ...],
     configured: str | None,
     credential_store: CredentialStore | None,
+    *,
+    cloud: CloudApis | None = None,
 ) -> EmbedClient:
     """The deploy's embed client: the named backend an extension contributes through its `embeds`
     Manifest point, or — the config knob unset — the base-pinned `embed_openai` extension
@@ -1005,7 +1042,13 @@ def embed_backend(
             declared = frozenset(slot.name for slot in manifest.credentials)
             if declared and credential_store is None:
                 raise RuntimeError(f"embed backend {name!r} needs a credential key but none is set")
-            context = context_for(manifest.name, declared, minted=minted_slots(manifest))
+            context = context_for(
+                manifest.name,
+                declared,
+                minted=minted_slots(manifest),
+                cloud_client=manifest.cloud_client,
+                cloud=cloud,
+            )
             return spec.factory(context)
     raise NotRegisteredError(f"config selects embed backend {name!r} but no extension registers it")
 
@@ -1016,6 +1059,8 @@ def memory_search(
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
     name: str = DEFAULT_MEMORY_SEARCH_PROVIDER,
+    *,
+    cloud: CloudApis | None = None,
 ) -> MemorySearch | None:
     """Build one named provider with its declaring extension's scoped context."""
     providers: list[tuple[Manifest, MemorySearchProviderSpec]] = []
@@ -1035,7 +1080,15 @@ def memory_search(
             f"memory search provider {manifest.name!r} declares credential slots "
             "but no credential key is set"
         )
-    context = context_for(manifest.name, declared, index, embed, minted=minted_slots(manifest))
+    context = context_for(
+        manifest.name,
+        declared,
+        index,
+        embed,
+        minted=minted_slots(manifest),
+        cloud_client=manifest.cloud_client,
+        cloud=cloud,
+    )
     return MemorySearch(spec.build(context))
 
 
@@ -1102,7 +1155,12 @@ def validate_ext_tools(
 
 
 async def turn_workspace_facts(
-    manifests: tuple[Manifest, ...], *, audience: Audience, spend: SpendGates, ledger: Ledger
+    manifests: tuple[Manifest, ...],
+    *,
+    audience: Audience,
+    spend: SpendGates,
+    ledger: Ledger,
+    cloud: CloudApis | None = None,
 ) -> tuple[str, ...]:
     """The lines every declared workspace fact says this workspace holds, in manifest order.
 
@@ -1126,6 +1184,8 @@ async def turn_workspace_facts(
             minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
+            cloud_client=manifest.cloud_client,
+            cloud=cloud,
         )
         for fact in manifest.workspace_facts:
             try:
@@ -1155,6 +1215,7 @@ def turn_hooks(
     search: SearchProvider | None = None,
     spend: SpendGates = NO_SPEND_GATES,
     ledger: Ledger = UNGATED_LEDGER,
+    cloud: CloudApis | None = None,
 ) -> HookChain:
     """The turn's reactive hook chain — every declared turn-lifecycle hook bound to its extension's
     workspace-scoped ExtensionContext (the same handle its tools and jobs receive), grouped by
@@ -1193,6 +1254,8 @@ def turn_hooks(
             minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
+            cloud_client=manifest.cloud_client,
+            cloud=cloud,
         )
         for spec in manifest.hooks:
             if spec.event not in TURN_HOOK_EVENTS:
@@ -1238,6 +1301,7 @@ def connection_hooks(
     *,
     spend: SpendGates,
     ledger: Ledger,
+    cloud: CloudApis | None = None,
 ) -> ConnectionHookChain:
     """The chain the connect flow publishes to — every declared `connection_recorded` hook bound to
     its extension's workspace-scoped ExtensionContext, the same handle its jobs receive, so the
@@ -1260,6 +1324,8 @@ def connection_hooks(
             minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
+            cloud_client=manifest.cloud_client,
+            cloud=cloud,
         )
         bound.extend(BoundHook(spec=spec, ext=context) for spec in specs)
     return ConnectionHookChain(hooks=tuple(bound))
