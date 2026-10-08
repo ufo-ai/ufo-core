@@ -618,13 +618,14 @@ ledger = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint(
         "dimension in ('tokens', 'egress', 'sandbox_tokens', 'images', 'videos', 'requests', "
-        "'gib')",
+        "'gib', 'writes', 'searches', 'pages', 'gib_months')",
         name="ledger_dimension",
     ),
     sa.CheckConstraint(
         "service is null or (service = 'models' and dimension in ('tokens', 'sandbox_tokens', "
         "'images', 'videos')) or (service = 'proxy' and dimension in ('egress', 'requests', "
-        "'gib'))",
+        "'gib')) or (service = 'memory' and dimension in ('writes', 'searches')) or "
+        "(service = 'sources' and dimension in ('pages', 'gib_months'))",
         name="ledger_service_dimension",
     ),
     sa.CheckConstraint("amount > 0", name="ledger_amount"),

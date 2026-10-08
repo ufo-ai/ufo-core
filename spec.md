@@ -1188,6 +1188,8 @@ Every ledger row names the service that metered it and the unit it counts (`dime
 |---|---|---|
 | `models` | `tokens` (with the six token classes), `images`, `videos` | `sandbox_tokens` |
 | `proxy` | `requests`, `gib` (bytes) | `egress` |
+| `memory` | `writes`, `searches` | |
+| `sources` | `pages`, `gib_months` (byte-hours) | |
 
 An extension books what a service metered through `ExtensionContext.record_usage`: service, unit,
 backend, amount, token, session, labels, resource, attempt, `occurred_at`, `byok`, price and rate

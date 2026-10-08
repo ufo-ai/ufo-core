@@ -12,6 +12,9 @@ from ufo.harness.models.pricing import (
     MICRO_USD_PER_USD as MICRO_USD_PER_USD,
 )
 from ufo.runtime.billing.accounting import (
+    GIB_MONTHS_DIMENSION as GIB_MONTHS_DIMENSION,
+)
+from ufo.runtime.billing.accounting import (
     LABEL_KEY as LABEL_KEY,
 )
 from ufo.runtime.billing.accounting import (
@@ -21,10 +24,19 @@ from ufo.runtime.billing.accounting import (
     LABELS_MAX_KEYS as LABELS_MAX_KEYS,
 )
 from ufo.runtime.billing.accounting import (
+    MEMORY_SERVICE as MEMORY_SERVICE,
+)
+from ufo.runtime.billing.accounting import (
     MODELS_SERVICE as MODELS_SERVICE,
 )
 from ufo.runtime.billing.accounting import (
+    PAGES_DIMENSION as PAGES_DIMENSION,
+)
+from ufo.runtime.billing.accounting import (
     PROXY_SERVICE as PROXY_SERVICE,
+)
+from ufo.runtime.billing.accounting import (
+    SEARCHES_DIMENSION as SEARCHES_DIMENSION,
 )
 from ufo.runtime.billing.accounting import (
     SERVICE_OF_DIMENSION as SERVICE_OF_DIMENSION,
@@ -33,10 +45,16 @@ from ufo.runtime.billing.accounting import (
     SERVICE_UNITS as SERVICE_UNITS,
 )
 from ufo.runtime.billing.accounting import (
+    SOURCES_SERVICE as SOURCES_SERVICE,
+)
+from ufo.runtime.billing.accounting import (
     TURN_LABEL as TURN_LABEL,
 )
 from ufo.runtime.billing.accounting import (
     USAGE_KEYS as USAGE_KEYS,
+)
+from ufo.runtime.billing.accounting import (
+    WRITES_DIMENSION as WRITES_DIMENSION,
 )
 from ufo.runtime.billing.accounting import (
     DimensionTotal as DimensionTotal,
