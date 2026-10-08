@@ -31,6 +31,8 @@ from ufo.runtime.access.proxy_sessions import (
     PROBE_LABEL,
     PROXY_SESSION_MAX_TTL_SECONDS,
     PROXY_SESSION_TTL_SECONDS,
+    SESSION_EXPIRED_CODE,
+    ProxyRefused,
     ProxySessions,
     SessionCreated,
 )
@@ -85,26 +87,18 @@ class TurnSessions:
 
     async def reconcile(self, actor: RunActor) -> SessionCreated | None:
         """The session `actor` egresses under for the next dispatch: its policy recompiled and
-        patched when it moved since the last write, its deadline renewed."""
+        patched when it moved since the last write, its deadline renewed. A session that expired
+        since the last dispatch gives way to a new one; a revoked one stays refused."""
         if self.proxy is None:
             return None
         async with self.lock:
-            held = await self._opened(self.proxy, actor)
-            policy = await self._policy(actor, running=True)
-            if policy.digest() != held.policy.digest():
-                updated = await self.proxy.update(self.turn.workspace_id, held.session.id, policy)
-                held = _Held(
-                    held.session.model_copy(
-                        update={"version": updated.version, "env": updated.env}
-                    ),
-                    policy,
-                )
-            renewed = await self.proxy.renew(
-                self.turn.workspace_id, held.session.id, PROXY_SESSION_TTL_SECONDS
-            )
-            held = replace(
-                held, session=held.session.model_copy(update={"expires_at": renewed.expires_at})
-            )
+            try:
+                held = await self._renewed(self.proxy, actor)
+            except ProxyRefused as refused:
+                if refused.error.code != SESSION_EXPIRED_CODE:
+                    raise
+                del self.opened[actor]
+                held = await self._opened(self.proxy, actor)
             self.opened[actor] = held
             return held.session
 
@@ -173,6 +167,22 @@ class TurnSessions:
         held = _Held(session, policy)
         self.opened[actor] = held
         return held
+
+    async def _renewed(self, proxy: ProxySessions, actor: RunActor) -> _Held:
+        held = await self._opened(proxy, actor)
+        policy = await self._policy(actor, running=True)
+        if policy.digest() != held.policy.digest():
+            updated = await proxy.update(self.turn.workspace_id, held.session.id, policy)
+            held = _Held(
+                held.session.model_copy(update={"version": updated.version, "env": updated.env}),
+                policy,
+            )
+        renewed = await proxy.renew(
+            self.turn.workspace_id, held.session.id, PROXY_SESSION_TTL_SECONDS
+        )
+        return replace(
+            held, session=held.session.model_copy(update={"expires_at": renewed.expires_at})
+        )
 
     async def _policy(self, actor: RunActor, running: bool) -> SessionPolicy:
         workspace_id = self.turn.workspace_id

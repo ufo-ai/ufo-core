@@ -26,6 +26,8 @@ from ufo.runtime.access.proxy_sessions import (
     MEMBER_LABEL,
     PROXY_SESSION_MAX_TTL_SECONDS,
     PROXY_SESSION_TTL_SECONDS,
+    SESSION_REVOKED_CODE,
+    ProxyRefused,
     ProxySessions,
 )
 from ufo.runtime.access.turn_sessions import TurnSessions
@@ -409,3 +411,44 @@ async def test_a_reopen_after_park_renews_a_near_deadline(
         ("POST", f"/v1/sessions/{parked.id}/renew"),
     ]
     assert resumed.expires_at > near + timedelta(minutes=30)
+
+
+async def test_reconcile_reopens_a_session_that_expired_between_dispatches(
+    fake: Starlette, proxy: ProxySessions, seeded: _Seeded
+) -> None:
+    sessions = _sessions(seeded, proxy)
+    expired = await sessions.reconcile("turn")
+    assert expired is not None
+    fake.state.sessions[expired.id]["expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
+    sent = len(fake.state.calls)
+
+    successor = await sessions.reconcile("turn")
+    again = await sessions.reconcile("turn")
+
+    assert successor is not None and again is not None
+    assert successor.id != expired.id
+    assert again.id == successor.id
+    reopened = fake.state.calls[sent:]
+    assert [(method, target) for method, target, _, _ in reopened] == [
+        ("POST", f"/v1/sessions/{expired.id}/renew"),
+        ("POST", "/v1/sessions"),
+        ("POST", "/v1/sessions"),
+        ("POST", f"/v1/sessions/{successor.id}/renew"),
+    ]
+    keys = [headers.get(IDEMPOTENCY_HEADER.lower()) for _, _, headers, _ in reopened[1:3]]
+    assert keys[1] == f"{keys[0]}:1"
+
+
+async def test_reconcile_never_reopens_a_revoked_session(
+    fake: Starlette, proxy: ProxySessions, seeded: _Seeded
+) -> None:
+    sessions = _sessions(seeded, proxy)
+    revoked = await sessions.reconcile("turn")
+    assert revoked is not None
+    fake.state.sessions[revoked.id]["revoked_at"] = datetime.now(UTC)
+
+    with pytest.raises(ProxyRefused) as refused:
+        await sessions.reconcile("turn")
+
+    assert refused.value.error.code == SESSION_REVOKED_CODE
+    assert len(fake.state.sessions) == 1

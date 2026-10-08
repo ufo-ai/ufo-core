@@ -29,6 +29,7 @@ PROXY_SESSION_CREATED_VERSION = 1
 IDEMPOTENCY_HEADER = "Idempotency-Key"
 SESSIONS_PATH = "/v1/sessions"
 SESSION_REVOKED_CODE = "session_revoked"
+SESSION_EXPIRED_CODE = "conflict"
 CONVERSATION_LABEL = "conversation"
 AGENT_LABEL = "agent"
 MEMBER_LABEL = "member"
