@@ -14,7 +14,8 @@ from cryptography.fernet import Fernet
 from ufo import product as product_module
 from ufo.db import workspace_tx
 from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, OPENAI_KEY_SLOT
-from ufo.harness.models.grant import Grant, read_grant
+from ufo.harness.models.grant import Grant, GrantRefusedRefresh, read_grant
+from ufo.harness.models.interface import ModelAccountUnavailable
 from ufo.harness.models.pricing import Pricing
 from ufo.harness.models.registry import ModelRegistry, ModelRoute, ModelRoutes, ServingModel
 from ufo.host.ext.loader import injecting_slots
@@ -1086,6 +1087,42 @@ async def _serving_on_member_account(
         funding=first.funding,
         payer=first.payer,
         routes=ModelRoutes(registry=registry, remaining=alternates),
+    )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_refused_account_refresh_becomes_an_unavailable_model_account(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "coder@work.com")
+    await store.put(
+        workspace_id,
+        member_slot(OPENAI_KEY_SLOT, member),
+        Grant(access="spent", refresh="refused", expires_at=0).stored(),
+    )
+
+    async def refuse(grant: Grant, slot: str) -> Grant:
+        del grant
+        raise GrantRefusedRefresh(slot)
+
+    monkeypatch.setattr(workspace_module, "refreshed", refuse)
+    registry = _two_account_registry([])
+
+    with (
+        ws(workspace_id),
+        model_credentials({OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member)}),
+    ):
+        resolved = await registry.client_for(OWN_ACCOUNT_MODEL)
+        with pytest.raises(ModelAccountUnavailable, match="could not be refreshed"):
+            [event async for event in resolved.client.complete(object())]
+
+    assert (resolved.funding, resolved.payer) == (
+        PLAN_FUNDED,
+        member_slot(OPENAI_KEY_SLOT, member),
     )
 
 

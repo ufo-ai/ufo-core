@@ -244,7 +244,13 @@ def test_bundle_pins_a_bundle_only_extension_and_writes_a_build_context(
     locked = Lockfile.model_validate_json(result.lockfile.read_text())
     assert {pin.name for pin in locked.extensions} == {sample.NAME}
     dockerfile = result.dockerfile.read_text()
-    assert dockerfile.startswith("FROM python:3.12-slim")
+    assert dockerfile.startswith("FROM python:3.12-slim-trixie\n")
+    assert "apt-get install -y --no-install-recommends libpcre2-8-0" in dockerfile
+    assert (
+        "dpkg --compare-versions \"$(dpkg-query -W -f='${Version}' libpcre2-8-0)\" "
+        "ge 10.46-1~deb13u3" in dockerfile
+    )
+    assert "rm -rf /var/lib/apt/lists/*" in dockerfile
     assert (out / BUNDLE_CONSTRAINTS_NAME).read_text() == LOCKED
     assert (
         f"COPY ufo-{ufo_version()}-py3-none-any.whl {BUNDLE_CONSTRAINTS_NAME} {BUNDLE_WHEELS_DIR}/"

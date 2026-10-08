@@ -29,7 +29,8 @@ from ufo.host.ext.loader import (
 )
 from ufo.host.ext.store import Catalog, ufo_version
 
-DOCKERFILE_BASE = "python:3.12-slim"
+DOCKERFILE_BASE = "python:3.12-slim-trixie"
+PCRE2_MINIMUM_VERSION = "10.46-1~deb13u3"
 BUNDLE_CONFIG_NAME = "ufo.toml"
 BUNDLE_LOCKFILE_NAME = "ufo.lock"
 BUNDLE_CONSTRAINTS_NAME = "constraints.txt"
@@ -152,6 +153,12 @@ class Bundle:
         return "\n".join(
             (
                 f"FROM {DOCKERFILE_BASE}",
+                "RUN apt-get update "
+                "&& apt-get install -y --no-install-recommends libpcre2-8-0 "
+                "&& dpkg --compare-versions "
+                "\"$(dpkg-query -W -f='${Version}' libpcre2-8-0)\" "
+                f"ge {PCRE2_MINIMUM_VERSION} "
+                "&& rm -rf /var/lib/apt/lists/*",
                 "WORKDIR /app",
                 f"ENV UFO_CONFIG=/app/{BUNDLE_CONFIG_NAME} "
                 f"UFO_LOCKFILE=/app/{BUNDLE_LOCKFILE_NAME} "

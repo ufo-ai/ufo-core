@@ -94,7 +94,7 @@ from ufo.runtime.turns.audience import (
 from ufo.runtime.turns.contracts import ValidatedJson
 from ufo.runtime.turns.subjects import member_subject
 from ufo.schema import tables
-from ufo.schema.records import Agent, AgentVisibility, TerminalFrame, Turn, Usage
+from ufo.schema.records import Agent, AgentVisibility, ModelRouteChange, TerminalFrame, Turn, Usage
 
 if TYPE_CHECKING:
     from ufo.runtime.access.workspace_slots import WorkspaceSlots
@@ -244,7 +244,8 @@ class ToolResult(BaseModel):
     """A handler result. Successful completion supplies the member-facing final reply;
     structured profiles keep their output contract. `created` names every object the call brought
     into being, whichever tool ran the verb, so the turn records the creation from the result
-    itself rather than from the text one tool happens to print."""
+    itself rather than from the text one tool happens to print. `model_route_changes` carries a
+    completed child's routing facts past result bounding and untrusted-content walls."""
 
     completion: str | None = Field(default=None, min_length=1, max_length=TOOL_COMPLETION_MAX_CHARS)
     content: tuple[ContentBlock, ...]
@@ -252,6 +253,7 @@ class ToolResult(BaseModel):
     untrusted: bool = False
     sources: tuple[SourceRef, ...] = ()
     created: tuple[ObjectRef, ...] = ()
+    model_route_changes: tuple[ModelRouteChange, ...] = ()
 
 
 RESULT_CUT_MARKER = "\n…["
@@ -358,6 +360,24 @@ CREDENTIAL_AUTHORIZATION_GATE = "a workspace admin authorizes a credential slot"
 CALL_NEEDS_A_SPEAKER = (
     "this call names no member, so name the member who is asking with `requested_by`"
 )
+
+MODEL_ROUTE_GUIDANCE = "<model_route_guidance>{payload}</model_route_guidance>"
+
+
+def model_route_guidance(changes: tuple[ModelRouteChange, ...]) -> str:
+    """Trusted route facts appended beside a child's validated output for its parent."""
+    if not changes:
+        return ""
+    payload = {
+        "changes": [change.model_dump(mode="json") for change in changes],
+        "instruction": (
+            "Tell the member which connected accounts failed and which models the child used "
+            "instead."
+        ),
+    }
+    return MODEL_ROUTE_GUIDANCE.format(
+        payload=json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    )
 
 
 @dataclass(frozen=True)

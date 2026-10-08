@@ -67,7 +67,7 @@ from ufo.runtime.turns.audience import (
 from ufo.runtime.turns.subjects import member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn, Usage
+from ufo.schema.records import Agent, ModelRouteChange, TerminalFrame, Turn, Usage
 
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)
 ARTIFACT_SECRET = "tools-test-secret"
@@ -1147,6 +1147,58 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
         payload={"task": "x"},
     )
     assert recorded[1] == ("turn-1/spawn/call-1", False, speaker, request_ref)
+
+
+async def test_spawn_returns_route_changes_beside_the_validated_output(
+    tmp_path: Path,
+) -> None:
+    async def _record(
+        target: str,
+        payload: dict[str, object],
+        background: bool = False,
+        dedup_key: str | None = None,
+        delivers_result: bool = False,
+        name: str = "",
+        detach_on_arrival: bool = False,
+        model: str | None = None,
+        *,
+        requester_member_id: UUID | None = None,
+        requesting_message_ref: UUID | None = None,
+    ) -> SpawnResult:
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=_SpawnOutput(result="done"),
+            terminal=TerminalFrame(
+                status="done",
+                text='{"result":"done"}',
+                model_route_changes=(
+                    ModelRouteChange(
+                        failed_model="claude-opus-5-5",
+                        replacement_model="gpt-5.6-sol",
+                        failure="unavailable",
+                    ),
+                ),
+            ),
+            untrusted=True,
+        )
+
+    result = await run(
+        "spawn",
+        make_context(FakeSandbox(), tmp_path, spawn=_record),
+        target="research",
+        payload={"task": "x"},
+    )
+
+    assert result.content[0].text == '{"result":"done"}'
+    assert result.untrusted
+    assert result.model_route_changes == (
+        ModelRouteChange(
+            failed_model="claude-opus-5-5",
+            replacement_model="gpt-5.6-sol",
+            failure="unavailable",
+        ),
+    )
 
 
 async def test_spawn_carries_the_calls_model_to_the_child_and_surfaces_its_refusal(

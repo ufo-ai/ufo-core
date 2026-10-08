@@ -10,7 +10,9 @@ each page reports as its own cursor the highest `modifiedTime` the run has lande
 stored one. `sheets` explodes each spreadsheet into one record per tab; `sheet_values` reads tab
 grids in bounded `values:batchGet` calls so a synced sheet recalls as its rows, every range naming
 its tab as a quoted A1 sheet reference with each apostrophe doubled — an unquoted title reads as a
-cell reference against the first visible sheet, as a named range, or fails to parse. The batch
+cell reference against the first visible sheet, as a named range, or fails to parse. Only a `GRID`
+tab takes an A1 range: a chart (`OBJECT`) or `DATA_SOURCE` tab in a batch refuses the whole batch
+`400 INVALID_ARGUMENT`, so those tabs are never requested. The batch
 answers one `valueRange` per requested range in the order asked, so each grid lands on the tab at
 its position; the echoed `range` is the resolved A1 bounds of what the request named, not the name,
 so it identifies nothing and a count other than the one asked for is the whole fault. A batch
@@ -100,6 +102,7 @@ DRIVE_PAGE_SIZE = 1000
 PAGE_SIZE = 100
 REFUSED_LIMIT = 50
 VALUES_BATCH_SIZE = 50
+GRID_SHEET_TYPE = "GRID"
 _METADATA_FALLBACK_STATUS = frozenset({403, 404})
 _SERVICE_ERROR_DOMAIN = "googleapis.com"
 _GRANT_REASONS = frozenset({"accessNotConfigured", "insufficientPermissions"})
@@ -320,6 +323,8 @@ class GoogleSheetsConnector(RestConnector):
             sheet_id = properties.get("sheetId")
             if not isinstance(title, str) or sheet_id is None:
                 continue
+            if properties.get("sheetType", GRID_SHEET_TYPE) != GRID_SHEET_TYPE:
+                continue
             tabs.append((title, sheet_id))
         for start in range(0, len(tabs), VALUES_BATCH_SIZE):
             chunk = tabs[start : start + VALUES_BATCH_SIZE]
@@ -333,7 +338,21 @@ class GoogleSheetsConnector(RestConnector):
                     },
                 )
             except httpx.HTTPStatusError as error:
-                if not _is_per_file_refusal(error.response.status_code, google.error_detail(error)):
+                detail = google.error_detail(error)
+                if error.response.status_code == 400:
+                    reasons = "; ".join(
+                        dict.fromkeys(
+                            item["reason"]
+                            for item in list_or_empty(detail.get("errors"))
+                            + list_or_empty(detail.get("details"))
+                            if isinstance(item.get("reason"), str) and item["reason"]
+                        )
+                    )
+                    raise StreamFault(
+                        f"googlesheets: values:batchGet on spreadsheet {spreadsheet_id} refused "
+                        f"(400 {_str(detail.get('status'))})" + (f": {reasons}" if reasons else "")
+                    ) from error
+                if not _is_per_file_refusal(error.response.status_code, detail):
                     raise
                 for title, sheet_id in chunk:
                     grid = (

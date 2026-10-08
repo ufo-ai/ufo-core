@@ -21,6 +21,7 @@ OPENAI_KEY_ENV = "OPENAI_API_KEY"
 
 ANTHROPIC_CONTEXT_WINDOW = 200_000
 ANTHROPIC_LONG_CONTEXT_WINDOW = 1_000_000
+HAIKU_5_5_LOWER_TIER_WINDOW = 100_000
 OPENAI_CONTEXT_WINDOW = 272_000
 
 REASONS_WITH_TOOLS = ReasoningSupport(supported=True, tools_with_reasoning=True)
@@ -98,7 +99,9 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
     1.25x base input at 5m and 2x at 1h; cache reads are 0.1x of input, except `claude-opus-5-5`
     at 0.05x. `claude-opus-5-5` and `claude-sonnet-5-5` refuse both `thinking: disabled` and a
     forced tool choice with a 400, so they declare reasoning they cannot disable and no forced
-    choice. `gpt-6-astra` is called on the same
+    choice. `claude-haiku-5-5` joined on October 7 at $0.10/$0.50 per Mtok with the standard
+    Anthropic cache multipliers, adaptive thinking on by default, and a forced tool choice it
+    accepts. `gpt-6-astra` is called on the same
     Responses surface, which is where OpenAI serves its tool and computer use, at $10/$50 per Mtok
     with cache reads at 0.1x and 30-minute cache writes at 1.25x base input. `gpt-6-sol` and
     `gpt-6-luna` joined the same surface on September 22 at half their GPT-5.6 predecessors' prices:
@@ -112,7 +115,8 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
     request, which one rate per token class cannot express. `context_window` is what the turn
     loop compacts against, so these rows carry the 272,000 the registered rate is true at rather
     than the window the provider accepts: a larger number would let a turn grow into a tier this
-    table bills at half price."""
+    table bills at half price. `claude-haiku-5-5` accepts 1M tokens but bills a prompt over
+    100,000 at 5x every rate, so its row carries the 100,000 its registered rate is true at."""
     return (
         _anthropic(
             "claude-opus-5-5",
@@ -169,6 +173,14 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
             ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000, 6_000_000),
             "2025-08",
             anthropic_key_env,
+        ),
+        _anthropic(
+            "claude-haiku-5-5",
+            ModelPrice(100_000, 500_000, 10_000, 125_000, 200_000),
+            "2026-06",
+            anthropic_key_env,
+            context_window=HAIKU_5_5_LOWER_TIER_WINDOW,
+            reasoning=DEFAULT_REASONS_WITH_TOOLS,
         ),
         _anthropic(
             "claude-haiku-4-5",

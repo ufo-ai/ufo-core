@@ -221,6 +221,12 @@ class ModelAccountRateLimited(RuntimeError):
     member's moves onto it, and a turn that holds none names the account the member must fix."""
 
 
+class ModelAccountUnavailable(RuntimeError):
+    """The connected account serving this call cannot supply a usable credential. Typed because
+    the verdict is about the account and not the request: an ordered model route can move to its
+    next account, while a pinned model still fails on the exact account it names."""
+
+
 class ModelClient(Protocol):
     def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]: ...
 
