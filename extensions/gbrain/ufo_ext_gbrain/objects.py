@@ -148,6 +148,7 @@ class _Registered:
     owner_member_id: UUID | None
     next_sync_at: datetime
     consecutive_errors: int
+    parked_reason: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -200,6 +201,7 @@ async def _registered_from_ext(ext: ExtensionContext) -> tuple[_Registered, ...]
                 owner_member_id=authority.owner_member_id,
                 next_sync_at=record.next_sync_at,
                 consecutive_errors=record.consecutive_errors,
+                parked_reason=record.parked_reason,
                 created_at=record.created_at,
                 updated_at=record.updated_at,
             )
@@ -326,6 +328,7 @@ class GbrainObjects(MemberReadableObjects[GbrainSpec, ObjectOwner]):
             "shared": registered.shared,
             "next_sync_at": registered.next_sync_at.isoformat(),
             "consecutive_errors": registered.consecutive_errors,
+            "parked": registered.parked_reason,
         }
         if not registered.shared and registered.owner_member_id is not None:
             status["owner_member_id"] = str(registered.owner_member_id)
