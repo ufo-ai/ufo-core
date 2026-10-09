@@ -617,6 +617,37 @@ async def test_an_expired_url_refuses_a_missing_foreign_or_unmembered_session(
         assert response.json()["detail"] == EXPIRED_DETAIL
 
 
+async def test_an_expired_url_refuses_a_member_whose_seat_was_revoked(
+    db: None,
+    artifact_client: tuple[AsyncClient, WorkspaceBlobStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bearer is stateless and outlives the seat it was minted for, so revoking web access must
+    end the refresh too: an unseated member's live session no longer re-grants the workspace's
+    artifacts."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, BEARER_SECRET)
+    client, blob = artifact_client
+    key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/report.txt"
+    workspace_id = await _seed_shared_artifact(key, "report.txt")
+    with ws(workspace_id):
+        await blob.put(key, b"the bytes")
+    expired = mint_artifact_url(
+        SECRET, key, int(datetime.now(UTC).timestamp()) - 10, workspace_id=workspace_id
+    )
+    session = _session_cookie(workspace_id)
+    assert (await client.get(expired, headers=session)).status_code == 303
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.member)
+                .where(tables.member.c.workspace_id == workspace_id)
+                .values(seated_at=None, updated_at=sa.func.now())
+            )
+    revoked = await client.get(expired, headers=session)
+    assert revoked.status_code == 403
+    assert revoked.json()["detail"] == EXPIRED_DETAIL
+
+
 async def test_an_expired_url_sends_an_unauthorized_browser_to_sign_in_with_its_target(
     db: None,
     artifact_client: tuple[AsyncClient, WorkspaceBlobStore],
