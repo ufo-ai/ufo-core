@@ -993,8 +993,9 @@ def _spawn_handles(target: str, turn_id: UUID, moved: bool) -> str:
 
 async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult:
     """Run the target as a child turn and report what ended the call. A foreground spawn returns the
-    child's validated output, unless a message arrives on this conversation first: the child is then
-    not cancelled — it keeps running in the background and delivers its own result — and the result
+    child's id on its own line and then its validated output, so the parent sends follow-up work to
+    the same child, unless a message arrives on this conversation first: the child is then not
+    cancelled — it keeps running in the background and delivers its own result — and the result
     hands back the id it is reached by, so the parent answers the member instead of waiting. That is
     what `bash` does with a command still running at its foreground budget."""
     try:
@@ -1040,9 +1041,12 @@ async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult:
                 ),
             )
         )
-    text = result.output.model_dump_json()
+    finished = {"spawn_id": str(result.turn_id), "target": args.target, "status": "done"}
     return ToolResult(
-        content=(TextContent(text=text),),
+        content=(
+            TextContent(text=f"{json.dumps(finished)}\n"),
+            TextContent(text=result.output.model_dump_json()),
+        ),
         untrusted=result.untrusted,
         model_route_changes=(
             () if result.terminal is None else result.terminal.model_route_changes
@@ -1357,7 +1361,10 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         description=(
             "Delegate a subtask to a named target — a subagent profile or a workspace agent. "
             "`payload` must match the target's input schema; foreground (default) returns the "
-            "target's validated JSON output, background returns the child turn id at once. A "
+            "spawn id on its first line and the target's validated JSON output after it, "
+            "background returns the spawn id at once. Send follow-up work on the same task to "
+            "that spawn with message_spawn: it resumes with its own context, so do not spawn a "
+            "new child for it. A "
             "foreground spawn still running when a message arrives on this conversation is not "
             "cancelled: it keeps running in the background, the result names the spawn id, and its "
             "output arrives on this conversation as a message when it finishes. A "
