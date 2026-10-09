@@ -11,10 +11,10 @@ the whole set each run; `permissions`, `comments`, and `revisions` each declare 
 `files`. Their ids are unique inside one file and nowhere else — a user's permission id is the same
 value on every file shared with them, a revision numbers from `1` per file. A grant that lacks the
 Drive scope (`401`/`403`) yields `StreamSkipped` so the run records a skip, not a failure; a refusal
-naming a usage limit instead of the grant raises (`ufo_ext_sources.providers.google`). `render`
-lifts a file's name, mime type, owners, and link into a readable body. The credential is resolved
-through the auth proxy the runner threads — this connector holds no token. The write path is
-intentionally absent — the source seam only reads."""
+naming a usage limit instead of the grant is a rate limit (`ufo_ext_sources.providers.google`).
+`render` lifts a file's name, mime type, owners, and link into a readable body. The credential is
+resolved through the auth proxy the runner threads — this connector holds no token. The write path
+is intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
 from functools import partial
@@ -98,6 +98,7 @@ class GoogleDriveConnector(RestConnector):
     name = "googledrive"
     base_url = "https://www.googleapis.com"
     streams_list = GOOGLE_DRIVE_STREAMS
+    rate_limited = staticmethod(google.rate_limited)
     checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(

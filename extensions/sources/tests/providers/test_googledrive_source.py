@@ -227,26 +227,75 @@ async def test_scope_refusal_yields_stream_skipped(parents_reader: ParentsReader
     raise AssertionError("a 403 from Drive must raise StreamSkipped")
 
 
-@pytest.mark.parametrize(
+QUOTA_ERRORS = pytest.mark.parametrize(
     "error",
     [
         {
             "code": 403,
             "message": "Rate Limit Exceeded",
-            "errors": [{"reason": "userRateLimitExceeded"}],
+            "errors": [{"reason": "rateLimitExceeded"}],
         },
         {"code": 403, "message": "Quota exceeded", "status": "RESOURCE_EXHAUSTED"},
     ],
     ids=["usage-limits-reason", "resource-exhausted-status"],
 )
-async def test_a_quota_refusal_is_not_a_scope_skip(
-    error: dict[str, object], parents_reader: ParentsReader
-) -> None:
-    """A `403` naming a usage limit is not a refusal the grant can answer: it clears as the quota
-    window rolls, so it fails the run and takes the error backoff."""
 
-    def refuse(request: httpx.Request) -> httpx.Response:
+
+def _listing_refused_after_one_page(
+    error: dict[str, object],
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/drive/v3/files" and "pageToken" not in request.url.params:
+            return httpx.Response(200, json={"files": [FILE_1], "nextPageToken": "p2"})
         return httpx.Response(403, json={"error": error})
 
-    with pytest.raises(httpx.HTTPStatusError):
-        await _fetch("files", refuse, parents=parents_reader(LANDED))
+    return handle
+
+
+@QUOTA_ERRORS
+async def test_a_quota_refusal_keeps_the_listed_pages_and_yields(
+    error: dict[str, object], parents_reader: ParentsReader
+) -> None:
+    result = await _fetch(
+        "files", _listing_refused_after_one_page(error), parents=parents_reader(LANDED)
+    )
+
+    assert {page.source_ref for page in result.pages} == {"files/f1"}
+    assert result.retry_after_seconds == 60
+    assert result.next_cursor is not None
+
+
+@QUOTA_ERRORS
+async def test_a_resumed_listing_waits_out_a_quota_refusal_and_seeds_the_token(
+    error: dict[str, object], parents_reader: ParentsReader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waits: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr("ufo.runtime.sources.rest.asyncio.sleep", record_sleep)
+    yielded = await _fetch(
+        "files", _listing_refused_after_one_page(error), parents=parents_reader(LANDED)
+    )
+    refusals = 1
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal refusals
+        if request.url.path == "/drive/v3/files" and "pageToken" not in request.url.params:
+            return httpx.Response(200, json={"files": [FILE_1], "nextPageToken": "p2"})
+        if refusals:
+            refusals -= 1
+            return httpx.Response(403, json={"error": error})
+        if request.url.path == "/drive/v3/files":
+            return httpx.Response(200, json={"files": [FILE_2]})
+        return httpx.Response(200, json={"startPageToken": "tok-7"})
+
+    resumed = await _fetch(
+        "files", handle, parents=parents_reader(LANDED), cursor=yielded.next_cursor
+    )
+
+    assert {page.source_ref for page in resumed.pages} == {"files/f2"}
+    assert resumed.retry_after_seconds is None
+    assert resumed.next_cursor == "tok-7"
+    assert len(waits) == 1

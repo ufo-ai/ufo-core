@@ -237,6 +237,11 @@ class RestConnector(Connector):
         """Google Ads' `googleAds:searchStream` answers a top-level array of result batches."""
         return await self._send(lambda: client.post(path, json=json))
 
+    def rate_limited(self, error: httpx.HTTPStatusError) -> bool:
+        """Whether a status error is the provider's rate limit, which yields or retries as a 429
+        does. Override for a provider that names one on another status (Google's quota `403`)."""
+        return error.response.status_code == 429
+
     async def _send(self, request: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
         """Send one read request. A rate limit yields to the durable source scheduler when the
         active walk has a safe checkpoint; protected walks retry with transport and 5xx faults."""
@@ -248,14 +253,14 @@ class RestConnector(Connector):
                 _raise_for_status(response)
                 return response
             except (httpx.TransportError, httpx.HTTPStatusError) as error:
-                if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429:
+                limited = isinstance(error, httpx.HTTPStatusError) and self.rate_limited(error)
+                if limited and _RATE_LIMIT_YIELDS.get():
                     retry_after = _retry_after(error)
                     wait = RATE_LIMIT_DEFAULT_SECONDS if retry_after is None else retry_after
-                    if _RATE_LIMIT_YIELDS.get():
-                        raise ProviderRateLimited(
-                            min(max(wait, RETRY_INITIAL_DELAY_SECONDS), RATE_LIMIT_MAX_SECONDS)
-                        ) from error
-                if attempt >= MAX_ATTEMPTS or not _is_retryable(error):
+                    raise ProviderRateLimited(
+                        min(max(wait, RETRY_INITIAL_DELAY_SECONDS), RATE_LIMIT_MAX_SECONDS)
+                    ) from error
+                if attempt >= MAX_ATTEMPTS or not (limited or _is_retryable(error)):
                     raise
                 wait = _retry_wait(error, delay)
                 if waited + wait > RETRY_BUDGET_SECONDS:
