@@ -28,7 +28,7 @@ from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.sdk.context import CredentialAccess
-from ufo.sdk.sources import SourceAuth, StreamFault, SyncResult
+from ufo.sdk.sources import SourceAuth, StreamFault, StreamSkipped, SyncResult
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -125,9 +125,15 @@ async def test_first_sync_resolves_head_then_snapshots_the_tarball() -> None:
     assert parsed["checked_at"] is not None
 
 
-async def test_head_not_found_is_a_stream_fault_naming_the_ref() -> None:
-    with pytest.raises(StreamFault, match=f"github answered 404 for {REPO}@HEAD head"):
-        await _fetch(lambda request: httpx.Response(404))
+@pytest.mark.parametrize("status", [401, 404])
+async def test_unreachable_head_is_a_skip_naming_the_ref(status: int) -> None:
+    with pytest.raises(StreamSkipped, match=f"github answered {status} for {REPO}@HEAD head"):
+        await _fetch(lambda request: httpx.Response(status))
+
+
+async def test_forbidden_head_is_a_stream_fault() -> None:
+    with pytest.raises(StreamFault, match=f"github answered 403 for {REPO}@HEAD head"):
+        await _fetch(lambda request: httpx.Response(403))
 
 
 async def test_empty_repository_is_an_empty_snapshot() -> None:
