@@ -10,26 +10,36 @@ member's own — a workspace admin sees all."""
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import sqlalchemy as sa
 import yaml
 from cryptography.fernet import Fernet
 from ufo_ext_gbrain.folder import FOLDER_BACKEND, GbrainFolderConfig
-from ufo_ext_gbrain.git import GIT_BACKEND, GITHUB_TOKEN_SLOT, GbrainGitConfig
+from ufo_ext_gbrain.git import GIT_BACKEND, GITHUB_TOKEN_SLOT, GbrainGitConfig, GbrainGitSource
 from ufo_ext_gbrain.manifest import NAME, manifest
 from ufo_ext_gbrain.objects import GBRAIN_KIND, gbrain_source_name
 
+from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.ext.context import context_for
+from ufo.runtime.ext.context import CredentialAccess, context_for
+from ufo.runtime.ext.manifest import JobSpec
+from ufo.runtime.jobs import CORE_EXTENSION, JobRunner, bindings_from
 from ufo.runtime.objects import UnknownObject
-from ufo.runtime.sources.sync import register_sources
+from ufo.runtime.sources.sync import (
+    SOURCE_REFUSAL_PARK_THRESHOLD,
+    SOURCE_SYNC_JOB,
+    SyncDriver,
+    register_sources,
+)
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
@@ -370,8 +380,47 @@ async def test_member_registers_a_repo_source_privately_by_default(db: None) -> 
     }
     assert fetched["status"]["shared"] is False
     assert fetched["status"]["consecutive_errors"] == 0
+    assert fetched["status"]["parked"] is None
     assert fetched["status"]["owner_member_id"] == str(state.member_id)
     assert fetched["status"]["next_sync_at"] is not None
+
+
+async def test_a_repo_github_answers_404_shows_parked_in_status(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    state = await _workspace()
+    ctx = _context(state, speaker_id=state.member_id)
+    name = gbrain_source_name(REPO, None, None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(name, repo=REPO))
+    driver = SyncDriver(
+        backends={
+            GIT_BACKEND: GbrainGitSource(
+                credentials=CredentialAccess(declared=DECLARED),
+                transport=httpx.MockTransport(lambda request: httpx.Response(404)),
+            )
+        },
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+    )
+    spec = JobSpec(
+        name=SOURCE_SYNC_JOB,
+        schedule=None,
+        handler=lambda context: driver.run(),
+        candidates=driver.candidate_workspaces,
+    )
+    runner = JobRunner(bindings=bindings_from((), (spec,)), manifests=())
+    for _ in range(SOURCE_REFUSAL_PARK_THRESHOLD):
+        with ws(state.workspace_id), agent(state.agent_id):
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.source).values(next_sync_at=sa.func.now())
+                )
+        await runner.fire(f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}", state.workspace_id)
+    with ws(state.workspace_id), agent(state.agent_id):
+        status = (await _get(ctx, name))["status"]
+    assert status["consecutive_errors"] == 0
+    assert status["parked"] == f"github answered 404 for {REPO}@HEAD head"
 
 
 async def test_each_origin_gets_a_connection_of_its_own(db: None) -> None:
