@@ -1216,7 +1216,10 @@ async def test_typed_subagent_round_trips_schema(surface: Turns) -> None:
         for block in message.content
         if isinstance(block, ToolResultBlock)
     )
-    assert RoundTripOutput.model_validate_json(tool_result.content).echoed == 21
+    assert isinstance(tool_result.content, str)
+    handle, _, output = tool_result.content.partition("\n")
+    assert json.loads(handle)["spawn_id"] == str(child.id)
+    assert RoundTripOutput.model_validate_json(output).echoed == 21
     assert tool_result.is_error is False
 
 
