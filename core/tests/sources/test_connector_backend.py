@@ -241,6 +241,44 @@ async def test_rate_limit_returns_pages_and_the_last_safe_checkpoint() -> None:
     assert result.snapshot is False
 
 
+class _FeedThenRateLimited(_FeedConnector):
+    async def fetch_page(
+        self,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        credential: Credential,
+        base_url: str,
+        self_user_id: str | None,
+        backfill_after: datetime | None = None,
+        yield_rate_limits: bool = True,
+        parents: Any = None,
+        watched: Any = None,
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        for page in self._feed:
+            yield page
+        raise ProviderRateLimited(60)
+
+
+@pytest.mark.parametrize(
+    ("feed", "landed", "skip"),
+    [([_records(1, 2, 3)], ["items/3"], 3), ([_records(1)], [], 2)],
+    ids=["past-the-prefix", "inside-the-prefix"],
+)
+async def test_a_resumed_run_yields_a_rate_limit_and_keeps_its_progress(
+    feed: Feed, landed: list[str], skip: int
+) -> None:
+    stream = StreamSpec(name="items", source_object="items", cursor_field="updated_at")
+    cursor = _envelope("ORIGIN", 2, "WATERMARK")
+
+    result = await _run(_FeedThenRateLimited(stream, feed), stream, cursor=cursor)
+
+    assert [page.source_ref for page in result.pages] == landed
+    assert result.retry_after_seconds == 60
+    envelope = json.loads(result.next_cursor or "{}")[BACKFILL_KEY]
+    assert (envelope["origin"], envelope["skip"]) == ("ORIGIN", skip)
+
+
 async def test_protected_rate_limit_fails_loud_when_a_connector_yields_it() -> None:
     stream = StreamSpec(name="items", source_object="items", delete_missing=True)
 
@@ -506,7 +544,7 @@ async def _check_resumed_run_drives_from_origin_and_skips_the_prefix() -> None:
     connector = _FeedConnector(stream, [_records(1, 2, 3, 4)])
     result = await _run(connector, stream, cursor=_envelope("ORIGIN", 2, "WATERMARK"))
     assert connector.received_cursors == ["ORIGIN"]
-    assert connector.received_rate_limit_modes == [False]
+    assert connector.received_rate_limit_modes == [True]
     assert [page.source_ref for page in result.pages] == ["items/3", "items/4"]
     assert result.snapshot is False
 

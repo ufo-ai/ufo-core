@@ -25,9 +25,10 @@ pathological provider makes positional progress rather than spinning a worker fo
 full-history backfill thus lands as a bounded run per sync interval instead of one unbounded
 fetch, and two tiers guarantee it makes progress.
 
-A provider rate limit ends a normal incremental run at its last complete checkpoint. Its pages
-return for commit with the provider delay. A full snapshot and a tier-2 positional resume instead
-retry the current request: neither can yield without losing the state required to make progress.
+A provider rate limit ends an incremental run at its last complete checkpoint — a native cursor, or
+a tier-2 envelope past the last record it read. Its pages return for commit with the provider delay.
+A full snapshot instead retries the current request: it cannot yield without losing the complete
+enumeration its tombstones need.
 
 A `delete_missing` stream is exempt from the cap: it returns
 an authoritative full-collection `snapshot` the driver tombstones against, and tombstone
@@ -178,7 +179,7 @@ class ConnectorBackend:
             base_url=base_url,
             self_user_id=auth.self_user_id,
             backfill_after=config.backfill_after,
-            yield_rate_limits=not stream.delete_missing and skip_target == 0,
+            yield_rate_limits=not stream.delete_missing,
             parents=parents,
         )
         try:
@@ -307,7 +308,7 @@ class ConnectorBackend:
         dropped: int,
         retry_after_seconds: float,
     ) -> SyncResult:
-        if stream.delete_missing or skip_target > 0:
+        if stream.delete_missing:
             raise RuntimeError(
                 f"connector {self.connector.name!r} yielded a protected rate limit for "
                 f"stream {stream.name!r}"

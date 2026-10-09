@@ -266,36 +266,28 @@ async def test_a_quota_refusal_keeps_the_listed_pages_and_yields(
 
 
 @QUOTA_ERRORS
-async def test_a_resumed_listing_waits_out_a_quota_refusal_and_seeds_the_token(
-    error: dict[str, object], parents_reader: ParentsReader, monkeypatch: pytest.MonkeyPatch
+async def test_a_resumed_listing_yields_a_quota_refusal_until_it_seeds_the_token(
+    error: dict[str, object], parents_reader: ParentsReader
 ) -> None:
-    waits: list[float] = []
-
-    async def record_sleep(seconds: float) -> None:
-        waits.append(seconds)
-
-    monkeypatch.setattr("ufo.runtime.sources.rest.asyncio.sleep", record_sleep)
-    yielded = await _fetch(
-        "files", _listing_refused_after_one_page(error), parents=parents_reader(LANDED)
+    refusing = _listing_refused_after_one_page(error)
+    yielded = await _fetch("files", refusing, parents=parents_reader(LANDED))
+    resumed = await _fetch(
+        "files", refusing, parents=parents_reader(LANDED), cursor=yielded.next_cursor
     )
-    refusals = 1
 
     def handle(request: httpx.Request) -> httpx.Response:
-        nonlocal refusals
-        if request.url.path == "/drive/v3/files" and "pageToken" not in request.url.params:
-            return httpx.Response(200, json={"files": [FILE_1], "nextPageToken": "p2"})
-        if refusals:
-            refusals -= 1
-            return httpx.Response(403, json={"error": error})
-        if request.url.path == "/drive/v3/files":
+        if request.url.path == "/drive/v3/changes/startPageToken":
+            return httpx.Response(200, json={"startPageToken": "tok-7"})
+        if "pageToken" in request.url.params:
             return httpx.Response(200, json={"files": [FILE_2]})
-        return httpx.Response(200, json={"startPageToken": "tok-7"})
+        return httpx.Response(200, json={"files": [FILE_1], "nextPageToken": "p2"})
 
-    resumed = await _fetch(
-        "files", handle, parents=parents_reader(LANDED), cursor=yielded.next_cursor
+    finished = await _fetch(
+        "files", handle, parents=parents_reader(LANDED), cursor=resumed.next_cursor
     )
 
-    assert {page.source_ref for page in resumed.pages} == {"files/f2"}
-    assert resumed.retry_after_seconds is None
-    assert resumed.next_cursor == "tok-7"
-    assert len(waits) == 1
+    assert resumed.pages == ()
+    assert resumed.retry_after_seconds == 60
+    assert resumed.next_cursor == yielded.next_cursor
+    assert {page.source_ref for page in finished.pages} == {"files/f2"}
+    assert finished.next_cursor == "tok-7"
