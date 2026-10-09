@@ -622,9 +622,8 @@ async def test_an_expired_url_refuses_a_member_whose_seat_was_revoked(
     artifact_client: tuple[AsyncClient, WorkspaceBlobStore],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A bearer is stateless and outlives the seat it was minted for, so revoking web access must
-    end the refresh too: an unseated member's live session no longer re-grants the workspace's
-    artifacts."""
+    """A bearer outlives the seat it was minted for, so an unseated member's live session must
+    no longer re-grant the workspace's artifacts."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, BEARER_SECRET)
     client, blob = artifact_client
     key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/report.txt"
