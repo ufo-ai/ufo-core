@@ -19,8 +19,11 @@ from collections import Counter, defaultdict
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
-from uuid import UUID
+from hashlib import sha256
+from pathlib import Path, PurePosixPath
+from uuid import UUID, uuid4
+
+from filelock import AsyncUnixFileLock, Timeout
 
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.sandbox import (
@@ -59,6 +62,9 @@ RUNTIME_ROOT_TIMEOUT_SECONDS = 30
 READ_CHUNK_BYTES = 1024 * 1024
 IDLE_RECLAIM_SECONDS = 1800
 WARM_NETWORK_LIMIT = 16
+OWNER_LABEL = "ufo.docker.owner"
+ROOT_LABEL = "ufo.docker.root"
+OWNER_DIRECTORY = ".ufo-docker-owners"
 NAME_CONFLICT_MARKER = "is already in use"
 NOT_RUNNING_MARKER = "is not running"
 REASON_ERRNO: dict[str, int] = {os.strerror(code): code for code in errno.errorcode}
@@ -104,6 +110,11 @@ class DockerCarrier:
     _touched: dict[UUID, float] = field(default_factory=dict)
     _inflight: Counter[UUID] = field(default_factory=Counter)
     _allocation: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _owner: UUID = field(default_factory=uuid4)
+    _roots: dict[UUID, Path] = field(default_factory=dict)
+    _owners: defaultdict[Path, dict[UUID, AsyncUnixFileLock]] = field(
+        default_factory=lambda: defaultdict(dict)
+    )
     _lifecycle: defaultdict[UUID, asyncio.Lock] = field(
         default_factory=lambda: defaultdict(asyncio.Lock)
     )
@@ -114,7 +125,7 @@ class DockerCarrier:
         Egress credentials stay in the returned handle. Each exec uses its turn's token and
         sentinel entries. Installing the CA on reused containers keeps TLS bound to this proxy.
         Docker's deterministic container name resolves concurrent creates to one container."""
-        async with self._pin(spec.conversation_id):
+        async with self._pin(spec.conversation_id, spec.workspace_host_path):
             return await self._create(spec)
 
     async def _create(self, spec: SandboxSpec) -> SandboxHandle:
@@ -223,7 +234,7 @@ class DockerCarrier:
         again whenever the revive cannot deliver a running container, refused or raising: a read
         promises absence, never an error. No egress env: a read runs `ufo fs` and `cat`, nothing
         that leaves the box."""
-        async with self._pin(spec.conversation_id):
+        async with self._pin(spec.conversation_id, spec.workspace_host_path):
             return await self._attach(spec)
 
     async def _attach(self, spec: SandboxSpec) -> SandboxHandle | None:
@@ -253,7 +264,18 @@ class DockerCarrier:
         )
 
     @asynccontextmanager
-    async def _pin(self, conversation_id: UUID) -> AsyncIterator[None]:
+    async def _pin(
+        self, conversation_id: UUID, workspace_host_path: str | None
+    ) -> AsyncIterator[None]:
+        if workspace_host_path is None:
+            raise ValueError("Docker handles require a host workspace")
+        root = Path(workspace_host_path).parent
+        async with self._allocation:
+            if self._owner not in self._owners[root]:
+                lock = AsyncUnixFileLock(root / OWNER_DIRECTORY / str(self._owner), blocking=False)
+                await lock.acquire()
+                self._owners[root][self._owner] = lock
+            self._roots[conversation_id] = root
         async with self._lifecycle[conversation_id]:
             self._inflight[conversation_id] += 1
             self._touched[conversation_id] = self.clock()
@@ -266,7 +288,9 @@ class DockerCarrier:
     async def _allocate_network(self, conversation_id: UUID) -> None:
         async with self._allocation:
             await self._reclaim_idle(conversation_id)
-            await self._ensure_network(self._network_name(conversation_id))
+            await self._ensure_network(
+                self._network_name(conversation_id), self._roots[conversation_id]
+            )
 
     async def _reclaim_idle(self, opening: UUID) -> None:
         self._touched[opening] = self.clock()
@@ -281,6 +305,7 @@ class DockerCarrier:
         if code != 0:
             raise RuntimeError(f"docker network ls failed: {stderr.decode().strip()}")
         networks = {UUID(name.removeprefix(f"{self.network}-")) for name in stdout.decode().split()}
+        await self._adopt_networks(networks, self._roots[opening])
         owned = networks & self._touched.keys()
         candidates = sorted(owned - {opening}, key=self._touched.__getitem__)
         held = len(owned | {opening})
@@ -296,6 +321,34 @@ class DockerCarrier:
                     continue
                 del self._touched[conversation_id]
                 held -= 1
+
+    async def _adopt_networks(self, networks: set[UUID], root: Path) -> None:
+        for conversation_id in networks - self._touched.keys():
+            code, stdout, stderr = await _docker(
+                "network",
+                "inspect",
+                "--format",
+                f'{{{{index .Labels "{ROOT_LABEL}"}}}} {{{{index .Labels "{OWNER_LABEL}"}}}}',
+                self._network_name(conversation_id),
+            )
+            if code != 0:
+                raise RuntimeError(f"docker network inspect failed: {stderr.decode().strip()}")
+            labels = stdout.decode().split()
+            if len(labels) != 2 or labels[0] != sha256(str(root).encode()).hexdigest():
+                continue
+            try:
+                owner = UUID(labels[1])
+            except ValueError:
+                continue
+            if owner not in self._owners[root]:
+                lock = AsyncUnixFileLock(root / OWNER_DIRECTORY / str(owner), blocking=False)
+                try:
+                    await lock.acquire()
+                except Timeout:
+                    continue
+                self._owners[root][owner] = lock
+            self._roots[conversation_id] = root
+            self._touched[conversation_id] = self.clock()
 
     async def exec(
         self,
@@ -326,7 +379,7 @@ class DockerCarrier:
         timeout_s: int,
         options: tuple[str, ...],
     ) -> ExecResult:
-        async with self._pin(handle.conversation_id):
+        async with self._pin(handle.conversation_id, handle.workspace_host_path):
             code, stdout, stderr = await _docker(
                 "exec",
                 "--workdir",
@@ -361,7 +414,7 @@ class DockerCarrier:
         renamed onto it, so a reader sees the whole of one write or the whole of the one before,
         a copy-in that stops part-way leaves the target as it was, and an overwrite keeps the
         file's mode."""
-        async with self._pin(handle.conversation_id):
+        async with self._pin(handle.conversation_id, handle.workspace_host_path):
             code, stderr = await self._write_started(handle, path, content)
             if code != 0 and NOT_RUNNING_MARKER in stderr.decode(errors="replace"):
                 if await self._revive(handle.conversation_id, handle.container_id):
@@ -398,7 +451,7 @@ class DockerCarrier:
         anything else — including a `cat` killed mid-stream, which exits non-zero with empty
         stderr — raises with the exit code and the container's own reported state rather than
         masquerading as a filesystem refusal."""
-        async with self._pin(handle.conversation_id):
+        async with self._pin(handle.conversation_id, handle.workspace_host_path):
             chunks, detail = self._read_started(handle, path)
             try:
                 async for chunk in chunks:
@@ -542,7 +595,7 @@ class DockerCarrier:
     def _network_name(self, conversation_id: UUID) -> str:
         return f"{self.network}-{conversation_id.hex}"
 
-    async def _ensure_network(self, network: str) -> None:
+    async def _ensure_network(self, network: str, root: Path) -> None:
         """The daemon arbitrates the network name, so a racing create's already-exists answer is
         success."""
         code, stdout, stderr = await _docker("network", "ls", "-q", "--filter", f"name=^{network}$")
@@ -550,7 +603,15 @@ class DockerCarrier:
             raise RuntimeError(f"docker network ls failed: {stderr.decode().strip()}")
         if stdout.strip():
             return
-        code, _, stderr = await _docker("network", "create", network)
+        code, _, stderr = await _docker(
+            "network",
+            "create",
+            network,
+            "--label",
+            f"{ROOT_LABEL}={sha256(str(root).encode()).hexdigest()}",
+            "--label",
+            f"{OWNER_LABEL}={self._owner}",
+        )
         if code != 0 and NETWORK_EXISTS_MARKER not in stderr.decode():
             raise RuntimeError(f"docker network create failed: {stderr.decode().strip()}")
 

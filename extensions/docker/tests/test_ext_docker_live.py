@@ -1,6 +1,7 @@
 import asyncio
 import json
 import ssl
+import sys
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -15,6 +16,30 @@ pytestmark = pytest.mark.docker
 CONVERSATION_COUNT = 36
 COMMAND_TIMEOUT_SECONDS = 30
 ACTIVE_COMMAND_TIMEOUT_SECONDS = 600
+RESTART_CREATE_SCRIPT = """
+import asyncio
+import json
+import sys
+from uuid import UUID
+
+from ufo_ext_docker import DockerCarrier
+from ufo.sdk.sandbox import ProxyEndpoint, SandboxSpec
+
+async def main():
+    carrier = DockerCarrier(network=sys.argv[1])
+    for conversation, image, workspace, cert in json.loads(sys.argv[2]):
+        spec = SandboxSpec(
+            conversation_id=UUID(conversation),
+            image_ref=image,
+            workspace_host_path=workspace,
+            proxy=ProxyEndpoint(port=8080, ca_cert=cert),
+            run_token="capacity-test",
+        )
+        handle = await carrier.create(spec)
+        await carrier.write(handle, "/workspace/saved", b"restart-survives")
+
+asyncio.run(main())
+"""
 
 
 @pytest.fixture
@@ -41,6 +66,68 @@ async def _checked_docker(*argv: str) -> str:
     code, stdout, stderr = await _docker(*argv)
     assert code == 0, stderr.decode()
     return stdout.decode().strip()
+
+
+@pytest.mark.parametrize("prior_count", [1, WARM_NETWORK_LIMIT])
+async def test_restart_reclaims_owned_networks_and_preserves_live_and_unknown_peers(
+    capacity_specs: tuple[SandboxSpec, ...], prior_count: int
+) -> None:
+    network = f"ufo-restart-{uuid4().hex}"
+    carrier = DockerCarrier(network=network)
+    peer = DockerCarrier(network=network)
+    unknown = uuid4()
+    try:
+        foreign = await peer.create(capacity_specs[prior_count])
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            RESTART_CREATE_SCRIPT,
+            network,
+            json.dumps(
+                [
+                    (
+                        str(spec.conversation_id),
+                        spec.image_ref,
+                        spec.workspace_host_path,
+                        spec.proxy.ca_cert,
+                    )
+                    for spec in capacity_specs[:prior_count]
+                ]
+            ),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        assert process.returncode == 0, stderr.decode()
+        await _checked_docker("network", "create", f"{network}-{unknown.hex}")
+        opened = await carrier.create(capacity_specs[prior_count + 1])
+        expected = {spec.conversation_id for spec in capacity_specs[:prior_count]} | {
+            opened.conversation_id
+        }
+        networks = await _checked_docker(
+            "network", "ls", "--filter", f"name=^{network}-", "--format", "{{.Name}}"
+        )
+        assert len(networks.splitlines()) == min(prior_count + 1, WARM_NETWORK_LIMIT) + 2
+        assert foreign.conversation_id not in carrier._touched
+        assert unknown not in carrier._touched
+        assert (
+            await _checked_docker("inspect", "-f", "{{.State.Running}}", foreign.container_id)
+            == "true"
+        )
+        assert set(carrier._touched) <= expected
+        assert len(carrier._touched) == min(prior_count + 1, WARM_NETWORK_LIMIT)
+        resumed = await carrier.create(capacity_specs[0])
+        saved = await carrier.exec(resumed, ("cat", "saved"), COMMAND_TIMEOUT_SECONDS)
+        assert saved.exit_code == 0
+        assert saved.stdout == "restart-survives"
+        result = await peer.exec(foreign, ("printf", "foreign"), COMMAND_TIMEOUT_SECONDS)
+        assert result.exit_code == 0
+        assert result.stdout == "foreign"
+    finally:
+        for spec in capacity_specs[: prior_count + 2]:
+            await _docker("rm", "-f", f"ufo-sbx-{spec.conversation_id}")
+            await _docker("network", "rm", f"{network}-{spec.conversation_id.hex}")
+        await _docker("network", "rm", f"{network}-{unknown.hex}")
 
 
 async def test_network_capacity_preserves_workspace_and_active_exec(
