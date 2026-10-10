@@ -67,8 +67,9 @@ from ufo.sdk.models import (
     ToolUseBlock,
 )
 from ufo.sdk.o11y import emit_metric, log
-from ufo.sdk.sandbox import Sandbox
+from ufo.sdk.sandbox import Sandbox, SandboxProviderUnavailable, SandboxUnreachable
 from ufo.sdk.skills import LoadedSkills
+from ufo.sdk.terminal import TerminalGone
 from ufo.sdk.transcript import (
     MEMBER_CONTEXT_OPENING,
     Anchor,
@@ -125,10 +126,16 @@ HISTORY_LOST_NOTE = (
     "The history file on this sandbox does not reach back before this window; the windows before "
     "it went with the sandbox that held them."
 )
-RECOVERY_INSTRUCTION = (
+HISTORY_UNWRITTEN_NOTE = (
+    "History: no sandbox was reachable at this reset, so this window was not written to the "
+    "history file. Only the record above carries it."
+)
+HISTORY_INSTRUCTION = (
     "- The whole conversation is in that file, one JSON line per message, append-only. "
     "search_history finds lines by phrase, newest first; read a line with bash (sed -n 'Np'); "
     "the line numbers above address the rest of any result trimmed here.\n"
+)
+VERIFY_INSTRUCTION = (
     "- Verify live state before any stateful or external action. Nothing above proves what is "
     "true right now — it states what was said and done before the reset."
 )
@@ -469,13 +476,8 @@ class ContextRollover:
         window_digest = sha256(window_text.encode()).hexdigest()
         index, previous = await self._boundary(window_digest)
         expected = 0 if previous is None else previous.last_entry_id
-        held, total = await self.journal.append(
-            tuple(
-                json.dumps({"role": message.role, "text": self._text(message)}, ensure_ascii=False)
-                for message in messages
-            ),
-            after=expected,
-        )
+        journaled = await self._journal(messages, expected)
+        held, total, history_path = (expected, expected, "") if journaled is None else journaled
         first_entry_id = min(held, expected) + 1
         carried = (
             reset.checklist
@@ -498,7 +500,7 @@ class ContextRollover:
             loaded_skills=drained,
             first_entry_id=first_entry_id,
             last_entry_id=total,
-            history_path=await self.journal.display_path(),
+            history_path=history_path,
             history_lost=held < expected,
             window_digest=window_digest,
         )
@@ -547,6 +549,30 @@ class ContextRollover:
         )
         return after
 
+    async def _journal(
+        self, messages: tuple[Message, ...], expected: int
+    ) -> tuple[int, int, str] | None:
+        """None when no sandbox is reachable: the reset needs none, and the record keeps the
+        previous end line so the next boundary appends where this one would have."""
+        try:
+            held, total = await self.journal.append(
+                tuple(
+                    json.dumps(
+                        {"role": message.role, "text": self._text(message)}, ensure_ascii=False
+                    )
+                    for message in messages
+                ),
+                after=expected,
+            )
+            return held, total, await self.journal.display_path()
+        except (TerminalGone, SandboxUnreachable, SandboxProviderUnavailable) as error:
+            log(
+                "rollover.history_unwritten",
+                conversation_id=str(self.conversation_id),
+                error_class=type(error).__name__,
+            )
+            return None
+
     def render(self, record: RecoveryRecord) -> str:
         """Render the recovery record into the one user message the fresh window opens with —
         deterministically, so the same record always yields the same window."""
@@ -581,11 +607,18 @@ class ContextRollover:
             blocks.append(LOADED_SKILLS_HEADING + "\n" + self._bullets(record.loaded_skills))
         blocks.append(
             f"{CONTINUE_HEADING}\n"
-            + HISTORY_LINE.format(
-                path=record.history_path, first=record.first_entry_id, last=record.last_entry_id
+            + (
+                HISTORY_LINE.format(
+                    path=record.history_path,
+                    first=record.first_entry_id,
+                    last=record.last_entry_id,
+                )
+                + (f"\n{HISTORY_LOST_NOTE}" if record.history_lost else "")
+                + f"\n{HISTORY_INSTRUCTION}"
+                if record.history_path
+                else f"{HISTORY_UNWRITTEN_NOTE}\n"
             )
-            + (f"\n{HISTORY_LOST_NOTE}" if record.history_lost else "")
-            + f"\n{RECOVERY_INSTRUCTION}"
+            + VERIFY_INSTRUCTION
         )
         return ROLLOVER_PREFIX + "\n".join(blocks)
 

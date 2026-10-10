@@ -32,6 +32,7 @@ from ufo_ext_context_rollover.rollover import (
     HANDOFF_MAX_CHARS,
     HISTORY_LINE,
     HISTORY_LOST_NOTE,
+    HISTORY_UNWRITTEN_NOTE,
     LOADED_SKILLS_HEADING,
     MAX_ACTIVE_REQUESTS,
     MAX_ANCHORS_PER_KIND,
@@ -75,7 +76,14 @@ from ufo.harness.models.interface import (
 from ufo.harness.models.spec import RepeatedToolRollover
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import (
+    ProxyEndpoint,
+    SandboxProviderUnavailable,
+    SandboxSession,
+    SandboxSpec,
+    SandboxUnreachable,
+)
+from ufo.harness.sandbox.terminal import TerminalAbsent, TerminalGone
 from ufo.harness.untrusted import UNTRUSTED_CLOSE, wall
 from ufo.host.ext.loader import BoundHook, HookChain
 from ufo.runtime.engine import MAX_OUTPUT_TOKENS, OFFLOAD_NOTICE
@@ -624,6 +632,57 @@ async def test_a_history_file_a_fresh_sandbox_lost_is_named_lost(tmp_path: Path)
     assert (record.recovery.first_entry_id, record.recovery.last_entry_id) == (1, 2)
     assert HISTORY_LOST_NOTE in str(outcome.messages[0].content)
     assert len(_history_lines(tmp_path)) == 2
+
+
+@dataclass(frozen=True)
+class UnreachableJournal:
+    error: Exception
+
+    async def display_path(self) -> str:
+        raise self.error
+
+    async def append(self, lines: tuple[str, ...], after: int) -> tuple[int, int]:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        TerminalAbsent("no terminal is connected to this conversation"),
+        TerminalGone("the connected terminal is at /elsewhere"),
+        SandboxUnreachable("sandbox gone"),
+        SandboxProviderUnavailable("provider down"),
+    ),
+)
+async def test_a_boundary_with_no_reachable_sandbox_still_resets_the_window(
+    tmp_path: Path, error: Exception
+) -> None:
+    """The reset needs no sandbox. A boundary whose history file is out of reach still installs the
+    record, says the window went unwritten, and keeps the end line the next append starts after."""
+    rollover = _rollover(tmp_path, trigger_tokens=10, journal=UnreachableJournal(error))
+
+    outcome = await rollover.maybe_cross(_history())
+
+    assert outcome.crossed
+    record = await rollover.read_record(1)
+    assert record is not None
+    assert record.recovery.history_path == ""
+    assert record.recovery.history_lost is False
+    assert (record.recovery.first_entry_id, record.recovery.last_entry_id) == (1, 0)
+    rendered = str(outcome.messages[0].content)
+    assert HISTORY_UNWRITTEN_NOTE in rendered
+    assert "search_history" not in rendered
+    assert "Verify live state before any stateful or external action." in rendered
+    assert TAIL_FACT in rendered
+
+
+async def test_a_failed_history_append_still_fails_the_boundary(tmp_path: Path) -> None:
+    rollover = _rollover(
+        tmp_path, trigger_tokens=10, journal=UnreachableJournal(RuntimeError("disk full"))
+    )
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        await rollover.maybe_cross(_history())
 
 
 async def test_the_sandbox_journal_splices_the_file_through_the_carrier(tmp_path: Path) -> None:

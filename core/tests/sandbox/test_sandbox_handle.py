@@ -137,6 +137,17 @@ async def _stored_handle(conversation_id: UUID) -> str | None:
         ).scalar_one()
 
 
+async def _detached_handle(conversation_id: UUID) -> str | None:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.conversation.c.detached_sandbox_handle).where(
+                    tables.conversation.c.id == conversation_id
+                )
+            )
+        ).scalar_one()
+
+
 def _turn(workspace_id: UUID, conversation_id: UUID) -> Turn:
     return Turn(
         id=uuid4(),
@@ -1515,6 +1526,132 @@ async def test_a_bound_conversation_refuses_when_no_terminal_is_connected(
         with pytest.raises(TerminalGone):
             await sandboxes.open(conversation_id, None, "run-a", {})
         assert await sandboxes.existing(conversation_id) is None
+
+
+@pytest.mark.parametrize("connected_at", (None, "/Users/member/other"))
+async def test_a_detached_open_falls_back_to_the_deploy_sandbox_without_rebinding(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, connected_at: str | None
+) -> None:
+    """A speakerless turn runs on the deploy's carrier when the bound terminal is gone or elsewhere.
+    The row keeps its terminal binding and records the fallback, where a read finds the file."""
+    monkeypatch.setattr(terminal, "ARRIVAL_GRACE_SECONDS", 0.05)
+    workspace_id, conversation_id = await _conversation(handle="client:/Users/member/proj")
+    terminals = Terminals()
+    if connected_at is not None:
+        terminals.connect(conversation_id, connected_at, None)
+    sandboxes = _terminal_sandboxes(tmp_path, terminals)
+
+    with ws(workspace_id):
+        session = await sandboxes.open(conversation_id, None, "run-a", {}, detached=True)
+        await session.write_runtime_file("history.jsonl", b"{}\n")
+        await session.write_file("report.md", b"# report\n")
+        stream = await sandboxes.read(conversation_id, "report.md")
+        assert stream is not None
+        read = b"".join([chunk async for chunk in stream])
+        existing = await sandboxes.existing(conversation_id)
+
+    assert isinstance(session.carrier, LocalCarrier)
+    assert session.handle.workspace_host_path == str(
+        (tmp_path / "workspaces" / str(conversation_id)).resolve()
+    )
+    assert await _stored_handle(conversation_id) == "client:/Users/member/proj"
+    assert await _detached_handle(conversation_id) == "local:local"
+    assert read == b"# report\n"
+    assert existing is not None
+    assert isinstance(existing.carrier, LocalCarrier)
+
+
+async def test_a_detached_fallback_resumes_the_recorded_sandbox_on_the_next_fire(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An off-cluster carrier names a new sandbox on each create, so the second detached open must
+    resume the one the first recorded rather than create another."""
+    monkeypatch.setattr(terminal, "ARRIVAL_GRACE_SECONDS", 0.05)
+    workspace_id, conversation_id = await _conversation(handle="client:/Users/member/proj")
+    carrier = _UniqueIdCarrier()
+    sandboxes = replace(_sandboxes(carrier, "e2b", tmp_path), terminals=Terminals())
+
+    with ws(workspace_id):
+        first = await sandboxes.open(conversation_id, None, "run-a", {}, detached=True)
+        second = await sandboxes.open(conversation_id, None, "run-b", {}, detached=True)
+        existing = await sandboxes.existing(conversation_id)
+
+    assert carrier.created == 1
+    assert first.handle.container_id == second.handle.container_id == "sbx-1"
+    assert existing is not None and existing.handle.container_id == "sbx-1"
+    assert await _stored_handle(conversation_id) == "client:/Users/member/proj"
+    assert await _detached_handle(conversation_id) == "e2b:sbx-1"
+
+
+async def test_only_a_child_no_member_awaits_falls_back_without_its_terminal(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child its member-present parent awaits inline takes `TerminalGone`, as does a background
+    child whose root turn has a speaker; a background child under a speakerless root falls back."""
+    monkeypatch.setattr(terminal, "ARRIVAL_GRACE_SECONDS", 0.05)
+    workspace_id, conversation_id = await _conversation(handle="client:/Users/member/proj")
+    sandboxes = _terminal_sandboxes(tmp_path, Terminals())
+    member_id = uuid4()
+    spoken = _turn(workspace_id, conversation_id).model_copy(
+        update={"speaker_member_id": member_id}
+    )
+    scheduled = _turn(workspace_id, conversation_id).model_copy(update={"seq": 2})
+
+    def child(parent: Turn, delivery: str | None) -> Turn:
+        return _turn(workspace_id, conversation_id).model_copy(
+            update={"seq": 3, "parent_turn_id": parent.id, "result_delivery": delivery}
+        )
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="a@b.c",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.agent_id).where(
+                    tables.conversation.c.id == conversation_id
+                )
+            )
+        ).scalar_one()
+    await _store_turn(spoken.model_copy(update={"agent_id": agent_id}))
+    await _store_turn(scheduled.model_copy(update={"agent_id": agent_id}))
+
+    with ws(workspace_id):
+        with pytest.raises(TerminalGone):
+            await _open_sandbox(sandboxes, RUN_TOKENS, child(spoken, None), {}, None, ())
+        with pytest.raises(TerminalGone):
+            await _open_sandbox(sandboxes, RUN_TOKENS, child(spoken, "pending"), {}, None, ())
+        with pytest.raises(TerminalGone):
+            await _open_sandbox(sandboxes, RUN_TOKENS, child(scheduled, None), {}, None, ())
+        session = await _open_sandbox(
+            sandboxes, RUN_TOKENS, child(scheduled, "pending"), {}, None, ()
+        )
+
+    assert isinstance(session.carrier, LocalCarrier)
+
+
+async def test_a_scheduled_turn_runs_without_its_terminal_and_a_member_turn_is_told(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(terminal, "ARRIVAL_GRACE_SECONDS", 0.05)
+    workspace_id, conversation_id = await _conversation(handle="client:/Users/member/proj")
+    sandboxes = _terminal_sandboxes(tmp_path, Terminals())
+    scheduled = _turn(workspace_id, conversation_id)
+    spoken = scheduled.model_copy(update={"speaker_member_id": uuid4()})
+
+    with ws(workspace_id):
+        session = await _open_sandbox(sandboxes, RUN_TOKENS, scheduled, {}, None, ())
+        with pytest.raises(TerminalGone):
+            await _open_sandbox(sandboxes, RUN_TOKENS, spoken, {}, None, ())
+
+    assert isinstance(session.carrier, LocalCarrier)
+    assert await _stored_handle(conversation_id) == "client:/Users/member/proj"
 
 
 async def test_a_deploy_conversation_keeps_its_carrier_beside_a_connected_terminal(

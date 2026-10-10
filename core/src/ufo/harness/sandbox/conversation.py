@@ -14,7 +14,7 @@ creating one would make a GET a side effect."""
 
 import asyncio
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -48,6 +48,7 @@ from ufo.harness.sandbox.session import (
 from ufo.harness.sandbox.terminal import (
     CLIENT_BACKEND,
     TerminalCarrier,
+    TerminalGone,
     Terminals,
     TerminalTransport,
 )
@@ -115,6 +116,7 @@ class ConversationSandbox:
         turn_id: UUID | None,
         run_token: str,
         env: Mapping[str, str],
+        detached: bool = False,
     ) -> SandboxSession:
         """The conversation's sandbox, created or resumed, with its handle persisted.
 
@@ -137,26 +139,50 @@ class ConversationSandbox:
         against the persisted id and returns the winner's sandbox, so both callers end on the one
         sandbox the row names and nothing is ever written into a sandbox no row references. The
         loser's extra sandbox is unreferenced and empty: docker arbitrates the name at the daemon so
-        none exists there, and an e2b one idles into a paused, unbilled husk."""
-        stored, size = await self._binding(conversation_id)
+        none exists there, and an e2b one idles into a paused, unbilled husk.
+
+        A `detached` open serves a turn no member is present for — a scheduled fire, a source
+        alert, a subagent. Nobody is there to reconnect a terminal, so one that is gone opens the
+        deploy's own sandbox for the conversation instead, without the member's local files. The
+        row records that sandbox beside its terminal binding, so the next detached open resumes it
+        and a read finds what it wrote, while the member's next turn runs at the terminal again."""
+        stored, fallback, size = await self._binding(conversation_id)
+        try:
+            return await self._persisted(
+                conversation_id,
+                False,
+                stored,
+                lambda handle: self._opened(conversation_id, turn_id, handle, run_token, env, size),
+            )
+        except TerminalGone as gone:
+            if not detached:
+                raise
+            warn("sandbox.terminal_fallback", conversation_id=str(conversation_id), error=str(gone))
+        return await self._persisted(
+            conversation_id,
+            True,
+            fallback,
+            lambda handle: self._created(conversation_id, turn_id, handle, run_token, env, size),
+        )
+
+    async def _persisted(
+        self,
+        conversation_id: UUID,
+        detached: bool,
+        stored: str | None,
+        opener: Callable[[str | None], Awaitable[tuple[str, Carrier, SandboxHandle]]],
+    ) -> SandboxSession:
         for _ in range(OPEN_CLAIM_ATTEMPTS):
-            backend, carrier, handle = await self._opened(
-                conversation_id, turn_id, stored, run_token, env, size
+            backend, carrier, handle = await opener(stored)
+            session = SandboxSession(
+                carrier=carrier, handle=handle, system_skill_archive=self.system_skill_archive
             )
             persisted = f"{backend}{SANDBOX_HANDLE_SEP}{handle.container_id}"
             if persisted == stored:
-                return SandboxSession(
-                    carrier=carrier,
-                    handle=handle,
-                    system_skill_archive=self.system_skill_archive,
-                )
-            winner = await self._claim(conversation_id, stored, persisted)
+                return session
+            winner = await self._claim(conversation_id, stored, persisted, detached)
             if winner == persisted:
-                return SandboxSession(
-                    carrier=carrier,
-                    handle=handle,
-                    system_skill_archive=self.system_skill_archive,
-                )
+                return session
             stored = winner
         raise RuntimeError(
             f"conversation {conversation_id}'s sandbox handle kept moving across "
@@ -168,8 +194,15 @@ class ConversationSandbox:
         never provisions: a conversation that never grew a sandbox, one whose stored handle another
         backend wrote, and one whose sandbox the carrier reclaimed or its provider lost all answer
         None rather than resurrecting anything, and the row is never written. A terminal-bound
-        conversation is reachable exactly while its terminal is connected at the bound directory."""
-        stored = await self._stored(conversation_id)
+        conversation is reachable while its terminal is connected at the bound directory, and
+        through the sandbox its detached turns fell back to while the terminal is gone."""
+        stored, fallback, _ = await self._binding(conversation_id)
+        session = await self._attached(conversation_id, stored)
+        if session is None:
+            return await self._attached(conversation_id, fallback)
+        return session
+
+    async def _attached(self, conversation_id: UUID, stored: str | None) -> SandboxSession | None:
         if stored is None:
             return None
         bound_path = sandbox_handle_id(CLIENT_BACKEND, stored)
@@ -345,13 +378,14 @@ class ConversationSandbox:
 
     async def read(self, conversation_id: UUID, rel: str) -> AsyncIterator[bytes] | None:
         """One workspace file's bytes in bounded chunks, or None when the conversation has no
-        sandbox or the path holds no file."""
-        session = await self.existing(conversation_id)
-        if session is None:
-            return None
-        if not await session.file_exists(rel):
-            return None
-        return session.read_file(rel)
+        sandbox or the path holds no file. A terminal-bound conversation also answers from the
+        sandbox its detached turns fell back to, where their output lives."""
+        stored, fallback, _ = await self._binding(conversation_id)
+        for handle in (stored, fallback):
+            session = await self._attached(conversation_id, handle)
+            if session is not None and await session.file_exists(rel):
+                return session.read_file(rel)
+        return None
 
     async def _opened(
         self,
@@ -384,6 +418,17 @@ class ConversationSandbox:
                 )
             )
             return CLIENT_BACKEND, carrier, handle
+        return await self._created(conversation_id, turn_id, stored, run_token, env, size)
+
+    async def _created(
+        self,
+        conversation_id: UUID,
+        turn_id: UUID | None,
+        stored: str | None,
+        run_token: str,
+        env: Mapping[str, str],
+        size: str,
+    ) -> tuple[str, Carrier, SandboxHandle]:
         routed, backend, off_cluster = self._route(stored)
         if off_cluster:
             host_path = (self.workspace_root / str(conversation_id)).resolve()
@@ -427,14 +472,18 @@ class ConversationSandbox:
         return path if path.is_dir() else None
 
     async def _stored(self, conversation_id: UUID) -> str | None:
-        handle, _ = await self._binding(conversation_id)
+        handle, _, _ = await self._binding(conversation_id)
         return handle
 
-    async def _binding(self, conversation_id: UUID) -> tuple[str | None, str]:
+    async def _binding(self, conversation_id: UUID) -> tuple[str | None, str | None, str]:
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
-                    sa.select(tables.conversation.c.sandbox_handle, tables.agent.c.sandbox_size)
+                    sa.select(
+                        tables.conversation.c.sandbox_handle,
+                        tables.conversation.c.detached_sandbox_handle,
+                        tables.agent.c.sandbox_size,
+                    )
                     .select_from(
                         tables.conversation.join(
                             tables.agent, tables.conversation.c.agent_id == tables.agent.c.id
@@ -448,24 +497,39 @@ class ConversationSandbox:
             ).one_or_none()
         if row is None:
             raise ValueError(f"conversation {conversation_id} is not in this workspace")
-        return row.sandbox_handle, row.sandbox_size
+        return row.sandbox_handle, row.detached_sandbox_handle, row.sandbox_size
 
-    async def _claim(self, conversation_id: UUID, stored: str | None, handle: str) -> str:
+    async def _claim(
+        self, conversation_id: UUID, stored: str | None, handle: str, detached: bool = False
+    ) -> str:
+        column = (
+            tables.conversation.c.detached_sandbox_handle
+            if detached
+            else tables.conversation.c.sandbox_handle
+        )
+        update = sa.update(tables.conversation)
         async with workspace_tx() as connection:
             swapped = await connection.execute(
-                sa.update(tables.conversation)
-                .values(sandbox_handle=handle)
-                .where(
+                (
+                    update.values(detached_sandbox_handle=handle)
+                    if detached
+                    else update.values(sandbox_handle=handle)
+                ).where(
                     tables.conversation.c.id == conversation_id,
                     tables.conversation.c.workspace_id == ws_current().workspace_id,
-                    tables.conversation.c.sandbox_handle.is_(None)
-                    if stored is None
-                    else tables.conversation.c.sandbox_handle == stored,
+                    column.is_(None) if stored is None else column == stored,
                 )
             )
             if swapped.rowcount:
                 return handle
-        winner = await self._stored(conversation_id)
+            winner = (
+                await connection.execute(
+                    sa.select(column).where(
+                        tables.conversation.c.id == conversation_id,
+                        tables.conversation.c.workspace_id == ws_current().workspace_id,
+                    )
+                )
+            ).scalar_one()
         if winner is None:
             raise RuntimeError(f"conversation {conversation_id} lost its sandbox handle mid-open")
         return winner

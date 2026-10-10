@@ -140,6 +140,7 @@ from ufo.runtime.workspace import (
 )
 from ufo.schema import tables
 from ufo.schema.records import (
+    DELIVERY_PENDING,
     EXPRESS_QUEUE_NAME,
     INTENT_ADMISSION,
     INTERNAL_ADMISSION,
@@ -1509,7 +1510,32 @@ async def _open_sandbox(
                 **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cache_config, *cli_git_config(clis))),
                 **await _keyed_provider_env(credentials, slots, turn.workspace_id),
             },
+            detached=await _detached(turn),
         )
+
+
+async def _detached(turn: Turn) -> bool:
+    """No member is present for a scheduled fire, a source alert, or a background child whose root
+    turn has no speaker. An inline child is not detached, so a gone terminal fails it."""
+    if turn.speaker_member_id is not None:
+        return False
+    if turn.parent_turn_id is None:
+        return True
+    if turn.result_delivery != DELIVERY_PENDING:
+        return False
+    current = turn.parent_turn_id
+    async with workspace_tx() as connection:
+        while True:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.parent_turn_id, tables.turn.c.speaker_member_id).where(
+                        tables.turn.c.id == current
+                    )
+                )
+            ).one()
+            if row.parent_turn_id is None:
+                return row.speaker_member_id is None
+            current = row.parent_turn_id
 
 
 @dataclass(frozen=True)

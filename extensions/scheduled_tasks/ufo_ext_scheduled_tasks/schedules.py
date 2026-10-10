@@ -80,6 +80,7 @@ class ScheduledTask:
     updated_at: datetime
     created_by_member_id: UUID | None = None
     internet_access: Literal[False] | None = None
+    last_turn_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,7 @@ _COLUMNS = (
     scheduled_task.c.internet_access,
     scheduled_task.c.created_at,
     scheduled_task.c.updated_at,
+    scheduled_task.c.last_turn_id,
 )
 
 
@@ -169,6 +171,7 @@ def _task(row: sa.RowMapping) -> ScheduledTask:
         internet_access=None if row["internet_access"] else False,
         created_at=_utc(row["created_at"]),
         updated_at=_utc(row["updated_at"]),
+        last_turn_id=row["last_turn_id"],
     )
 
 
@@ -547,20 +550,22 @@ class ScheduleStore:
         self,
         task: ScheduledTask,
         next_run_at: datetime,
-        last_run_at: datetime,
+        last_run_at: datetime | None,
         last_turn_id: UUID | None = None,
     ) -> bool:
         """Advance the exact claimed task version and clear its claim, recording when it ran and —
-        when the fire admitted a turn — which turn, so `inspect` can surface the latest response."""
+        when the fire admitted a turn — which turn, so `inspect` can surface the latest response.
+        A skipped occurrence passes no `last_run_at`, so the marks keep the run that happened."""
         if task.claim_id is None:
             raise ValueError("an unclaimed scheduled task cannot be rescheduled")
         values: dict[str, object] = {
             "next_run_at": next_run_at,
-            "last_run_at": last_run_at,
             "claimed_by": None,
             "claim_expires_at": None,
             "updated_at": sa.func.now(),
         }
+        if last_run_at is not None:
+            values["last_run_at"] = last_run_at
         if last_turn_id is not None:
             values["last_turn_id"] = last_turn_id
         async with self.ctx.transaction() as connection:
