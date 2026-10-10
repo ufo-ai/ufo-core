@@ -137,7 +137,7 @@ class GoogleAdsConnector(RestConnector):
                 query = (
                     "SELECT campaign.resource_name, campaign.id, campaign.name, "
                     "campaign.status, campaign.advertising_channel_type, "
-                    "campaign.start_date, campaign.end_date FROM campaign"
+                    "campaign.start_date_time, campaign.end_date_time FROM campaign"
                 )
                 async for page in self._query_each_customer(client, query):
                     yield page
@@ -159,16 +159,13 @@ class GoogleAdsConnector(RestConnector):
                     yield page
                 return
             if stream.name == "campaign_metrics":
-                since = (
-                    run.cursor[:10]
-                    if run.cursor
-                    else (datetime.now(UTC) - timedelta(days=90)).date()
-                )
+                today = datetime.now(UTC).date()
+                since = run.cursor[:10] if run.cursor else today - timedelta(days=90)
                 query = (
                     "SELECT segments.date, campaign.id, campaign.resource_name, "
                     "metrics.impressions, metrics.clicks, metrics.cost_micros, "
                     "metrics.conversions, metrics.ctr, metrics.average_cpc "
-                    f"FROM campaign WHERE segments.date >= '{since}'"
+                    f"FROM campaign WHERE segments.date BETWEEN '{since}' AND '{today}'"
                 )
                 async for page in self._query_each_customer(client, query):
                     yield page
@@ -206,7 +203,22 @@ class GoogleAdsConnector(RestConnector):
                 "resource_name": campaign.get("resourceName") or campaign.get("resource_name"),
                 "name": campaign.get("name"),
                 "status": campaign.get("status"),
-                "created_at": campaign.get("startDate") or campaign.get("start_date"),
+                "created_at": (campaign.get("startDateTime") or "")[:10] or None,
+            }
+        if stream.name == "ad_groups":
+            return {
+                **record,
+                "resource_name": dict_or_empty(record.get("adGroup")).get("resourceName"),
+            }
+        if stream.name == "ads":
+            return {
+                **record,
+                "resource_name": dict_or_empty(record.get("adGroupAd")).get("resourceName"),
+            }
+        if stream.name == "customer_clients":
+            return {
+                **record,
+                "resource_name": dict_or_empty(record.get("customerClient")).get("resourceName"),
             }
         if stream.name == "campaign_metrics":
             campaign = dict_or_empty(record.get("campaign"))

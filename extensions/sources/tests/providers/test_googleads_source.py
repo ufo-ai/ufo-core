@@ -3,6 +3,7 @@
 credential, and the `flatten` that derives each stream's primary key from the nested GAQL object.
 Offline — a canned transport, no DB, no token."""
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID, uuid4
@@ -79,6 +80,7 @@ async def test_campaign_metrics_project_the_observation_date_as_created_time() -
     def handle(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
             return httpx.Response(200, json={"resourceNames": ["customers/123"]})
+        assert "segments.date BETWEEN" in json.loads(request.content)["query"]
         return httpx.Response(
             200,
             json=[
@@ -99,6 +101,48 @@ async def test_campaign_metrics_project_the_observation_date_as_created_time() -
     assert {page.source_ref for page in result.pages} == {"campaign_metrics/123:9:2026-02-01"}
     assert result.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
     assert result.pages[0].updated_at is None
+
+
+def _results_handler(
+    results: list[dict[str, object]], selects: str
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"resourceNames": ["customers/123"]})
+        assert selects in json.loads(request.content)["query"]
+        return httpx.Response(200, json=[{"results": results}])
+
+    return handle
+
+
+async def test_campaigns_take_the_start_date_from_start_date_time() -> None:
+    campaign = {
+        "resourceName": "customers/123/campaigns/9",
+        "name": "q4",
+        "startDateTime": "2026-09-28 14:41:50",
+    }
+    result = await _fetch(
+        "campaigns", _results_handler([{"campaign": campaign}], "campaign.start_date_time")
+    )
+    assert [page.source_ref for page in result.pages] == ["campaigns/customers/123/campaigns/9"]
+    assert result.pages[0].created_at == "2026-09-28T00:00:00.000000+00:00"
+
+
+@pytest.mark.parametrize(
+    ("stream", "resource", "resource_name"),
+    [
+        ("ad_groups", "adGroup", "customers/123/adGroups/7"),
+        ("ads", "adGroupAd", "customers/123/adGroupAds/7~8"),
+        ("customer_clients", "customerClient", "customers/123/customerClients/123"),
+    ],
+)
+async def test_nested_resource_name_keys_the_record(
+    stream: str, resource: str, resource_name: str
+) -> None:
+    result = await _fetch(
+        stream, _results_handler([{resource: {"resourceName": resource_name}}], "SELECT")
+    )
+    assert [page.source_ref for page in result.pages] == [f"{stream}/{resource_name}"]
 
 
 async def test_refusal_maps_to_stream_skipped() -> None:
