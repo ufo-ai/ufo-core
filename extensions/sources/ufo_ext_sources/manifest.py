@@ -27,7 +27,6 @@ from ufo.sdk.sources import Connector, ConnectorBackend
 from ufo_ext_sources.connected import on_connection_recorded, retry_connected_sources
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.pages import PAGE_OBJECT
-from ufo_ext_sources.providers.googleads import DEVELOPER_TOKEN_ENV
 from ufo_ext_sources.registry import CONNECTORS, direct_slots
 from ufo_ext_sources.tools import SOURCE_TRIGGER_OBJECT, on_link_seen, on_page_change
 
@@ -108,5 +107,4 @@ def manifest() -> Manifest:
                 build=lambda credentials: DirectAuthProxy(credentials=credentials),
             ),
         ),
-        deploy_keys=(DEVELOPER_TOKEN_ENV,),
     )
