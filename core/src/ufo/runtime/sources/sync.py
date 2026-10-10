@@ -53,7 +53,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from ufo.blob import WorkspaceBlobStore
+from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import owner_tx, workspace_tx
 from ufo.harness.o11y import (
@@ -457,7 +457,7 @@ def feed_handle(config: BaseModel) -> str:
 
 
 def source_body_ref_matches(body_ref: str, source_id: UUID, page_id: UUID, digest: str) -> bool:
-    """Whether a blob ref names this page's content under one source-sync claim."""
+    """Whether a blob ref names this page's content under one source-sync commit attempt."""
     prefix = f"{SOURCE_BLOB_PREFIX}/{source_id}/{page_id}/"
     suffix = f"/{digest.removeprefix('sha256:')}"
     claim = body_ref.removeprefix(prefix).removesuffix(suffix)
@@ -846,7 +846,7 @@ class SyncDriver:
                 account_id=source.account_id,
             )
         try:
-            result = await self._fetch(source)
+            result = await self._repaired(source, await self._fetch(source, source.resume))
             await self._commit(source, result)
             return result.retry_after_seconds is not None
         except _SourceClaimLost:
@@ -960,7 +960,7 @@ class SyncDriver:
             )
         return tuple(claimed)
 
-    async def _fetch(self, source: ClaimedSource) -> SyncResult:
+    async def _fetch(self, source: ClaimedSource, cursor: str | None) -> SyncResult:
         backend = self.backends.get(source.backend)
         if backend is None:
             raise RuntimeError(f"no source backend for {source.backend!r}")
@@ -978,7 +978,34 @@ class SyncDriver:
             self_user_id=self_user_id,
             parents=partial(self._parent_pages, source),
         )
-        return await backend.fetch(config, source.resume, auth)
+        return await backend.fetch(config, cursor, auth)
+
+    async def _repaired(self, source: ClaimedSource, result: SyncResult) -> SyncResult:
+        """The stored cursor is past an unchanged record, so a `body_missing` page comes back
+        through a cursorless fetch, of which only the repaired pages land."""
+        if result.snapshot or result.retry_after_seconds is not None:
+            return result
+        async with workspace_tx() as connection:
+            missing = set(
+                (
+                    await connection.execute(
+                        sa.select(tables.page.c.source_identity).where(
+                            tables.page.c.workspace_id == source.workspace_id,
+                            tables.page.c.source_uid == source.source_uid,
+                            tables.page.c.body_missing.is_(True),
+                            tables.page.c.source_identity.is_not(None),
+                        )
+                    )
+                ).scalars()
+            )
+        missing -= {page.source_identity or page.source_ref for page in result.pages}
+        if not missing:
+            return result
+        walked = await self._fetch(source, None)
+        repairs = tuple(
+            page for page in walked.pages if {page.source_identity, page.source_ref} & missing
+        )
+        return result.model_copy(update={"pages": result.pages + repairs})
 
     async def _parent_pages(
         self, source: ClaimedSource, stream: str
@@ -1049,6 +1076,9 @@ class SyncDriver:
         changed: list[ChangedPage] = []
         metadata: list[PageBrowse] = []
         written: list[str] = []
+        # A recovered workflow replays under the same claim; keying bodies by the claim let a
+        # failing attempt's cleanup delete the body a concurrent attempt had committed.
+        attempt = uuid4().hex
         try:
             for page in result.pages:
                 source_identity = page.source_identity or page.source_ref
@@ -1072,7 +1102,7 @@ class SyncDriver:
                 )
                 if existing is None or existing[:2] != (page.digest, False):
                     body_ref = (
-                        f"{SOURCE_BLOB_PREFIX}/{source.source_uid}/{page_id}/{source.claim}/"
+                        f"{SOURCE_BLOB_PREFIX}/{source.source_uid}/{page_id}/{attempt}/"
                         f"{page.digest.removeprefix('sha256:')}"
                     )
                     written.append(body_ref)
@@ -1248,6 +1278,7 @@ class SyncDriver:
                         parent_fields=changed_page.browse.parent_fields,
                         subject=subject,
                         tombstone=False,
+                        body_missing=False,
                         updated_at=now,
                     )
                     .where(
@@ -1317,6 +1348,19 @@ class SyncDriver:
                     )
                 )
                 tombstoned += swept.rowcount
+            gone: sa.ColumnElement[bool] = tables.page.c.uid.in_(deleted)
+            if snapshot:
+                gone = sa.or_(gone, tables.page.c.uid.not_in(fetched))
+            await connection.execute(
+                sa.update(tables.page)
+                .values(body_missing=False)
+                .where(
+                    tables.page.c.workspace_id == workspace_id,
+                    tables.page.c.source_uid == source.source_uid,
+                    tables.page.c.body_missing.is_(True),
+                    gone,
+                )
+            )
             await connection.execute(
                 sa.update(tables.page)
                 .values(subject=subject, updated_at=now)
@@ -1660,7 +1704,9 @@ class CorePageFeed:
     """The core `PageFeed`: reads the bound workspace's `page` rows in `(revision, uid)` order after
     the cursor and inlines each non-tombstoned body from the blob store, bounding every batch to
     PAGE_FEED_BATCH_MAX so the inlined bodies stay a small payload. A tombstoned page carries an
-    empty body; its reader drops the page's chunks and mirror on that signal."""
+    empty body; its reader drops the page's chunks and mirror on that signal. A page whose body
+    blob is gone is tombstoned in place, marked `body_missing`, and read as a tombstone, so it holds
+    no cursor and the source's next sync refetches it whatever that source's cursor says."""
 
     blob: WorkspaceBlobStore
 
@@ -1701,7 +1747,31 @@ class CorePageFeed:
             rows = (await connection.execute(query)).mappings().all()
         changes: list[PageChange] = []
         for row in rows:
-            body = "" if row["tombstone"] else (await self.blob.get(row["body_ref"])).decode()
+            tombstone = bool(row["tombstone"])
+            body = ""
+            if not tombstone:
+                try:
+                    body = (await self.blob.get(row["body_ref"])).decode()
+                except BlobNotFound:
+                    warn(
+                        "page_feed.body_missing",
+                        page_id=str(row["uid"]),
+                        source_id=str(row["source_uid"]),
+                        body_ref=row["body_ref"],
+                        revision=row["revision"],
+                    )
+                    async with workspace_tx() as connection:
+                        await connection.execute(
+                            sa.update(tables.page)
+                            .values(tombstone=True, body_missing=True, updated_at=datetime.now(UTC))
+                            .where(
+                                tables.page.c.workspace_id == ws_current().workspace_id,
+                                tables.page.c.uid == row["uid"],
+                                tables.page.c.body_ref == row["body_ref"],
+                                tables.page.c.tombstone.is_(False),
+                            )
+                        )
+                    tombstone = True
             record_as_of = row["record_updated_at"] or row["record_created_at"]
             changes.append(
                 PageChange(
@@ -1713,7 +1783,7 @@ class CorePageFeed:
                     body=body,
                     digest=row["digest"],
                     revision=row["revision"],
-                    tombstone=bool(row["tombstone"]),
+                    tombstone=tombstone,
                     indexed=bool(row["indexed"]),
                     created_at=row["created_at"],
                     as_of=(
