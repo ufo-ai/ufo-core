@@ -1226,7 +1226,9 @@ async def test_carrier_read_killed_mid_stream_names_the_kill_not_the_file(
     await ctx.sandbox.write_file("big.bin", payload)
     carrier = ctx.sandbox.carrier
     container = await _sibling_container(ctx, workspace)
-    handle = SandboxHandle(conversation_id=uuid4(), container_id=container)
+    handle = SandboxHandle(
+        conversation_id=uuid4(), container_id=container, workspace_host_path=str(workspace)
+    )
     try:
         stream = carrier.read(handle, "/workspace/big.bin")
         expected = (
@@ -1350,7 +1352,9 @@ async def test_carrier_read_revives_a_stopped_container_and_streams(
     await ctx.sandbox.write_file("revive.bin", payload)
     carrier = ctx.sandbox.carrier
     container = await _sibling_container(ctx, workspace)
-    handle = SandboxHandle(conversation_id=uuid4(), container_id=container)
+    handle = SandboxHandle(
+        conversation_id=uuid4(), container_id=container, workspace_host_path=str(workspace)
+    )
     try:
         await _docker_cli("stop", "-t", "0", container)
 

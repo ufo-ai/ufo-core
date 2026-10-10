@@ -43,6 +43,7 @@ dependencies = [
     "tomli-w>=1.0",
     "uvicorn>=0.30",
     "emoji>=2.15",
+    "filelock>=3.29.6",
 ]
 
 [project.scripts]
