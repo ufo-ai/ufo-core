@@ -158,7 +158,44 @@ async def test_network_capacity_preserves_workspace_and_active_exec(
                 if code == 0:
                     break
         for spec in capacity_specs[3:]:
-            handle = await carrier.create(spec)
+            if spec == capacity_specs[WARM_NETWORK_LIMIT + 1]:
+                events = await asyncio.create_subprocess_exec(
+                    "docker",
+                    "events",
+                    "--since",
+                    str(time.time()),
+                    "--filter",
+                    f"container={quiet.container_id}",
+                    "--filter",
+                    "event=kill",
+                    "--format",
+                    "{{json .}}",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                opening = asyncio.create_task(carrier.create(spec))
+                try:
+                    assert events.stdout is not None
+                    async with asyncio.timeout(COMMAND_TIMEOUT_SECONDS):
+                        event = json.loads(await events.stdout.readline())
+                        assert event["Actor"]["Attributes"]["signal"] == "15"
+                        independent = await carrier.exec(
+                            active, ("printf", "independent"), COMMAND_TIMEOUT_SECONDS
+                        )
+                    assert independent.exit_code == 0
+                    assert independent.stdout == "independent"
+                    assert (
+                        await _checked_docker(
+                            "inspect", "-f", "{{.State.Running}}", quiet.container_id
+                        )
+                        == "true"
+                    )
+                finally:
+                    events.terminate()
+                    await events.wait()
+                    handle = await opening
+            else:
+                handle = await carrier.create(spec)
             result = await carrier.exec(handle, ("printf", "created"), COMMAND_TIMEOUT_SECONDS)
             assert result.exit_code == 0
             assert result.stdout == "created"
