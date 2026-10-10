@@ -6,9 +6,11 @@ Google Ads speaks GAQL over HTTP: every stream is a `SELECT ... FROM <resource>`
 `paginate` first lists the accessible customer ids (`/customers:listAccessibleCustomers`), then runs
 the stream's query against each, stamping `customer_id` onto every row; `flatten` lifts the nested
 GAQL object into the flat record the sync keys by (the customer id, a campaign/ad-group
-`resource_name`, or the synthesized metrics id). OAuth alone authorizes a request: Google Ads
-grants API access to the Cloud project that owns the OAuth client, and ignores a `developer-token`
-header. A refusal (HTTP 401/403) raises `StreamSkipped`. The credential is
+`resource_name`, or the synthesized metrics id). OAuth alone authorizes a request: Google sunset
+developer tokens on 2026-09-09, grants API access to the Cloud project that owns the OAuth client,
+and ignores a `developer-token` header
+(https://developers.google.com/google-ads/api/docs/api-policy/developer-token).
+A refusal (HTTP 401/403) raises `StreamSkipped`. The credential is
 resolved through the auth proxy the runner threads — this connector holds no OAuth token. The write
 path (campaign/ad mutations) is intentionally absent — the source seam only reads."""
 
