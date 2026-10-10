@@ -135,6 +135,7 @@ async def _refreshed_for_member(
                     sa.select(tables.member.c.id).where(
                         tables.member.c.workspace_id == workspace,
                         tables.member.c.email == email,
+                        tables.member.c.seated_at.is_not(None),
                     )
                 )
             ).scalar_one_or_none()

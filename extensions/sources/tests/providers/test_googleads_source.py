@@ -1,11 +1,10 @@
 """Google Ads connector over a mock transport: the accessible-customers listing, the GAQL
-`searchStream` POST whose body is a top-level array of result batches, the developer-token gate
-(a second credential beyond OAuth, read from the environment), and the `flatten` that derives each
-stream's primary key from the nested GAQL object. Offline — a canned transport, no DB, no token."""
+`searchStream` POST whose body is a top-level array of result batches, OAuth as the only
+credential, and the `flatten` that derives each stream's primary key from the nested GAQL object.
+Offline — a canned transport, no DB, no token."""
 
-import os
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
@@ -16,8 +15,6 @@ from ufo_ext_sources.providers.googleads import GoogleAdsConnector
 from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-
-_DEV_TOKEN_VARS = ("UFO_GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_DEVELOPER_TOKEN")
 
 
 @dataclass(frozen=True)
@@ -40,26 +37,10 @@ async def _fetch(
     )
 
 
-@contextmanager
-def _dev_token(value: str | None) -> Iterator[None]:
-    saved = {name: os.environ.get(name) for name in _DEV_TOKEN_VARS}
-    for name in _DEV_TOKEN_VARS:
-        os.environ.pop(name, None)
-    if value is not None:
-        os.environ["UFO_GOOGLE_ADS_DEVELOPER_TOKEN"] = value
-    try:
-        yield
-    finally:
-        for name, original in saved.items():
-            if original is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = original
-
-
 def _customers_handler() -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "googleads.googleapis.com"
+        assert "developer-token" not in request.headers
         if request.method == "GET" and request.url.path.endswith(
             "/customers:listAccessibleCustomers"
         ):
@@ -88,8 +69,7 @@ def _customers_handler() -> Callable[[httpx.Request], httpx.Response]:
 
 
 async def test_customers_lists_and_flatten_derives_id() -> None:
-    with _dev_token("dev"):
-        result = await _fetch("customers", _customers_handler())
+    result = await _fetch("customers", _customers_handler())
     assert {page.source_ref for page in result.pages} == {"customers/123"}
     assert result.snapshot is False
     body = result.pages[0].body
@@ -100,6 +80,7 @@ async def test_campaign_metrics_project_the_observation_date_as_created_time() -
     def handle(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
             return httpx.Response(200, json={"resourceNames": ["customers/123"]})
+        assert "segments.date BETWEEN" in json.loads(request.content)["query"]
         return httpx.Response(
             200,
             json=[
@@ -115,22 +96,58 @@ async def test_campaign_metrics_project_the_observation_date_as_created_time() -
             ],
         )
 
-    with _dev_token("dev"):
-        result = await _fetch("campaign_metrics", handle)
+    result = await _fetch("campaign_metrics", handle)
 
     assert {page.source_ref for page in result.pages} == {"campaign_metrics/123:9:2026-02-01"}
     assert result.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
     assert result.pages[0].updated_at is None
 
 
-async def test_missing_developer_token_skips_the_stream() -> None:
-    with _dev_token(None), pytest.raises(StreamSkipped):
-        await _fetch("customers", _customers_handler())
+def _results_handler(
+    results: list[dict[str, object]], selects: str
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"resourceNames": ["customers/123"]})
+        assert selects in json.loads(request.content)["query"]
+        return httpx.Response(200, json=[{"results": results}])
+
+    return handle
+
+
+async def test_campaigns_take_the_start_date_from_start_date_time() -> None:
+    campaign = {
+        "resourceName": "customers/123/campaigns/9",
+        "name": "q4",
+        "startDateTime": "2026-09-28 14:41:50",
+    }
+    result = await _fetch(
+        "campaigns", _results_handler([{"campaign": campaign}], "campaign.start_date_time")
+    )
+    assert [page.source_ref for page in result.pages] == ["campaigns/customers/123/campaigns/9"]
+    assert result.pages[0].created_at == "2026-09-28T00:00:00.000000+00:00"
+
+
+@pytest.mark.parametrize(
+    ("stream", "resource", "resource_name"),
+    [
+        ("ad_groups", "adGroup", "customers/123/adGroups/7"),
+        ("ads", "adGroupAd", "customers/123/adGroupAds/7~8"),
+        ("customer_clients", "customerClient", "customers/123/customerClients/123"),
+    ],
+)
+async def test_nested_resource_name_keys_the_record(
+    stream: str, resource: str, resource_name: str
+) -> None:
+    result = await _fetch(
+        stream, _results_handler([{resource: {"resourceName": resource_name}}], "SELECT")
+    )
+    assert [page.source_ref for page in result.pages] == [f"{stream}/{resource_name}"]
 
 
 async def test_refusal_maps_to_stream_skipped() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"error": "forbidden"})
 
-    with _dev_token("dev"), pytest.raises(StreamSkipped):
+    with pytest.raises(StreamSkipped):
         await _fetch("customers", handle)
