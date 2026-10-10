@@ -115,6 +115,9 @@ class DockerCarrier:
     _owners: defaultdict[Path, dict[UUID, AsyncUnixFileLock]] = field(
         default_factory=lambda: defaultdict(dict)
     )
+    _ownership: defaultdict[Path, asyncio.Lock] = field(
+        default_factory=lambda: defaultdict(asyncio.Lock)
+    )
     _lifecycle: defaultdict[UUID, asyncio.Lock] = field(
         default_factory=lambda: defaultdict(asyncio.Lock)
     )
@@ -270,7 +273,7 @@ class DockerCarrier:
         if workspace_host_path is None:
             raise ValueError("Docker handles require a host workspace")
         root = Path(workspace_host_path).parent
-        async with self._allocation:
+        async with self._ownership[root]:
             if self._owner not in self._owners[root]:
                 lock = AsyncUnixFileLock(root / OWNER_DIRECTORY / str(self._owner), blocking=False)
                 await lock.acquire()
