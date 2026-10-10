@@ -2876,6 +2876,90 @@ async def test_a_page_gone_from_the_provider_stops_the_repair_walk_after_one_pas
     assert repair_cursor is None
 
 
+@pytest.mark.parametrize("repair_cursor", [None, "repair-tail"])
+async def test_a_rate_limit_preserves_the_repair_walk(
+    db: None, database_url: str, tmp_path: Path, repair_cursor: str | None
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    page = Page(source_ref="plan", body="launch plan", stream="docs", title="plan")
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    driver, backend = _scripted_driver(
+        [
+            SyncResult(pages=(page,), next_cursor="watermark"),
+            SyncResult(pages=(), next_cursor="watermark"),
+            SyncResult(pages=(), next_cursor=repair_cursor, retry_after_seconds=300),
+            SyncResult(pages=(), next_cursor="watermark"),
+            SyncResult(pages=(page,), next_cursor="watermark"),
+        ],
+        database_url,
+        tmp_path / "blobs",
+    )
+    await _sync(driver)
+    await _lose_body(workspace_id, blob, "plan")
+    before = datetime.now(UTC)
+    await _sync(driver)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            state = (
+                await connection.execute(
+                    sa.select(
+                        tables.source.c.cursor,
+                        tables.source.c.repair_cursor,
+                        tables.source.c.repair_started_at,
+                        tables.source.c.next_sync_at,
+                        tables.page.c.body_missing,
+                    )
+                    .select_from(tables.source)
+                    .join(tables.page, tables.page.c.source_uid == tables.source.c.uid)
+                    .where(tables.source.c.uid == source_id)
+                )
+            ).one()
+        await _make_due()
+    assert state.body_missing is True
+    assert state.cursor == "watermark"
+    assert state.repair_cursor == repair_cursor
+    assert state.repair_started_at is not None
+    assert state.next_sync_at.replace(tzinfo=UTC) >= before + timedelta(seconds=300)
+    await _sync(driver)
+    with ws(workspace_id):
+        (healed,) = (await CorePageFeed(blob).pages_changed_since(None, 10)).changes
+    assert (healed.tombstone, healed.body) == (False, "launch plan")
+    assert backend.cursors == [None, "watermark", None, "watermark", repair_cursor]
+
+
+async def test_a_capped_repair_without_a_cursor_keeps_the_missing_page_pending(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    page = Page(source_ref="plan", body="launch plan", stream="docs", title="plan")
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    driver, _ = _scripted_driver(
+        [
+            SyncResult(pages=(page,), next_cursor="watermark"),
+            SyncResult(pages=(), next_cursor="watermark"),
+            SyncResult(pages=(), capped=True),
+        ],
+        database_url,
+        tmp_path / "blobs",
+    )
+    await _sync(driver)
+    await _lose_body(workspace_id, blob, "plan")
+    await _sync(driver)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            state = (
+                await connection.execute(
+                    sa.select(tables.source.c.consecutive_errors, tables.page.c.body_missing)
+                    .select_from(tables.source)
+                    .join(tables.page, tables.page.c.source_uid == tables.source.c.uid)
+                    .where(tables.source.c.uid == source_id)
+                )
+            ).one()
+    assert state._tuple() == (1, True)
+
+
 async def test_page_feed_reads_one_immutable_page_version_during_a_sync(
     db: None, database_url: str, tmp_path: Path
 ) -> None:

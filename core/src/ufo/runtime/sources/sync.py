@@ -605,6 +605,7 @@ class _RepairWalk:
     cursor: str | None
     started_at: datetime | None
     given_up: frozenset[str] = frozenset()
+    complete: bool = False
 
 
 def _rescheduled(claimed: ClaimedSource, when: datetime | sa.Case[datetime]) -> sa.Case[datetime]:
@@ -1026,7 +1027,7 @@ class SyncDriver:
         if not missing:
             return result, _RepairWalk(None, None)
         cursor, started_at = source.repair_cursor, source.repair_started_at
-        if cursor is None or started_at is None:
+        if started_at is None:
             cursor, started_at = None, datetime.now(UTC)
         try:
             walked = await self._fetch(source, cursor)
@@ -1040,10 +1041,18 @@ class SyncDriver:
             if matched := {page.source_identity, page.source_ref} & missing:
                 found |= {identity for identity in matched if identity is not None}
                 repairs.append(page)
-        repaired = result.model_copy(update={"pages": result.pages + tuple(repairs)})
+        repaired = result.model_copy(
+            update={
+                "pages": result.pages + tuple(repairs),
+                "retry_after_seconds": walked.retry_after_seconds,
+            }
+        )
         unfinished = walked.capped or walked.retry_after_seconds is not None
-        if unfinished and walked.next_cursor is not None:
-            return repaired, _RepairWalk(walked.next_cursor, started_at)
+        if walked.capped and walked.next_cursor is None:
+            raise ValueError("a capped repair fetch must return a cursor")
+        if unfinished:
+            resume = walked.next_cursor if walked.next_cursor is not None else cursor
+            return repaired, _RepairWalk(resume, started_at)
         given_up = frozenset(missing - found)
         if given_up:
             with suppress(Exception):
@@ -1053,7 +1062,7 @@ class SyncDriver:
                     **_stream_tags(source),
                     pages=len(given_up),
                 )
-        return repaired, _RepairWalk(None, started_at, given_up)
+        return repaired, _RepairWalk(None, started_at, given_up, complete=True)
 
     async def _parent_pages(
         self, source: ClaimedSource, stream: str
@@ -1460,7 +1469,7 @@ class SyncDriver:
                         tables.source.c.repair_started_at
                         if walk is None
                         else None
-                        if walk.cursor is None
+                        if walk.complete
                         else walk.started_at
                     ),
                     cursor=cursor,
