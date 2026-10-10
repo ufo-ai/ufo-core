@@ -6,10 +6,9 @@ Google Ads speaks GAQL over HTTP: every stream is a `SELECT ... FROM <resource>`
 `paginate` first lists the accessible customer ids (`/customers:listAccessibleCustomers`), then runs
 the stream's query against each, stamping `customer_id` onto every row; `flatten` lifts the nested
 GAQL object into the flat record the sync keys by (the customer id, a campaign/ad-group
-`resource_name`, or the synthesized metrics id). OAuth identifies the advertiser, but Google Ads
-additionally requires an approved developer token on every request — read from the environment
-(`UFO_GOOGLE_ADS_DEVELOPER_TOKEN`, or `GOOGLE_ADS_DEVELOPER_TOKEN`); absent, the stream is
-skipped rather than failed. A refusal (HTTP 401/403) raises `StreamSkipped`. The credential is
+`resource_name`, or the synthesized metrics id). OAuth alone authorizes a request: Google Ads
+grants API access to the Cloud project that owns the OAuth client, and ignores a `developer-token`
+header. A refusal (HTTP 401/403) raises `StreamSkipped`. The credential is
 resolved through the auth proxy the runner threads — this connector holds no OAuth token. The write
 path (campaign/ad mutations) is intentionally absent — the source seam only reads."""
 
@@ -31,7 +30,6 @@ from ufo.sdk.sources import (
 from ufo_ext_sources.watermark import text_checkpoint
 
 GOOGLE_ADS_VERSION = "v24"
-DEVELOPER_TOKEN_ENV = "GOOGLE_ADS_DEVELOPER_TOKEN"
 LOGIN_CUSTOMER_ID_ENV = "GOOGLE_ADS_LOGIN_CUSTOMER_ID"
 _REFUSAL_STATUS = frozenset({401, 403})
 
@@ -76,18 +74,8 @@ class GoogleAdsConnector(RestConnector):
     streams_list = ALL_STREAMS
     checkpoint = staticmethod(text_checkpoint)
 
-    def _developer_token(self) -> str:
-        token = deploy_env(DEVELOPER_TOKEN_ENV)
-        if not token:
-            raise StreamSkipped(
-                "googleads requires UFO_GOOGLE_ADS_DEVELOPER_TOKEN "
-                "(Google Ads OAuth alone is not sufficient)"
-            )
-        return token
-
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         client = super()._make_client(base_url, credential)
-        client.headers["developer-token"] = self._developer_token()
         login_customer_id = deploy_env(LOGIN_CUSTOMER_ID_ENV)
         if login_customer_id:
             client.headers["login-customer-id"] = login_customer_id.replace("-", "")
@@ -199,7 +187,7 @@ class GoogleAdsConnector(RestConnector):
             if error.response.status_code in _REFUSAL_STATUS:
                 raise StreamSkipped(
                     f"googleads: {stream.name!r} refused ({error.response.status_code}); "
-                    "the grant lacks scope or the developer token is not approved"
+                    "the grant lacks scope or the Cloud project lacks Google Ads API access"
                 ) from error
             raise
 
