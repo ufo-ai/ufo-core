@@ -211,12 +211,16 @@ class SyncResult(BaseModel):
     `indexed` is the stream's declaration of whether its pages reach memory, a fact of the run
     rather than of any page: the driver writes it onto every row of the source each run, so a row
     an older image landed under the column default agrees with the declaration one interval
-    later."""
+    later.
+
+    `capped` says the fetch stopped at a run cap short of the end of its walk, so `next_cursor`
+    resumes that walk rather than following later changes."""
 
     pages: tuple[Page, ...]
     next_cursor: str | None = None
     deletes: tuple[str, ...] = ()
     snapshot: bool = False
+    capped: bool = False
     dropped: int = 0
     retry_after_seconds: float | None = Field(default=None, gt=0)
     indexed: bool = True
@@ -576,6 +580,8 @@ class ClaimedSource:
     partitioned: bool
     consecutive_errors: int
     claimed_at: datetime
+    repair_cursor: str | None = None
+    repair_started_at: datetime | None = None
 
     @property
     def resume(self) -> str | None:
@@ -589,6 +595,16 @@ class ClaimedSource:
         if self.partitioned:
             return tables.source.c.cursor, cursor
         return cursor, tables.source.c.partition_cursor
+
+
+@dataclass(frozen=True)
+class _RepairWalk:
+    """A `body_missing` repair walk after one chunk: the cursor its next chunk resumes from, or None
+    once done, with the identities flagged before `started_at` that the walk never returned."""
+
+    cursor: str | None
+    started_at: datetime | None
+    given_up: frozenset[str] = frozenset()
 
 
 def _rescheduled(claimed: ClaimedSource, when: datetime | sa.Case[datetime]) -> sa.Case[datetime]:
@@ -846,8 +862,8 @@ class SyncDriver:
                 account_id=source.account_id,
             )
         try:
-            result = await self._repaired(source, await self._fetch(source, source.resume))
-            await self._commit(source, result)
+            result, walk = await self._repaired(source, await self._fetch(source, source.resume))
+            await self._commit(source, result, walk)
             return result.retry_after_seconds is not None
         except _SourceClaimLost:
             raise
@@ -907,6 +923,8 @@ class SyncDriver:
                 tables.connection.c.base_url,
                 tables.source.c.cursor,
                 tables.source.c.partition_cursor,
+                tables.source.c.repair_cursor,
+                tables.source.c.repair_started_at,
                 tables.source.c.consecutive_errors,
             )
             .select_from(_source_authority())
@@ -956,6 +974,8 @@ class SyncDriver:
                     ),
                     consecutive_errors=row["consecutive_errors"],
                     claimed_at=now,
+                    repair_cursor=row["repair_cursor"],
+                    repair_started_at=row["repair_started_at"],
                 )
             )
         return tuple(claimed)
@@ -980,11 +1000,15 @@ class SyncDriver:
         )
         return await backend.fetch(config, cursor, auth)
 
-    async def _repaired(self, source: ClaimedSource, result: SyncResult) -> SyncResult:
-        """The stored cursor is past an unchanged record, so a `body_missing` page comes back
-        through a cursorless fetch, of which only the repaired pages land."""
-        if result.snapshot or result.retry_after_seconds is not None:
-            return result
+    async def _repaired(
+        self, source: ClaimedSource, result: SyncResult
+    ) -> tuple[SyncResult, _RepairWalk]:
+        """A `body_missing` page comes back through a cursorless walk, one chunk per run under the
+        walk's own cursor so the source cursor never moves back; only repaired pages land."""
+        if result.retry_after_seconds is not None:
+            return result, _RepairWalk(source.repair_cursor, source.repair_started_at)
+        if result.snapshot:
+            return result, _RepairWalk(None, None)
         async with workspace_tx() as connection:
             missing = set(
                 (
@@ -1000,12 +1024,36 @@ class SyncDriver:
             )
         missing -= {page.source_identity or page.source_ref for page in result.pages}
         if not missing:
-            return result
-        walked = await self._fetch(source, None)
-        repairs = tuple(
-            page for page in walked.pages if {page.source_identity, page.source_ref} & missing
-        )
-        return result.model_copy(update={"pages": result.pages + repairs})
+            return result, _RepairWalk(None, None)
+        cursor, started_at = source.repair_cursor, source.repair_started_at
+        if cursor is None or started_at is None:
+            cursor, started_at = None, datetime.now(UTC)
+        try:
+            walked = await self._fetch(source, cursor)
+        except CursorExpired:
+            if cursor is None:
+                raise
+            return result, _RepairWalk(None, None)
+        found: set[str] = set()
+        repairs: list[Page] = []
+        for page in walked.pages:
+            if matched := {page.source_identity, page.source_ref} & missing:
+                found |= {identity for identity in matched if identity is not None}
+                repairs.append(page)
+        repaired = result.model_copy(update={"pages": result.pages + tuple(repairs)})
+        unfinished = walked.capped or walked.retry_after_seconds is not None
+        if unfinished and walked.next_cursor is not None:
+            return repaired, _RepairWalk(walked.next_cursor, started_at)
+        given_up = frozenset(missing - found)
+        if given_up:
+            with suppress(Exception):
+                warn(
+                    "source_sync.repair_gave_up",
+                    source_id=str(source.source_uid),
+                    **_stream_tags(source),
+                    pages=len(given_up),
+                )
+        return repaired, _RepairWalk(None, started_at, given_up)
 
     async def _parent_pages(
         self, source: ClaimedSource, stream: str
@@ -1066,7 +1114,9 @@ class SyncDriver:
                 revision=row["revision"],
             )
 
-    async def _commit(self, source: ClaimedSource, result: SyncResult) -> None:
+    async def _commit(
+        self, source: ClaimedSource, result: SyncResult, walk: _RepairWalk | None = None
+    ) -> None:
         await self._refresh_claim(source)
         _, prior_by_identity = await self._prior_pages(source)
         resolved: dict[str, UUID] = {
@@ -1133,6 +1183,7 @@ class SyncDriver:
                     result.snapshot,
                     result.retry_after_seconds,
                     result.indexed,
+                    walk,
                 )
             except asyncio.CancelledError:
                 written.clear()
@@ -1231,6 +1282,7 @@ class SyncDriver:
         snapshot: bool,
         retry_after_seconds: float | None,
         indexed: bool,
+        walk: _RepairWalk | None,
     ) -> tuple[int, datetime | None]:
         """Locks the connection row too: with only the source locked, a concurrent `set_shared`
         could be undone by this run's trailing page stamp."""
@@ -1361,6 +1413,18 @@ class SyncDriver:
                     gone,
                 )
             )
+            if walk is not None and walk.given_up and walk.started_at is not None:
+                await connection.execute(
+                    sa.update(tables.page)
+                    .values(body_missing=False)
+                    .where(
+                        tables.page.c.workspace_id == workspace_id,
+                        tables.page.c.source_uid == source.source_uid,
+                        tables.page.c.body_missing.is_(True),
+                        tables.page.c.source_identity.in_(walk.given_up),
+                        tables.page.c.updated_at < walk.started_at,
+                    )
+                )
             await connection.execute(
                 sa.update(tables.page)
                 .values(subject=subject, updated_at=now)
@@ -1391,6 +1455,14 @@ class SyncDriver:
             await connection.execute(
                 sa.update(tables.source)
                 .values(
+                    repair_cursor=tables.source.c.repair_cursor if walk is None else walk.cursor,
+                    repair_started_at=(
+                        tables.source.c.repair_started_at
+                        if walk is None
+                        else None
+                        if walk.cursor is None
+                        else walk.started_at
+                    ),
                     cursor=cursor,
                     partition_cursor=partition_cursor,
                     next_sync_at=(

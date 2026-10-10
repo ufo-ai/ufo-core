@@ -2722,6 +2722,160 @@ async def test_a_page_whose_body_is_gone_is_refetched_past_the_source_cursor(
     assert cursor == "2026-10-02"
 
 
+@dataclass
+class _CappedSource:
+    """Walks its files in name order two per run under a `skip:` cursor, then follows the newest
+    modification watermark, as a capped connector backfill dissolves to its checkpoint."""
+
+    files: dict[str, tuple[str, str]]
+    config_model: ClassVar[type[SourceConfig]] = SourceConfig
+    cursors: list[str | None] = field(default_factory=list)
+
+    async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult:
+        self.cursors.append(cursor)
+        watermark = max(modified for _, modified in self.files.values())
+        if cursor is not None and not cursor.startswith("skip:"):
+            return SyncResult(
+                pages=tuple(
+                    Page(source_ref=ref, body=body, stream="docs", title=ref)
+                    for ref, (body, modified) in sorted(self.files.items())
+                    if modified > cursor
+                ),
+                next_cursor=watermark,
+            )
+        skip = 0 if cursor is None else int(cursor.removeprefix("skip:"))
+        names = sorted(self.files)
+        pages = tuple(
+            Page(source_ref=ref, body=self.files[ref][0], stream="docs", title=ref)
+            for ref in names[skip : skip + 2]
+        )
+        if skip + 2 < len(names):
+            return SyncResult(pages=pages, next_cursor=f"skip:{skip + 2}", capped=True)
+        return SyncResult(pages=pages, next_cursor=watermark)
+
+
+async def _lose_body(workspace_id: UUID, blob: FilesystemBlobStore, title: str) -> None:
+    with ws(workspace_id):
+        feed = CorePageFeed(blob)
+        first = await feed.pages_changed_since(None, 10)
+        (lost,) = [change for change in first.changes if change.title == title]
+        async with workspace_tx() as connection:
+            body_ref = (
+                await connection.execute(
+                    sa.select(tables.page.c.body_ref).where(tables.page.c.uid == lost.page_id)
+                )
+            ).scalar_one()
+        await blob.delete(body_ref)
+        await feed.pages_changed_since(None, 10)
+        await _make_due()
+
+
+async def test_a_repair_walk_resumes_past_a_capped_chunk_until_it_finds_the_page(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    files = {name: (f"{name} body", f"2026-10-0{index}") for index, name in enumerate("abcde", 1)}
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    source = _CappedSource(dict(files))
+    driver = SyncDriver(
+        backends={SCRIPTED_BACKEND: source},
+        blob=blob,
+        postgres=database_url.startswith("postgresql"),
+    )
+    for _ in range(3):
+        await _sync(driver)
+        with ws(workspace_id):
+            await _make_due()
+    await _lose_body(workspace_id, blob, "e")
+    source.cursors.clear()
+
+    states = []
+    for _ in range(3):
+        await _sync(driver)
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                states.append(
+                    (
+                        await connection.execute(
+                            sa.select(
+                                tables.source.c.cursor,
+                                tables.source.c.repair_cursor,
+                                tables.page.c.tombstone,
+                                tables.page.c.body_missing,
+                            )
+                            .select_from(tables.source)
+                            .join(tables.page, tables.page.c.source_uid == tables.source.c.uid)
+                            .where(tables.source.c.uid == source_id, tables.page.c.title == "e")
+                        )
+                    )
+                    .one()
+                    ._tuple()
+                )
+            await _make_due()
+    with ws(workspace_id):
+        healed = await CorePageFeed(blob).pages_changed_since(None, 10)
+
+    assert source.cursors == [
+        "2026-10-05",
+        None,
+        "2026-10-05",
+        "skip:2",
+        "2026-10-05",
+        "skip:4",
+    ]
+    assert states == [
+        ("2026-10-05", "skip:2", True, True),
+        ("2026-10-05", "skip:4", True, True),
+        ("2026-10-05", None, False, False),
+    ]
+    assert {change.title: change.body for change in healed.changes}["e"] == "e body"
+
+
+async def test_a_page_gone_from_the_provider_stops_the_repair_walk_after_one_pass(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    files = {"plan": ("launch plan", "2026-10-01"), "notes": ("meeting notes", "2026-10-02")}
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    source = _ModifiedSinceSource(dict(files))
+    driver = SyncDriver(
+        backends={SCRIPTED_BACKEND: source},
+        blob=blob,
+        postgres=database_url.startswith("postgresql"),
+    )
+    await _sync(driver)
+    with ws(workspace_id):
+        await _make_due()
+    await _lose_body(workspace_id, blob, "plan")
+    del source.files["plan"]
+    source.cursors.clear()
+
+    for _ in range(3):
+        await _sync(driver)
+        with ws(workspace_id):
+            await _make_due()
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            page = (
+                await connection.execute(
+                    sa.select(tables.page.c.tombstone, tables.page.c.body_missing).where(
+                        tables.page.c.source_uid == source_id, tables.page.c.title == "plan"
+                    )
+                )
+            ).one()
+            repair_cursor = (
+                await connection.execute(
+                    sa.select(tables.source.c.repair_cursor).where(tables.source.c.uid == source_id)
+                )
+            ).scalar_one()
+
+    assert source.cursors == ["2026-10-02", None, "2026-10-02", "2026-10-02"]
+    assert page._tuple() == (True, False)
+    assert repair_cursor is None
+
+
 async def test_page_feed_reads_one_immutable_page_version_during_a_sync(
     db: None, database_url: str, tmp_path: Path
 ) -> None:

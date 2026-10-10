@@ -980,6 +980,8 @@ source = sa.Table(
     sa.Column("connection_id", sa.Uuid, nullable=False),
     sa.Column("cursor", sa.Text, nullable=True),
     sa.Column("partition_cursor", sa.Text, nullable=True),
+    sa.Column("repair_cursor", sa.Text, nullable=True),
+    sa.Column("repair_started_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("synced_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("next_sync_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("consecutive_errors", sa.Integer, nullable=False, server_default="0"),

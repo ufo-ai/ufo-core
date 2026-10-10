@@ -231,6 +231,7 @@ class ConnectorBackend:
                         next_cursor=resume,
                         deletes=tuple(deletes),
                         snapshot=False,
+                        capped=True,
                         dropped=dropped,
                         indexed=stream.indexed,
                     )
