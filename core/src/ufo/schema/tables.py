@@ -980,6 +980,8 @@ source = sa.Table(
     sa.Column("connection_id", sa.Uuid, nullable=False),
     sa.Column("cursor", sa.Text, nullable=True),
     sa.Column("partition_cursor", sa.Text, nullable=True),
+    sa.Column("repair_cursor", sa.Text, nullable=True),
+    sa.Column("repair_started_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("synced_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("next_sync_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("consecutive_errors", sa.Integer, nullable=False, server_default="0"),
@@ -1051,6 +1053,7 @@ page = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("indexed", sa.Boolean, nullable=False, server_default=sa.true()),
+    sa.Column("body_missing", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.CheckConstraint("subject = 'shared' or subject like 'member:%'", name="page_subject"),
     sa.PrimaryKeyConstraint("workspace_id", "uid", name="page_pkey"),
     sa.ForeignKeyConstraint(

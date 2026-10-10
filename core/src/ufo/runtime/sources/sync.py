@@ -53,7 +53,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from ufo.blob import WorkspaceBlobStore
+from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import owner_tx, workspace_tx
 from ufo.harness.o11y import (
@@ -211,12 +211,16 @@ class SyncResult(BaseModel):
     `indexed` is the stream's declaration of whether its pages reach memory, a fact of the run
     rather than of any page: the driver writes it onto every row of the source each run, so a row
     an older image landed under the column default agrees with the declaration one interval
-    later."""
+    later.
+
+    `capped` says the fetch stopped at a run cap short of the end of its walk, so `next_cursor`
+    resumes that walk rather than following later changes."""
 
     pages: tuple[Page, ...]
     next_cursor: str | None = None
     deletes: tuple[str, ...] = ()
     snapshot: bool = False
+    capped: bool = False
     dropped: int = 0
     retry_after_seconds: float | None = Field(default=None, gt=0)
     indexed: bool = True
@@ -457,7 +461,7 @@ def feed_handle(config: BaseModel) -> str:
 
 
 def source_body_ref_matches(body_ref: str, source_id: UUID, page_id: UUID, digest: str) -> bool:
-    """Whether a blob ref names this page's content under one source-sync claim."""
+    """Whether a blob ref names this page's content under one source-sync commit attempt."""
     prefix = f"{SOURCE_BLOB_PREFIX}/{source_id}/{page_id}/"
     suffix = f"/{digest.removeprefix('sha256:')}"
     claim = body_ref.removeprefix(prefix).removesuffix(suffix)
@@ -576,6 +580,8 @@ class ClaimedSource:
     partitioned: bool
     consecutive_errors: int
     claimed_at: datetime
+    repair_cursor: str | None = None
+    repair_started_at: datetime | None = None
 
     @property
     def resume(self) -> str | None:
@@ -589,6 +595,17 @@ class ClaimedSource:
         if self.partitioned:
             return tables.source.c.cursor, cursor
         return cursor, tables.source.c.partition_cursor
+
+
+@dataclass(frozen=True)
+class _RepairWalk:
+    """A `body_missing` repair walk after one chunk: the cursor its next chunk resumes from, or None
+    once done, with the identities flagged before `started_at` that the walk never returned."""
+
+    cursor: str | None
+    started_at: datetime | None
+    given_up: frozenset[str] = frozenset()
+    complete: bool = False
 
 
 def _rescheduled(claimed: ClaimedSource, when: datetime | sa.Case[datetime]) -> sa.Case[datetime]:
@@ -846,8 +863,8 @@ class SyncDriver:
                 account_id=source.account_id,
             )
         try:
-            result = await self._fetch(source)
-            await self._commit(source, result)
+            result, walk = await self._repaired(source, await self._fetch(source, source.resume))
+            await self._commit(source, result, walk)
             return result.retry_after_seconds is not None
         except _SourceClaimLost:
             raise
@@ -907,6 +924,8 @@ class SyncDriver:
                 tables.connection.c.base_url,
                 tables.source.c.cursor,
                 tables.source.c.partition_cursor,
+                tables.source.c.repair_cursor,
+                tables.source.c.repair_started_at,
                 tables.source.c.consecutive_errors,
             )
             .select_from(_source_authority())
@@ -956,11 +975,13 @@ class SyncDriver:
                     ),
                     consecutive_errors=row["consecutive_errors"],
                     claimed_at=now,
+                    repair_cursor=row["repair_cursor"],
+                    repair_started_at=row["repair_started_at"],
                 )
             )
         return tuple(claimed)
 
-    async def _fetch(self, source: ClaimedSource) -> SyncResult:
+    async def _fetch(self, source: ClaimedSource, cursor: str | None) -> SyncResult:
         backend = self.backends.get(source.backend)
         if backend is None:
             raise RuntimeError(f"no source backend for {source.backend!r}")
@@ -978,7 +999,70 @@ class SyncDriver:
             self_user_id=self_user_id,
             parents=partial(self._parent_pages, source),
         )
-        return await backend.fetch(config, source.resume, auth)
+        return await backend.fetch(config, cursor, auth)
+
+    async def _repaired(
+        self, source: ClaimedSource, result: SyncResult
+    ) -> tuple[SyncResult, _RepairWalk]:
+        """A `body_missing` page comes back through a cursorless walk, one chunk per run under the
+        walk's own cursor so the source cursor never moves back; only repaired pages land."""
+        if result.retry_after_seconds is not None:
+            return result, _RepairWalk(source.repair_cursor, source.repair_started_at)
+        if result.snapshot:
+            return result, _RepairWalk(None, None)
+        async with workspace_tx() as connection:
+            missing = set(
+                (
+                    await connection.execute(
+                        sa.select(tables.page.c.source_identity).where(
+                            tables.page.c.workspace_id == source.workspace_id,
+                            tables.page.c.source_uid == source.source_uid,
+                            tables.page.c.body_missing.is_(True),
+                            tables.page.c.source_identity.is_not(None),
+                        )
+                    )
+                ).scalars()
+            )
+        missing -= {page.source_identity or page.source_ref for page in result.pages}
+        if not missing:
+            return result, _RepairWalk(None, None)
+        cursor, started_at = source.repair_cursor, source.repair_started_at
+        if started_at is None:
+            cursor, started_at = None, datetime.now(UTC)
+        try:
+            walked = await self._fetch(source, cursor)
+        except CursorExpired:
+            if cursor is None:
+                raise
+            return result, _RepairWalk(None, None)
+        found: set[str] = set()
+        repairs: list[Page] = []
+        for page in walked.pages:
+            if matched := {page.source_identity, page.source_ref} & missing:
+                found |= {identity for identity in matched if identity is not None}
+                repairs.append(page)
+        repaired = result.model_copy(
+            update={
+                "pages": result.pages + tuple(repairs),
+                "retry_after_seconds": walked.retry_after_seconds,
+            }
+        )
+        unfinished = walked.capped or walked.retry_after_seconds is not None
+        if walked.capped and walked.next_cursor is None:
+            raise ValueError("a capped repair fetch must return a cursor")
+        if unfinished:
+            resume = walked.next_cursor if walked.next_cursor is not None else cursor
+            return repaired, _RepairWalk(resume, started_at)
+        given_up = frozenset(missing - found)
+        if given_up:
+            with suppress(Exception):
+                warn(
+                    "source_sync.repair_gave_up",
+                    source_id=str(source.source_uid),
+                    **_stream_tags(source),
+                    pages=len(given_up),
+                )
+        return repaired, _RepairWalk(None, started_at, given_up, complete=True)
 
     async def _parent_pages(
         self, source: ClaimedSource, stream: str
@@ -1039,7 +1123,9 @@ class SyncDriver:
                 revision=row["revision"],
             )
 
-    async def _commit(self, source: ClaimedSource, result: SyncResult) -> None:
+    async def _commit(
+        self, source: ClaimedSource, result: SyncResult, walk: _RepairWalk | None = None
+    ) -> None:
         await self._refresh_claim(source)
         _, prior_by_identity = await self._prior_pages(source)
         resolved: dict[str, UUID] = {
@@ -1049,6 +1135,9 @@ class SyncDriver:
         changed: list[ChangedPage] = []
         metadata: list[PageBrowse] = []
         written: list[str] = []
+        # A recovered workflow replays under the same claim; keying bodies by the claim let a
+        # failing attempt's cleanup delete the body a concurrent attempt had committed.
+        attempt = uuid4().hex
         try:
             for page in result.pages:
                 source_identity = page.source_identity or page.source_ref
@@ -1072,7 +1161,7 @@ class SyncDriver:
                 )
                 if existing is None or existing[:2] != (page.digest, False):
                     body_ref = (
-                        f"{SOURCE_BLOB_PREFIX}/{source.source_uid}/{page_id}/{source.claim}/"
+                        f"{SOURCE_BLOB_PREFIX}/{source.source_uid}/{page_id}/{attempt}/"
                         f"{page.digest.removeprefix('sha256:')}"
                     )
                     written.append(body_ref)
@@ -1103,6 +1192,7 @@ class SyncDriver:
                     result.snapshot,
                     result.retry_after_seconds,
                     result.indexed,
+                    walk,
                 )
             except asyncio.CancelledError:
                 written.clear()
@@ -1201,6 +1291,7 @@ class SyncDriver:
         snapshot: bool,
         retry_after_seconds: float | None,
         indexed: bool,
+        walk: _RepairWalk | None,
     ) -> tuple[int, datetime | None]:
         """Locks the connection row too: with only the source locked, a concurrent `set_shared`
         could be undone by this run's trailing page stamp."""
@@ -1248,6 +1339,7 @@ class SyncDriver:
                         parent_fields=changed_page.browse.parent_fields,
                         subject=subject,
                         tombstone=False,
+                        body_missing=False,
                         updated_at=now,
                     )
                     .where(
@@ -1317,6 +1409,31 @@ class SyncDriver:
                     )
                 )
                 tombstoned += swept.rowcount
+            gone: sa.ColumnElement[bool] = tables.page.c.uid.in_(deleted)
+            if snapshot:
+                gone = sa.or_(gone, tables.page.c.uid.not_in(fetched))
+            await connection.execute(
+                sa.update(tables.page)
+                .values(body_missing=False)
+                .where(
+                    tables.page.c.workspace_id == workspace_id,
+                    tables.page.c.source_uid == source.source_uid,
+                    tables.page.c.body_missing.is_(True),
+                    gone,
+                )
+            )
+            if walk is not None and walk.given_up and walk.started_at is not None:
+                await connection.execute(
+                    sa.update(tables.page)
+                    .values(body_missing=False)
+                    .where(
+                        tables.page.c.workspace_id == workspace_id,
+                        tables.page.c.source_uid == source.source_uid,
+                        tables.page.c.body_missing.is_(True),
+                        tables.page.c.source_identity.in_(walk.given_up),
+                        tables.page.c.updated_at < walk.started_at,
+                    )
+                )
             await connection.execute(
                 sa.update(tables.page)
                 .values(subject=subject, updated_at=now)
@@ -1347,6 +1464,14 @@ class SyncDriver:
             await connection.execute(
                 sa.update(tables.source)
                 .values(
+                    repair_cursor=tables.source.c.repair_cursor if walk is None else walk.cursor,
+                    repair_started_at=(
+                        tables.source.c.repair_started_at
+                        if walk is None
+                        else None
+                        if walk.complete
+                        else walk.started_at
+                    ),
                     cursor=cursor,
                     partition_cursor=partition_cursor,
                     next_sync_at=(
@@ -1660,7 +1785,9 @@ class CorePageFeed:
     """The core `PageFeed`: reads the bound workspace's `page` rows in `(revision, uid)` order after
     the cursor and inlines each non-tombstoned body from the blob store, bounding every batch to
     PAGE_FEED_BATCH_MAX so the inlined bodies stay a small payload. A tombstoned page carries an
-    empty body; its reader drops the page's chunks and mirror on that signal."""
+    empty body; its reader drops the page's chunks and mirror on that signal. A page whose body
+    blob is gone is tombstoned in place, marked `body_missing`, and read as a tombstone, so it holds
+    no cursor and the source's next sync refetches it whatever that source's cursor says."""
 
     blob: WorkspaceBlobStore
 
@@ -1701,7 +1828,31 @@ class CorePageFeed:
             rows = (await connection.execute(query)).mappings().all()
         changes: list[PageChange] = []
         for row in rows:
-            body = "" if row["tombstone"] else (await self.blob.get(row["body_ref"])).decode()
+            tombstone = bool(row["tombstone"])
+            body = ""
+            if not tombstone:
+                try:
+                    body = (await self.blob.get(row["body_ref"])).decode()
+                except BlobNotFound:
+                    warn(
+                        "page_feed.body_missing",
+                        page_id=str(row["uid"]),
+                        source_id=str(row["source_uid"]),
+                        body_ref=row["body_ref"],
+                        revision=row["revision"],
+                    )
+                    async with workspace_tx() as connection:
+                        await connection.execute(
+                            sa.update(tables.page)
+                            .values(tombstone=True, body_missing=True, updated_at=datetime.now(UTC))
+                            .where(
+                                tables.page.c.workspace_id == ws_current().workspace_id,
+                                tables.page.c.uid == row["uid"],
+                                tables.page.c.body_ref == row["body_ref"],
+                                tables.page.c.tombstone.is_(False),
+                            )
+                        )
+                    tombstone = True
             record_as_of = row["record_updated_at"] or row["record_created_at"]
             changes.append(
                 PageChange(
@@ -1713,7 +1864,7 @@ class CorePageFeed:
                     body=body,
                     digest=row["digest"],
                     revision=row["revision"],
-                    tombstone=bool(row["tombstone"]),
+                    tombstone=tombstone,
                     indexed=bool(row["indexed"]),
                     created_at=row["created_at"],
                     as_of=(

@@ -2609,6 +2609,357 @@ async def test_a_cancelled_commit_keeps_the_bodies_its_rows_name(
     assert await blob.get(body_ref) == b"launch plan"
 
 
+async def test_a_failed_attempt_under_a_replayed_claim_keeps_the_body_another_committed(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    driver = SyncDriver(
+        backends={SCRIPTED_BACKEND: _ScriptedSource([])},
+        blob=blob,
+        postgres=database_url.startswith("postgresql"),
+    )
+    old = Page(source_ref="docs/plan", body="old plan", stream="docs", title="Plan")
+    new = SyncResult(pages=(old.model_copy(update={"body": "new plan"}),))
+    write = SyncDriver._write
+
+    with ws(workspace_id):
+        (claimed,) = await driver._claim_due("replayed")
+        await driver._commit(claimed, SyncResult(pages=(old,)))
+        await _make_due()
+        (claimed,) = await driver._claim_due("replayed")
+
+        async def overtaken(syncing: SyncDriver, *args: object, **kwargs: object) -> None:
+            monkeypatch.setattr(SyncDriver, "_write", write)
+            await syncing._commit(claimed, new)
+            raise sync._SourceClaimLost(str(claimed.source_uid))
+
+        monkeypatch.setattr(SyncDriver, "_write", overtaken)
+        with pytest.raises(sync._SourceClaimLost):
+            await driver._commit(claimed, new)
+        async with workspace_tx() as connection:
+            body_ref = (
+                await connection.execute(
+                    sa.select(tables.page.c.body_ref).where(tables.page.c.source_uid == source_id)
+                )
+            ).scalar_one()
+
+    assert await blob.get(body_ref) == b"new plan"
+
+
+@dataclass
+class _ModifiedSinceSource:
+    files: dict[str, tuple[str, str]]
+    config_model: ClassVar[type[SourceConfig]] = SourceConfig
+    cursors: list[str | None] = field(default_factory=list)
+
+    async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult:
+        self.cursors.append(cursor)
+        pages = tuple(
+            Page(source_ref=ref, body=body, stream="docs", title=ref)
+            for ref, (body, modified) in self.files.items()
+            if cursor is None or modified >= cursor
+        )
+        return SyncResult(
+            pages=pages, next_cursor=max(modified for _, modified in self.files.values())
+        )
+
+
+async def test_a_page_whose_body_is_gone_is_refetched_past_the_source_cursor(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    files = {"plan": ("launch plan", "2026-10-01"), "notes": ("meeting notes", "2026-10-02")}
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    postgres = database_url.startswith("postgresql")
+    await _sync(
+        SyncDriver(
+            backends={SCRIPTED_BACKEND: _ModifiedSinceSource(dict(files))},
+            blob=blob,
+            postgres=postgres,
+        )
+    )
+    with ws(workspace_id):
+        feed = CorePageFeed(blob)
+        first = await feed.pages_changed_since(None, 10)
+        (lost,) = [change for change in first.changes if change.title == "plan"]
+        async with workspace_tx() as connection:
+            body_ref = (
+                await connection.execute(
+                    sa.select(tables.page.c.body_ref).where(tables.page.c.uid == lost.page_id)
+                )
+            ).scalar_one()
+        await blob.delete(body_ref)
+        replayed = await feed.pages_changed_since(None, 10)
+        await _make_due()
+
+    restarted = _ModifiedSinceSource(dict(files))
+    driver = SyncDriver(backends={SCRIPTED_BACKEND: restarted}, blob=blob, postgres=postgres)
+    await _sync(driver)
+    with ws(workspace_id):
+        healed = await CorePageFeed(blob).pages_changed_since(replayed.next_cursor, 10)
+        await _make_due()
+    await _sync(driver)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            cursor = (
+                await connection.execute(
+                    sa.select(tables.source.c.cursor).where(tables.source.c.uid == source_id)
+                )
+            ).scalar_one()
+
+    assert replayed.next_cursor == first.next_cursor
+    assert {change.title: (change.tombstone, change.body) for change in replayed.changes} == {
+        "plan": (True, ""),
+        "notes": (False, "meeting notes"),
+    }
+    assert [(change.title, change.tombstone, change.body) for change in healed.changes] == [
+        ("plan", False, "launch plan")
+    ]
+    assert restarted.cursors == ["2026-10-02", None, "2026-10-02"]
+    assert cursor == "2026-10-02"
+
+
+@dataclass
+class _CappedSource:
+    """Walks its files in name order two per run under a `skip:` cursor, then follows the newest
+    modification watermark, as a capped connector backfill dissolves to its checkpoint."""
+
+    files: dict[str, tuple[str, str]]
+    config_model: ClassVar[type[SourceConfig]] = SourceConfig
+    cursors: list[str | None] = field(default_factory=list)
+
+    async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult:
+        self.cursors.append(cursor)
+        watermark = max(modified for _, modified in self.files.values())
+        if cursor is not None and not cursor.startswith("skip:"):
+            return SyncResult(
+                pages=tuple(
+                    Page(source_ref=ref, body=body, stream="docs", title=ref)
+                    for ref, (body, modified) in sorted(self.files.items())
+                    if modified > cursor
+                ),
+                next_cursor=watermark,
+            )
+        skip = 0 if cursor is None else int(cursor.removeprefix("skip:"))
+        names = sorted(self.files)
+        pages = tuple(
+            Page(source_ref=ref, body=self.files[ref][0], stream="docs", title=ref)
+            for ref in names[skip : skip + 2]
+        )
+        if skip + 2 < len(names):
+            return SyncResult(pages=pages, next_cursor=f"skip:{skip + 2}", capped=True)
+        return SyncResult(pages=pages, next_cursor=watermark)
+
+
+async def _lose_body(workspace_id: UUID, blob: FilesystemBlobStore, title: str) -> None:
+    with ws(workspace_id):
+        feed = CorePageFeed(blob)
+        first = await feed.pages_changed_since(None, 10)
+        (lost,) = [change for change in first.changes if change.title == title]
+        async with workspace_tx() as connection:
+            body_ref = (
+                await connection.execute(
+                    sa.select(tables.page.c.body_ref).where(tables.page.c.uid == lost.page_id)
+                )
+            ).scalar_one()
+        await blob.delete(body_ref)
+        await feed.pages_changed_since(None, 10)
+        await _make_due()
+
+
+async def test_a_repair_walk_resumes_past_a_capped_chunk_until_it_finds_the_page(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    files = {name: (f"{name} body", f"2026-10-0{index}") for index, name in enumerate("abcde", 1)}
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    source = _CappedSource(dict(files))
+    driver = SyncDriver(
+        backends={SCRIPTED_BACKEND: source},
+        blob=blob,
+        postgres=database_url.startswith("postgresql"),
+    )
+    for _ in range(3):
+        await _sync(driver)
+        with ws(workspace_id):
+            await _make_due()
+    await _lose_body(workspace_id, blob, "e")
+    source.cursors.clear()
+
+    states = []
+    for _ in range(3):
+        await _sync(driver)
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                states.append(
+                    (
+                        await connection.execute(
+                            sa.select(
+                                tables.source.c.cursor,
+                                tables.source.c.repair_cursor,
+                                tables.page.c.tombstone,
+                                tables.page.c.body_missing,
+                            )
+                            .select_from(tables.source)
+                            .join(tables.page, tables.page.c.source_uid == tables.source.c.uid)
+                            .where(tables.source.c.uid == source_id, tables.page.c.title == "e")
+                        )
+                    )
+                    .one()
+                    ._tuple()
+                )
+            await _make_due()
+    with ws(workspace_id):
+        healed = await CorePageFeed(blob).pages_changed_since(None, 10)
+
+    assert source.cursors == [
+        "2026-10-05",
+        None,
+        "2026-10-05",
+        "skip:2",
+        "2026-10-05",
+        "skip:4",
+    ]
+    assert states == [
+        ("2026-10-05", "skip:2", True, True),
+        ("2026-10-05", "skip:4", True, True),
+        ("2026-10-05", None, False, False),
+    ]
+    assert {change.title: change.body for change in healed.changes}["e"] == "e body"
+
+
+async def test_a_page_gone_from_the_provider_stops_the_repair_walk_after_one_pass(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    files = {"plan": ("launch plan", "2026-10-01"), "notes": ("meeting notes", "2026-10-02")}
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    source = _ModifiedSinceSource(dict(files))
+    driver = SyncDriver(
+        backends={SCRIPTED_BACKEND: source},
+        blob=blob,
+        postgres=database_url.startswith("postgresql"),
+    )
+    await _sync(driver)
+    with ws(workspace_id):
+        await _make_due()
+    await _lose_body(workspace_id, blob, "plan")
+    del source.files["plan"]
+    source.cursors.clear()
+
+    for _ in range(3):
+        await _sync(driver)
+        with ws(workspace_id):
+            await _make_due()
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            page = (
+                await connection.execute(
+                    sa.select(tables.page.c.tombstone, tables.page.c.body_missing).where(
+                        tables.page.c.source_uid == source_id, tables.page.c.title == "plan"
+                    )
+                )
+            ).one()
+            repair_cursor = (
+                await connection.execute(
+                    sa.select(tables.source.c.repair_cursor).where(tables.source.c.uid == source_id)
+                )
+            ).scalar_one()
+
+    assert source.cursors == ["2026-10-02", None, "2026-10-02", "2026-10-02"]
+    assert page._tuple() == (True, False)
+    assert repair_cursor is None
+
+
+@pytest.mark.parametrize("repair_cursor", [None, "repair-tail"])
+async def test_a_rate_limit_preserves_the_repair_walk(
+    db: None, database_url: str, tmp_path: Path, repair_cursor: str | None
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    page = Page(source_ref="plan", body="launch plan", stream="docs", title="plan")
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    driver, backend = _scripted_driver(
+        [
+            SyncResult(pages=(page,), next_cursor="watermark"),
+            SyncResult(pages=(), next_cursor="watermark"),
+            SyncResult(pages=(), next_cursor=repair_cursor, retry_after_seconds=300),
+            SyncResult(pages=(), next_cursor="watermark"),
+            SyncResult(pages=(page,), next_cursor="watermark"),
+        ],
+        database_url,
+        tmp_path / "blobs",
+    )
+    await _sync(driver)
+    await _lose_body(workspace_id, blob, "plan")
+    before = datetime.now(UTC)
+    await _sync(driver)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            state = (
+                await connection.execute(
+                    sa.select(
+                        tables.source.c.cursor,
+                        tables.source.c.repair_cursor,
+                        tables.source.c.repair_started_at,
+                        tables.source.c.next_sync_at,
+                        tables.page.c.body_missing,
+                    )
+                    .select_from(tables.source)
+                    .join(tables.page, tables.page.c.source_uid == tables.source.c.uid)
+                    .where(tables.source.c.uid == source_id)
+                )
+            ).one()
+        await _make_due()
+    assert state.body_missing is True
+    assert state.cursor == "watermark"
+    assert state.repair_cursor == repair_cursor
+    assert state.repair_started_at is not None
+    assert state.next_sync_at.replace(tzinfo=UTC) >= before + timedelta(seconds=300)
+    await _sync(driver)
+    with ws(workspace_id):
+        (healed,) = (await CorePageFeed(blob).pages_changed_since(None, 10)).changes
+    assert (healed.tombstone, healed.body) == (False, "launch plan")
+    assert backend.cursors == [None, "watermark", None, "watermark", repair_cursor]
+
+
+async def test_a_capped_repair_without_a_cursor_keeps_the_missing_page_pending(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    page = Page(source_ref="plan", body="launch plan", stream="docs", title="plan")
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    driver, _ = _scripted_driver(
+        [
+            SyncResult(pages=(page,), next_cursor="watermark"),
+            SyncResult(pages=(), next_cursor="watermark"),
+            SyncResult(pages=(), capped=True),
+        ],
+        database_url,
+        tmp_path / "blobs",
+    )
+    await _sync(driver)
+    await _lose_body(workspace_id, blob, "plan")
+    await _sync(driver)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            state = (
+                await connection.execute(
+                    sa.select(tables.source.c.consecutive_errors, tables.page.c.body_missing)
+                    .select_from(tables.source)
+                    .join(tables.page, tables.page.c.source_uid == tables.source.c.uid)
+                    .where(tables.source.c.uid == source_id)
+                )
+            ).one()
+    assert state._tuple() == (1, True)
+
+
 async def test_page_feed_reads_one_immutable_page_version_during_a_sync(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
