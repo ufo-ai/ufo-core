@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -27,6 +28,7 @@ from ufo.runtime.billing.accounting import (
     MEMBER_SCOPE,
     SANDBOX_TOKENS_ATTEMPT,
     SANDBOX_TOKENS_DIMENSION,
+    SERVICE_OF_DIMENSION,
     TOKENS_DIMENSION,
     UNGATED_LEDGER,
     JobDayRollup,
@@ -52,6 +54,7 @@ from ufo.runtime.workspace import (
 )
 from ufo.schema import tables
 from ufo.schema.records import Usage, ledger_id_for
+from ufo.sdk.accounting import ServiceTotal, SpendTotals
 
 FULL_USAGE = Usage(
     input_tokens=1000,
@@ -719,6 +722,59 @@ async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
     ]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_spend_rollup_totals_each_service_over_the_dimensions_it_meters(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_egress_request(connection, workspace_id, turn_id)
+        await UNGATED_LEDGER.record_turn_usage(
+            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+        )
+        await UNGATED_LEDGER.record_image_usage(
+            connection, workspace_id, turn_id, "openai/gpt-image-2", 1, 130_000
+        )
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, None)
+    assert report.by_service == (
+        ServiceTotal("models", 96_500 + 130_000),
+        ServiceTotal("proxy", 0),
+    )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_spend_rollup_lists_a_costlier_service_first(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await UNGATED_LEDGER.record_turn_usage(
+            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+        )
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                dimension="egress",
+                amount=1,
+                priced_micro_usd=100_000,
+                model="",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, None)
+    assert report.by_service == (ServiceTotal("proxy", 100_000), ServiceTotal("models", 96_500))
+
+
+def test_every_ledger_dimension_belongs_to_a_service() -> None:
+    check = next(
+        c
+        for c in tables.ledger.constraints
+        if isinstance(c, sa.CheckConstraint) and c.name == "ledger_dimension"
+    )
+    assert set(SERVICE_OF_DIMENSION) == set(re.findall(r"'([a-z_]+)'", str(check.sqltext)))
+
+
 async def _spawn_child_turn(
     connection: AsyncConnection, workspace_id: UUID, parent_turn_id: UUID
 ) -> UUID:
@@ -1011,6 +1067,45 @@ async def test_usage_details_report_history_models_execution_and_all_time(db: No
 
 
 @pytest.mark.parametrize("database_url", ["sqlite", "postgres"], indirect=True)
+async def test_spend_totals_answer_what_the_rollup_reports_for_the_workspace(db: None) -> None:
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await UNGATED_LEDGER.record_turn_usage(
+            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+        )
+        child_turn = await _spawn_child_turn(connection, workspace_id, turn_id)
+        await UNGATED_LEDGER.record_turn_usage(
+            connection, workspace_id, child_turn, "gpt-5.6-terra", OPENAI_FULL_USAGE
+        )
+        await UNGATED_LEDGER.record_image_usage(
+            connection, workspace_id, turn_id, "openai/gpt-image-2", 1, 130_000
+        )
+        await record_egress_request(connection, workspace_id, turn_id)
+        await _seed_job_spend(
+            connection, workspace_id, now, (timedelta(minutes=90), timedelta(days=2))
+        )
+    async with workspace_tx() as connection:
+        folded = await JobDayRollup(workspace_id).roll(connection, now)
+    assert folded
+    for window_seconds in (3600, None):
+        async with workspace_tx() as connection:
+            totals = await SpendRollup(workspace_id).read_totals(connection, window_seconds)
+            report = await SpendRollup(workspace_id).read(connection, window_seconds)
+        assert totals == SpendTotals(
+            window_seconds,
+            report.total_micro_usd,
+            report.by_dimension,
+            report.by_service,
+            report.usage,
+        )
+        assert [(row.label, row.tokens) for row in totals.usage.by_execution] == [
+            ("", 10_000),
+            ("research", 10_000),
+        ]
+
+
+@pytest.mark.parametrize("database_url", ["sqlite", "postgres"], indirect=True)
 async def test_spend_rollup_reads_each_report_in_a_bounded_statement_count(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -1050,11 +1145,20 @@ async def test_spend_rollup_reads_each_report_in_a_bounded_statement_count(db: N
             statements.clear()
             all_time = await SpendRollup(workspace_id).read(connection, None)
             all_time_statements = len(statements)
+            statements.clear()
+            totals = await SpendRollup(workspace_id).read_totals(connection, 3600)
+            totals_statements = len(statements)
+            statements.clear()
+            await SpendRollup(workspace_id).read_totals(connection, None)
+            all_time_totals_statements = len(statements)
         finally:
             sa.event.remove(connection.sync_connection, "before_cursor_execute", record)
     assert workspace_statements == 6
     assert member_statements == 3
     assert all_time_statements == 5
+    assert totals_statements == 3
+    assert all_time_totals_statements == 2
+    assert totals.usage == workspace.usage
     workspace_rollup = next(query for query in workspace_queries if " AS period" in query)
     workspace_rollup = " ".join(workspace_rollup.split())
     workspace_scope = workspace_rollup.rsplit(" WHERE ", 1)[1].split(" GROUP BY ", 1)[0]

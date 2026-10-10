@@ -35,6 +35,7 @@ jobs:
             wheel:
               - 'core/**'
               - 'extensions/**'
+              - 'examples/**'
               - 'packs/**'
               - 'sandbox/**'
               - 'testsupport/**'
@@ -237,4 +238,3 @@ jobs:
         run: test "${{ needs.wheel.result }}" = "${{ needs.triage.outputs.wheel == 'true' && 'success' || 'skipped' }}"
       - if: ${{ !contains(needs.*.result, 'cancelled') }}
         run: test "${{ needs.client.result }}" = "${{ needs.triage.outputs.client == 'true' && 'success' || 'skipped' }}"
-

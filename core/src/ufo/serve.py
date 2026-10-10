@@ -25,7 +25,7 @@ from dbos import DBOS, DBOSClient
 from fastapi import FastAPI, WebSocket
 from openfeature.provider import FeatureProvider
 from starlette.requests import Request
-from starlette.responses import RedirectResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -259,9 +259,10 @@ class Fleet:
 
     The queue sets partition the application registry: turns and express carry member work and
     jobs carries background executions. Recurring ticks use DBOS's internal queue, which every
-    executor drains. `WHOLE_FLEET` claims every application queue for a deploy that is one process
-    (a node, a stack, an eval run). Every fleet names its queues in full — a queue no fleet claims
-    is one nothing would ever dequeue, which `test_fleet.py` refuses."""
+    executor drains. A fleet with no queues serves routes and recurring job ticks only.
+    `WHOLE_FLEET` claims every application queue for a deploy that is one process (a node, a
+    stack, an eval run). Every fleet names its queues in full — a queue no fleet claims is one
+    nothing would ever dequeue, which `test_fleet.py` refuses."""
 
     name: str
     queues: tuple[str, ...]
@@ -279,8 +280,9 @@ TURNS_FLEET = Fleet(
     surfaces=True,
 )
 JOBS_FLEET = Fleet(name="jobs", queues=(JOB_QUEUE_NAME,), surfaces=False)
+API_FLEET = Fleet(name="api", queues=(), surfaces=False)
 WHOLE_FLEET = Fleet(name="all", queues=TURNS_FLEET.queues + JOBS_FLEET.queues, surfaces=True)
-FLEETS = {fleet.name: fleet for fleet in (WHOLE_FLEET, TURNS_FLEET, JOBS_FLEET)}
+FLEETS = {fleet.name: fleet for fleet in (WHOLE_FLEET, TURNS_FLEET, JOBS_FLEET, API_FLEET)}
 
 
 def _payload_digest(payload: object) -> str:
@@ -1121,7 +1123,15 @@ def _mount_ext_routes(
             ) -> Response:
                 identified = identify(request)
                 if identified is None:
-                    return Response("unauthorized", status_code=401)
+                    return JSONResponse(
+                        {
+                            "error": {
+                                "code": "unauthorized",
+                                "message": "The request names no workspace.",
+                            }
+                        },
+                        status_code=401,
+                    )
                 with ws(identified):
                     return await handler(extension_context, request)
 

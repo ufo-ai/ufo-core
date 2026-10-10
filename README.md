@@ -169,6 +169,9 @@ acme = "ufo_ext_acme.manifest:manifest"
 `extensions/sample` exercises every manifest point. `ufoctl ext search | install | remove` manages
 installed extensions. `spec.md` §Extension system lists each point's contract.
 
+The [Screenpipe example](examples/screenpipe/README.md) connects local recording search through
+the existing MCP extension.
+
 ## Deploy it
 
 `ufoctl bundle` freezes a deploy — image recipe, client, pinned config, lockfile — into one

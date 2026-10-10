@@ -535,7 +535,10 @@ def new_migration(slug: str) -> None:
     type=click.Choice(sorted(FLEETS)),
     default=WHOLE_FLEET.name,
     show_default=True,
-    help="The durable work this process claims: turns and their surfaces, background jobs, or all.",
+    help=(
+        "The durable work this process claims: turns and their surfaces, background jobs, routes "
+        "and recurring job ticks (api), or all."
+    ),
 )
 def serve(fleet: str) -> None:
     """Run surfaces, workers, jobs, and the egress-control RPC the Rust proxy calls."""
@@ -853,9 +856,9 @@ SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 @click.option("--window-seconds", type=int, default=SPEND_WINDOW_DEFAULT_SECONDS, show_default=True)
 @WORKSPACE_ID_OPTION
 def spend(window_seconds: int, workspace_id: str) -> None:
-    """Sum the ledger over a window: the workspace total, then a per-dimension, per-member,
-    per-agent, and per-price-digest breakdown — the rollups that match the ledger, the last
-    attributing each burn to the rate version that priced it."""
+    """Sum the ledger over a window: the workspace total, then a per-dimension, per-service,
+    per-member, per-agent, and per-price-digest breakdown — the rollups that match the ledger, the
+    last attributing each burn to the rate version that priced it."""
     config = load_config()
     report = asyncio.run(_read_spend(config, workspace_id, window_seconds))
     total = report.total_micro_usd / MICRO_USD_PER_USD
@@ -863,6 +866,9 @@ def spend(window_seconds: int, workspace_id: str) -> None:
     for dim in report.by_dimension:
         priced = dim.priced_micro_usd / MICRO_USD_PER_USD
         click.echo(f"  {dim.dimension:<10}{dim.amount:>14,}  ${priced:,.6f}")
+    click.echo("by service:")
+    for service in report.by_service:
+        click.echo(f"  {service.service:<32}${service.priced_micro_usd / MICRO_USD_PER_USD:,.6f}")
     click.echo("by member:")
     for member in report.by_member:
         click.echo(f"  {member.label:<32}${member.priced_micro_usd / MICRO_USD_PER_USD:,.6f}")

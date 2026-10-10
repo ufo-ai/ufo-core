@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import ANY
 from uuid import UUID, uuid4
 
 import pytest
@@ -52,7 +53,15 @@ from ufo.harness.sandbox.session import (
 from ufo.harness.sandbox.terminal import TerminalGone
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
-from ufo.runtime.billing.accounting import UNGATED_LEDGER, Ledger, OffTurnSpendRefused
+from ufo.runtime.billing.accounting import (
+    UNGATED_LEDGER,
+    Ledger,
+    OffTurnSpendRefused,
+    ServiceTotal,
+    SpendRollup,
+    SpendTotals,
+    record_probe_egress_request,
+)
 from ufo.runtime.billing.spend import NO_SPEND_GATES, PARK, GateDeploy, SpendDecision, SpendGates
 from ufo.runtime.ext.context import (
     CORE_EXTENSION,
@@ -228,7 +237,7 @@ def _exported_metrics(
     }
 
 
-async def _turn(model: ModelClient, job: str = JOB) -> Message:
+async def _turn(model: ModelClient, job: str = JOB) -> tuple[Message, UUID]:
     context = context_for(
         "core",
         frozenset(),
@@ -238,8 +247,9 @@ async def _turn(model: ModelClient, job: str = JOB) -> Message:
         ledger=UNGATED_LEDGER,
     )
     assert context.model is not None
-    with ws(await _workspace()):
-        return await context.model.turn(
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        message = await context.model.turn(
             ModelRequest(
                 model="auto",
                 system="be terse",
@@ -248,6 +258,7 @@ async def _turn(model: ModelClient, job: str = JOB) -> Message:
                 conversation_cache_ttl="5m",
             )
         )
+    return message, workspace_id
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -256,7 +267,7 @@ async def test_model_turn_opens_a_tool_calling_message_with_its_reasoning_blocks
 ) -> None:
     """The seam re-sends this message when a handler feeds the tool result back, so it carries the
     round's reasoning ahead of the tool calls the signature authenticates."""
-    assert (await _turn(ReasoningModel(with_tool=True))).content == (
+    assert (await _turn(ReasoningModel(with_tool=True)))[0].content == (
         RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
         ThinkingBlock(thinking="", signature="sig-1"),
         ReasoningItemBlock(id="rs_1", encrypted_content="Z3B0LWVuY3J5cHRlZA"),
@@ -382,7 +393,8 @@ async def test_a_background_call_meters_its_tokens_and_latency_under_its_job(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     reader = _metric_capture(monkeypatch)
-    assert (await _turn(CachingModel())).content == "summarized"
+    message, workspace_id = await _turn(CachingModel())
+    assert message.content == "summarized"
     points = _exported_metrics(reader)
     assert {
         (point.attributes["kind"], point.value) for point in points["ufo.model_round_tokens_total"]
@@ -404,6 +416,7 @@ async def test_a_background_call_meters_its_tokens_and_latency_under_its_job(
                 "provider": PROVIDER_ANTHROPIC,
                 "profile": BACKGROUND_PROFILE,
                 "job": JOB,
+                "workspace_id": str(workspace_id),
             },
         )
     ]
@@ -425,8 +438,12 @@ async def test_a_failed_background_call_meters_its_latency_with_the_error_class(
             "profile": BACKGROUND_PROFILE,
             "job": JOB,
             "error_class": "TimeoutError",
+            "workspace_id": ANY,
         }
     ]
+    assert all(
+        len(point.attributes["workspace_id"]) == 36 for point in points["ufo.model_round_ms"]
+    )
     assert "ufo.model_round_tokens_total" not in points
 
 
@@ -1359,3 +1376,39 @@ async def test_a_context_wired_with_no_spend_refuses_to_read_or_meter_it(db: Non
             model_job=JOB,
             ledger=UNGATED_LEDGER,
         )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_spend_rollup_reads_the_bound_workspaces_totals_naming_no_member_or_agent(
+    db: None,
+) -> None:
+    workspace_id, neighbor = await _workspace(), await _workspace()
+    member_id = await _member(workspace_id)
+    turn_id = await _seed_turn(workspace_id, await _conversation(workspace_id), 1, "done", DONE)
+    context = context_for("core", frozenset(), ledger=UNGATED_LEDGER)
+    price = ModelPrice(42_000, 0, 0, 0, 0)
+    with ws(neighbor):
+        await context.meter_tokens(uuid4(), MODEL, Usage(input_tokens=1_000), price, byok=False)
+    with ws(workspace_id):
+        await context.meter_tokens(uuid4(), MODEL, Usage(input_tokens=2_000), price, byok=False)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .where(tables.turn.c.id == turn_id)
+                .values(speaker_member_id=member_id)
+            )
+            await UNGATED_LEDGER.record_turn_usage(
+                connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1_000)
+            )
+            await record_probe_egress_request(connection, workspace_id)
+        totals = await context.spend_rollup(None)
+        async with workspace_tx() as connection:
+            report = await SpendRollup(workspace_id).read(connection, None)
+    named = {total.subject_id for total in (*report.by_member, *report.by_agent)} - {None}
+    assert member_id in named
+    assert len(named) == 2
+    assert not any(str(subject) in repr(totals) for subject in named)
+    assert totals == SpendTotals(
+        None, report.total_micro_usd, report.by_dimension, report.by_service, report.usage
+    )
+    assert totals.by_service == (ServiceTotal("models", 5_084), ServiceTotal("proxy", 0))

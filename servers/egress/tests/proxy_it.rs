@@ -561,8 +561,6 @@ async fn a_scoped_host_tunnels_and_meters_one_egress_request() {
     sock.read_exact(&mut echoed).await.unwrap();
     assert_eq!(&echoed, b"ping", "tunnel did not relay opaquely");
 
-    // The wire posts the `sandbox_egress_total{host, dimension}` counter and the egress ledger
-    // charge — the counter carrying host and dimension, the charge workspace and turn.
     let records = meter_records(&proxy.control).await;
     let metric = records
         .iter()
@@ -570,6 +568,10 @@ async fn a_scoped_host_tunnels_and_meters_one_egress_request() {
         .unwrap_or_else(|| panic!("no metric record among {records:?}"));
     assert_eq!(metric["host"], "127.0.0.1");
     assert_eq!(metric["dimension"], "requests");
+    assert_eq!(
+        metric["workspace_id"],
+        Uuid::from_u128(WORKSPACE).to_string()
+    );
     let egress = records
         .iter()
         .find(|r| r["kind"] == "egress")

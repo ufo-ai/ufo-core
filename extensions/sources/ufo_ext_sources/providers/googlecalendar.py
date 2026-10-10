@@ -56,6 +56,7 @@ class GoogleCalendarConnector(RestConnector):
     name = "googlecalendar"
     base_url = "https://www.googleapis.com"
     streams_list = GOOGLE_CALENDAR_STREAMS
+    rate_limited = staticmethod(google.rate_limited)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, run: Run

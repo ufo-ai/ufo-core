@@ -11,7 +11,8 @@ whose files left the tree: a git delete is a soft delete. The archive spools to 
 and the markdown is streamed out of it, so the process never holds the tarball in memory — what it
 holds is the markdown itself, bounded by `max_bytes` compressed on disk and decompressed in the
 extract. The `github_token` credential slot opens private repositories; without it the backend
-reads public ones."""
+reads public ones. GitHub answers a private repository the token cannot read with `404`, the same
+as a missing one, so a `401` or `404` head is a refusal the member ends, and the row parks."""
 
 import asyncio
 import json
@@ -26,7 +27,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.context import CredentialAccess
-from ufo.sdk.sources import SourceAuth, StreamFault, SyncResult
+from ufo.sdk.sources import SourceAuth, StreamFault, StreamSkipped, SyncResult
 from ufo_ext_gbrain.pages import decoded, is_markdown_path, markdown_page
 
 GIT_BACKEND = "gbrain_git"
@@ -38,6 +39,7 @@ TARBALL_MAX_BYTES = 2 * 1024 * 1024 * 1024
 TARBALL_CHUNK_BYTES = 4 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 60.0
 EMPTY_REPOSITORY_STATUS = 409
+UNREACHABLE_REPOSITORY_STATUSES = frozenset({httpx.codes.UNAUTHORIZED, httpx.codes.NOT_FOUND})
 UNAUTHENTICATED_PROBE_SECONDS = 15 * 60
 
 
@@ -147,6 +149,10 @@ class GbrainGitSource:
             return None
         if response.status_code == EMPTY_REPOSITORY_STATUS:
             return _Cursor(sha="")
+        if response.status_code in UNREACHABLE_REPOSITORY_STATUSES:
+            raise StreamSkipped(
+                f"github answered {response.status_code} for {config.repo}@{ref} head"
+            )
         _refuse_client_error(response, f"{config.repo}@{ref} head")
         return _Cursor(sha=response.text.strip(), etag=response.headers.get("etag"))
 

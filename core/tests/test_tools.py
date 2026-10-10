@@ -1190,7 +1190,7 @@ async def test_spawn_returns_route_changes_beside_the_validated_output(
         payload={"task": "x"},
     )
 
-    assert result.content[0].text == '{"result":"done"}'
+    assert result.content[-1].text == '{"result":"done"}'
     assert result.untrusted
     assert result.model_route_changes == (
         ModelRouteChange(
@@ -1252,6 +1252,43 @@ async def test_spawn_carries_the_calls_model_to_the_child_and_surfaces_its_refus
     assert refused.is_error
     assert "gpt-9" in refused.content[0].text
     assert "gpt-5.6-sol" in refused.content[0].text
+
+
+async def test_a_finished_foreground_spawn_names_its_spawn_id_beside_the_output(
+    tmp_path: Path,
+) -> None:
+    """A finished foreground child is still the one to message for follow-up work on its task, so
+    the result names its id — in its own block, leaving the output JSON exactly as validated."""
+    child = uuid4()
+
+    async def _finish(
+        target: str,
+        payload: dict[str, object],
+        background: bool = False,
+        dedup_key: str | None = None,
+        delivers_result: bool = False,
+        name: str = "",
+        detach_on_arrival: bool = False,
+        model: str | None = None,
+        *,
+        requester_member_id: UUID | None = None,
+        requesting_message_ref: UUID | None = None,
+    ) -> SpawnResult:
+        return SpawnResult(
+            turn_id=child, conversation_id=uuid4(), output=_SpawnOutput(result="done")
+        )
+
+    ctx = make_context(FakeSandbox(), tmp_path, spawn=_finish)
+    result = await run("spawn", ctx, target="profile:research", payload={"task": "x"})
+
+    assert not result.is_error
+    handle, output = result.content
+    assert json.loads(handle.text) == {
+        "spawn_id": str(child),
+        "target": "profile:research",
+        "status": "done",
+    }
+    assert output.text == _SpawnOutput(result="done").model_dump_json()
 
 
 def test_spawn_without_a_payload_is_refused_by_this_tools_own_field() -> None:
