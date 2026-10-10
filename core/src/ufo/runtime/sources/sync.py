@@ -846,7 +846,7 @@ class SyncDriver:
                 account_id=source.account_id,
             )
         try:
-            result = await self._fetch(source)
+            result = await self._repaired(source, await self._fetch(source, source.resume))
             await self._commit(source, result)
             return result.retry_after_seconds is not None
         except _SourceClaimLost:
@@ -960,7 +960,7 @@ class SyncDriver:
             )
         return tuple(claimed)
 
-    async def _fetch(self, source: ClaimedSource) -> SyncResult:
+    async def _fetch(self, source: ClaimedSource, cursor: str | None) -> SyncResult:
         backend = self.backends.get(source.backend)
         if backend is None:
             raise RuntimeError(f"no source backend for {source.backend!r}")
@@ -978,7 +978,34 @@ class SyncDriver:
             self_user_id=self_user_id,
             parents=partial(self._parent_pages, source),
         )
-        return await backend.fetch(config, source.resume, auth)
+        return await backend.fetch(config, cursor, auth)
+
+    async def _repaired(self, source: ClaimedSource, result: SyncResult) -> SyncResult:
+        """The stored cursor is past an unchanged record, so a `body_missing` page comes back
+        through a cursorless fetch, of which only the repaired pages land."""
+        if result.snapshot or result.retry_after_seconds is not None:
+            return result
+        async with workspace_tx() as connection:
+            missing = set(
+                (
+                    await connection.execute(
+                        sa.select(tables.page.c.source_identity).where(
+                            tables.page.c.workspace_id == source.workspace_id,
+                            tables.page.c.source_uid == source.source_uid,
+                            tables.page.c.body_missing.is_(True),
+                            tables.page.c.source_identity.is_not(None),
+                        )
+                    )
+                ).scalars()
+            )
+        missing -= {page.source_identity or page.source_ref for page in result.pages}
+        if not missing:
+            return result
+        walked = await self._fetch(source, None)
+        repairs = tuple(
+            page for page in walked.pages if {page.source_identity, page.source_ref} & missing
+        )
+        return result.model_copy(update={"pages": result.pages + repairs})
 
     async def _parent_pages(
         self, source: ClaimedSource, stream: str
@@ -1251,6 +1278,7 @@ class SyncDriver:
                         parent_fields=changed_page.browse.parent_fields,
                         subject=subject,
                         tombstone=False,
+                        body_missing=False,
                         updated_at=now,
                     )
                     .where(
@@ -1320,6 +1348,19 @@ class SyncDriver:
                     )
                 )
                 tombstoned += swept.rowcount
+            gone: sa.ColumnElement[bool] = tables.page.c.uid.in_(deleted)
+            if snapshot:
+                gone = sa.or_(gone, tables.page.c.uid.not_in(fetched))
+            await connection.execute(
+                sa.update(tables.page)
+                .values(body_missing=False)
+                .where(
+                    tables.page.c.workspace_id == workspace_id,
+                    tables.page.c.source_uid == source.source_uid,
+                    tables.page.c.body_missing.is_(True),
+                    gone,
+                )
+            )
             await connection.execute(
                 sa.update(tables.page)
                 .values(subject=subject, updated_at=now)
@@ -1664,8 +1705,8 @@ class CorePageFeed:
     the cursor and inlines each non-tombstoned body from the blob store, bounding every batch to
     PAGE_FEED_BATCH_MAX so the inlined bodies stay a small payload. A tombstoned page carries an
     empty body; its reader drops the page's chunks and mirror on that signal. A page whose body
-    blob is gone is tombstoned in place and read as one, so it holds no cursor and the source's
-    next sync writes it again."""
+    blob is gone is tombstoned in place, marked `body_missing`, and read as a tombstone, so it holds
+    no cursor and the source's next sync refetches it whatever that source's cursor says."""
 
     blob: WorkspaceBlobStore
 
@@ -1722,7 +1763,7 @@ class CorePageFeed:
                     async with workspace_tx() as connection:
                         await connection.execute(
                             sa.update(tables.page)
-                            .values(tombstone=True, updated_at=datetime.now(UTC))
+                            .values(tombstone=True, body_missing=True, updated_at=datetime.now(UTC))
                             .where(
                                 tables.page.c.workspace_id == ws_current().workspace_id,
                                 tables.page.c.uid == row["uid"],

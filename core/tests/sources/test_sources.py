@@ -2648,26 +2648,43 @@ async def test_a_failed_attempt_under_a_replayed_claim_keeps_the_body_another_co
     assert await blob.get(body_ref) == b"new plan"
 
 
-async def test_a_page_whose_body_is_gone_reads_as_a_tombstone_until_the_next_sync(
+@dataclass
+class _ModifiedSinceSource:
+    files: dict[str, tuple[str, str]]
+    config_model: ClassVar[type[SourceConfig]] = SourceConfig
+    cursors: list[str | None] = field(default_factory=list)
+
+    async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult:
+        self.cursors.append(cursor)
+        pages = tuple(
+            Page(source_ref=ref, body=body, stream="docs", title=ref)
+            for ref, (body, modified) in self.files.items()
+            if cursor is None or modified >= cursor
+        )
+        return SyncResult(
+            pages=pages, next_cursor=max(modified for _, modified in self.files.values())
+        )
+
+
+async def test_a_page_whose_body_is_gone_is_refetched_past_the_source_cursor(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
-    await _seed_scripted_source(workspace_id, None)
-    plan = Page(source_ref="docs/plan", body="launch plan", stream="docs", title="Plan")
-    notes = Page(source_ref="docs/notes", body="meeting notes", stream="docs", title="Notes")
+    source_id = await _seed_scripted_source(workspace_id, None)
+    files = {"plan": ("launch plan", "2026-10-01"), "notes": ("meeting notes", "2026-10-02")}
     blob = FilesystemBlobStore(root=tmp_path / "blobs")
-    fetched = SyncResult(pages=(plan, notes), snapshot=True)
-    driver = SyncDriver(
-        backends={SCRIPTED_BACKEND: _ScriptedSource([fetched, fetched])},
-        blob=blob,
-        postgres=database_url.startswith("postgresql"),
+    postgres = database_url.startswith("postgresql")
+    await _sync(
+        SyncDriver(
+            backends={SCRIPTED_BACKEND: _ModifiedSinceSource(dict(files))},
+            blob=blob,
+            postgres=postgres,
+        )
     )
-    feed = CorePageFeed(blob)
-
-    await _sync(driver)
     with ws(workspace_id):
+        feed = CorePageFeed(blob)
         first = await feed.pages_changed_since(None, 10)
-        lost = next(change for change in first.changes if change.title == "Plan")
+        (lost,) = [change for change in first.changes if change.title == "plan"]
         async with workspace_tx() as connection:
             body_ref = (
                 await connection.execute(
@@ -2677,18 +2694,32 @@ async def test_a_page_whose_body_is_gone_reads_as_a_tombstone_until_the_next_syn
         await blob.delete(body_ref)
         replayed = await feed.pages_changed_since(None, 10)
         await _make_due()
+
+    restarted = _ModifiedSinceSource(dict(files))
+    driver = SyncDriver(backends={SCRIPTED_BACKEND: restarted}, blob=blob, postgres=postgres)
     await _sync(driver)
     with ws(workspace_id):
-        healed = await feed.pages_changed_since(replayed.next_cursor, 10)
+        healed = await CorePageFeed(blob).pages_changed_since(replayed.next_cursor, 10)
+        await _make_due()
+    await _sync(driver)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            cursor = (
+                await connection.execute(
+                    sa.select(tables.source.c.cursor).where(tables.source.c.uid == source_id)
+                )
+            ).scalar_one()
 
     assert replayed.next_cursor == first.next_cursor
     assert {change.title: (change.tombstone, change.body) for change in replayed.changes} == {
-        "Plan": (True, ""),
-        "Notes": (False, "meeting notes"),
+        "plan": (True, ""),
+        "notes": (False, "meeting notes"),
     }
     assert [(change.title, change.tombstone, change.body) for change in healed.changes] == [
-        ("Plan", False, "launch plan")
+        ("plan", False, "launch plan")
     ]
+    assert restarted.cursors == ["2026-10-02", None, "2026-10-02"]
+    assert cursor == "2026-10-02"
 
 
 async def test_page_feed_reads_one_immutable_page_version_during_a_sync(
