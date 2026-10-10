@@ -4,7 +4,7 @@ import ssl
 import sys
 import time
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from ufo_ext_docker import IDLE_RECLAIM_SECONDS, WARM_NETWORK_LIMIT, DockerCarrier, _docker
@@ -66,6 +66,33 @@ async def _checked_docker(*argv: str) -> str:
     code, stdout, stderr = await _docker(*argv)
     assert code == 0, stderr.decode()
     return stdout.decode().strip()
+
+
+async def test_adoption_accepts_a_network_released_after_inventory(
+    capacity_specs: tuple[SandboxSpec, ...],
+) -> None:
+    producer = DockerCarrier(network=f"ufo-snapshot-{uuid4().hex}")
+    consumer = DockerCarrier(network=producer.network)
+    spec = capacity_specs[0]
+    try:
+        handle = await producer.create(spec)
+        names = await _checked_docker(
+            "network",
+            "ls",
+            "--filter",
+            f"name=^{producer.network}-[0-9a-f]{{32}}$",
+            "--format",
+            "{{.Name}}",
+        )
+        networks = {UUID(name.removeprefix(f"{producer.network}-")) for name in names.split()}
+        assert networks == {spec.conversation_id}
+        assert await producer._release(spec.conversation_id, handle.container_id)
+        assert spec.workspace_host_path is not None
+        await consumer._adopt_networks(networks, Path(spec.workspace_host_path).parent)
+        assert not consumer._touched
+    finally:
+        await _docker("rm", "-f", f"ufo-sbx-{spec.conversation_id}")
+        await _docker("network", "rm", f"{producer.network}-{spec.conversation_id.hex}")
 
 
 @pytest.mark.parametrize("prior_count", [1, WARM_NETWORK_LIMIT])

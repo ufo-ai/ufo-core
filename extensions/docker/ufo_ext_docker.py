@@ -332,6 +332,8 @@ class DockerCarrier:
                 self._network_name(conversation_id),
             )
             if code != 0:
+                if NO_SUCH_NETWORK_MARKER in stderr.decode():
+                    continue
                 raise RuntimeError(f"docker network inspect failed: {stderr.decode().strip()}")
             labels = stdout.decode().split()
             if len(labels) != 2 or labels[0] != sha256(str(root).encode()).hexdigest():
