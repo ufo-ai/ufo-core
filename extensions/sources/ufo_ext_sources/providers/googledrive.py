@@ -1,12 +1,15 @@
 """The Google Drive connector — files, shared drives, and per-file permissions, comments, and
 revisions synced as recallable metadata.
 
-`files` is a delta stream: the first run enumerates the grant's live files
-(`GET /drive/v3/files`, untrashed, ordered by `modifiedTime`) and then reads the changes
-`startPageToken`, which becomes the cursor; a subsequent run walks `GET /drive/v3/changes` from that
-token, upserting changed files, tombstoning removed or trashed ones, and advancing the cursor to the
-next page (or the fresh `newStartPageToken` at the end). A `410` on the changes token means it
-expired, so the connector raises `CursorExpired` and core refetches fresh. `shared_drives` re-reads
+`files` is a delta stream: the first run reads the changes `startPageToken`, then enumerates the
+grant's live files (`GET /drive/v3/files`, untrashed, ordered by `modifiedTime`), checkpointing each
+page as a `_Listing` of that token and the next `pageToken`, so a capped or rate-limited listing
+resumes at its page; the token is read first so a change made mid-listing replays rather than being
+lost. When the listing ends the token becomes the cursor, and a subsequent run walks
+`GET /drive/v3/changes` from it, upserting changed files, tombstoning removed or trashed ones, and
+advancing the cursor to the next page (or the fresh `newStartPageToken` at the end). A `410` on the
+changes token, or a `400` naming the listing's `pageToken`, means the cursor expired, so the
+connector raises `CursorExpired` and core refetches fresh. `shared_drives` re-reads
 the whole set each run; `permissions`, `comments`, and `revisions` each declare one edge under
 `files`. Their ids are unique inside one file and nowhere else — a user's permission id is the same
 value on every file shared with them, a revision numbers from `1` per file. A grant that lacks the
@@ -16,11 +19,13 @@ naming a usage limit instead of the grant is a rate limit (`ufo_ext_sources.prov
 resolved through the auth proxy the runner threads — this connector holds no token. The write path
 is intentionally absent — the source seam only reads."""
 
+import json
 from collections.abc import AsyncIterator
 from functools import partial
 from typing import Any
 
 import httpx
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ufo.sdk.sources import (
     CursorExpired,
@@ -53,6 +58,14 @@ CHANGE_FIELDS = (
     "changes(fileId,removed,file(id,name,mimeType,webViewLink,createdTime,"
     "modifiedTime,owners(emailAddress,displayName),parents,driveId,trashed,size))"
 )
+
+
+class _Listing(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start: str
+    page: str
+
 
 GOOGLE_DRIVE_STREAMS: list[StreamSpec] = [
     StreamSpec(
@@ -106,15 +119,19 @@ class GoogleDriveConnector(RestConnector):
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             if stream.name == "files":
-                if run.cursor:
+                listing = _decode_listing(run.cursor)
+                if run.cursor and listing is None:
                     async for change_page in self._paginate_file_changes(client, cursor=run.cursor):
                         yield change_page
                     return
-                async for file_page in self._paginate_files(client, cursor=None):
+                if listing is None:
+                    listing_start, listing_page = await self._start_page_token(client), None
+                else:
+                    listing_start, listing_page = listing.start, listing.page
+                async for file_page in self._paginate_files(
+                    client, start=listing_start, page=listing_page
+                ):
                     yield file_page
-                start_token = await self._start_page_token(client)
-                if start_token:
-                    yield StreamPage(next_cursor=start_token)
                 return
             if stream.name == "shared_drives":
                 async for drive_page in self._paginate_shared_drives(client):
@@ -136,17 +153,14 @@ class GoogleDriveConnector(RestConnector):
             raise
 
     async def _paginate_files(
-        self, client: httpx.AsyncClient, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        token: str | None = None
-        query = "trashed = false"
-        if cursor:
-            query = f"{query} and modifiedTime > '{cursor}'"
+        self, client: httpx.AsyncClient, *, start: str, page: str | None
+    ) -> AsyncIterator[StreamPage]:
+        token = page
         while True:
             params: dict[str, Any] = {
                 "pageSize": PAGE_SIZE,
                 "fields": FILE_FIELDS,
-                "q": query,
+                "q": "trashed = false",
                 "orderBy": "modifiedTime",
                 "supportsAllDrives": "true",
                 "includeItemsFromAllDrives": "true",
@@ -154,20 +168,29 @@ class GoogleDriveConnector(RestConnector):
             }
             if token:
                 params["pageToken"] = token
-            data = await self._get(client, "/drive/v3/files", params=params)
+            try:
+                data = await self._get(client, "/drive/v3/files", params=params)
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code == 400 and _names_page_token(error):
+                    raise CursorExpired("googledrive listing pageToken expired") from error
+                raise
             records = list_or_empty(data.get("files"))
-            if records:
-                yield records
             token = data.get("nextPageToken")
             if not isinstance(token, str) or not token:
+                yield StreamPage(records=records, next_cursor=start)
                 return
+            yield StreamPage(
+                records=records, next_cursor=_Listing(start=start, page=token).model_dump_json()
+            )
 
-    async def _start_page_token(self, client: httpx.AsyncClient) -> str | None:
+    async def _start_page_token(self, client: httpx.AsyncClient) -> str:
         data = await self._get(
             client, "/drive/v3/changes/startPageToken", params={"supportsAllDrives": "true"}
         )
         token = data.get("startPageToken")
-        return token if isinstance(token, str) and token else None
+        if not isinstance(token, str) or not token:
+            raise RuntimeError(f"googledrive: startPageToken answered no token: {data!r}")
+        return token
 
     async def _paginate_file_changes(
         self, client: httpx.AsyncClient, *, cursor: str
@@ -278,6 +301,28 @@ class GoogleDriveConnector(RestConnector):
         if isinstance(link, str) and link:
             lines.append(f"link: {link}")
         return title, "\n".join(lines).strip()
+
+
+def _decode_listing(cursor: str | None) -> _Listing | None:
+    if not cursor:
+        return None
+    try:
+        parsed = json.loads(cursor)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    try:
+        return _Listing.model_validate(parsed)
+    except ValidationError as error:
+        raise RuntimeError(f"googledrive: malformed listing cursor {cursor!r}") from error
+
+
+def _names_page_token(error: httpx.HTTPStatusError) -> bool:
+    return any(
+        item.get("location") == "pageToken"
+        for item in list_or_empty(google.error_detail(error).get("errors"))
+    )
 
 
 def _str(value: Any) -> str:
