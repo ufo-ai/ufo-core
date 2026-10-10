@@ -80,6 +80,7 @@ sandbox_chrome = "ufo_ext_sandbox_chrome:manifest"
 scheduled_tasks = "ufo_ext_scheduled_tasks.manifest:manifest"
 sites = "ufo_ext_sites.manifest:manifest"
 skill_create = "ufo_ext_skill_create.manifest:manifest"
+slack = "ufo_ext_slack.manifest:manifest"
 sources = "ufo_ext_sources.manifest:manifest"
 todos = "ufo_ext_todos:manifest"
 ufo = "ufo_ext_ufo.manifest:manifest"
@@ -142,6 +143,7 @@ packages = [
     "extensions/scheduled_tasks/ufo_ext_scheduled_tasks",
     "extensions/sites/ufo_ext_sites",
     "extensions/skill_create/ufo_ext_skill_create",
+    "extensions/slack/ufo_ext_slack",
     "extensions/sources/ufo_ext_sources",
     "extensions/ufo/ufo_ext_ufo",
     "sandbox",
