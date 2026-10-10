@@ -171,7 +171,10 @@ class GoogleDriveConnector(RestConnector):
             try:
                 data = await self._get(client, "/drive/v3/files", params=params)
             except httpx.HTTPStatusError as error:
-                if error.response.status_code == 400 and _names_page_token(error):
+                named = list_or_empty(google.error_detail(error).get("errors"))
+                if error.response.status_code == 400 and any(
+                    item.get("location") == "pageToken" for item in named
+                ):
                     raise CursorExpired("googledrive listing pageToken expired") from error
                 raise
             records = list_or_empty(data.get("files"))
@@ -316,13 +319,6 @@ def _decode_listing(cursor: str | None) -> _Listing | None:
         return _Listing.model_validate(parsed)
     except ValidationError as error:
         raise RuntimeError(f"googledrive: malformed listing cursor {cursor!r}") from error
-
-
-def _names_page_token(error: httpx.HTTPStatusError) -> bool:
-    return any(
-        item.get("location") == "pageToken"
-        for item in list_or_empty(google.error_detail(error).get("errors"))
-    )
 
 
 def _str(value: Any) -> str:
