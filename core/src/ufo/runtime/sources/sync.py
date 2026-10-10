@@ -53,7 +53,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from ufo.blob import WorkspaceBlobStore
+from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import owner_tx, workspace_tx
 from ufo.harness.o11y import (
@@ -457,7 +457,7 @@ def feed_handle(config: BaseModel) -> str:
 
 
 def source_body_ref_matches(body_ref: str, source_id: UUID, page_id: UUID, digest: str) -> bool:
-    """Whether a blob ref names this page's content under one source-sync claim."""
+    """Whether a blob ref names this page's content under one source-sync commit attempt."""
     prefix = f"{SOURCE_BLOB_PREFIX}/{source_id}/{page_id}/"
     suffix = f"/{digest.removeprefix('sha256:')}"
     claim = body_ref.removeprefix(prefix).removesuffix(suffix)
@@ -1049,6 +1049,9 @@ class SyncDriver:
         changed: list[ChangedPage] = []
         metadata: list[PageBrowse] = []
         written: list[str] = []
+        # A recovered workflow replays under the same claim; keying bodies by the claim let a
+        # failing attempt's cleanup delete the body a concurrent attempt had committed.
+        attempt = uuid4().hex
         try:
             for page in result.pages:
                 source_identity = page.source_identity or page.source_ref
@@ -1072,7 +1075,7 @@ class SyncDriver:
                 )
                 if existing is None or existing[:2] != (page.digest, False):
                     body_ref = (
-                        f"{SOURCE_BLOB_PREFIX}/{source.source_uid}/{page_id}/{source.claim}/"
+                        f"{SOURCE_BLOB_PREFIX}/{source.source_uid}/{page_id}/{attempt}/"
                         f"{page.digest.removeprefix('sha256:')}"
                     )
                     written.append(body_ref)
@@ -1660,7 +1663,9 @@ class CorePageFeed:
     """The core `PageFeed`: reads the bound workspace's `page` rows in `(revision, uid)` order after
     the cursor and inlines each non-tombstoned body from the blob store, bounding every batch to
     PAGE_FEED_BATCH_MAX so the inlined bodies stay a small payload. A tombstoned page carries an
-    empty body; its reader drops the page's chunks and mirror on that signal."""
+    empty body; its reader drops the page's chunks and mirror on that signal. A page whose body
+    blob is gone is tombstoned in place and read as one, so it holds no cursor and the source's
+    next sync writes it again."""
 
     blob: WorkspaceBlobStore
 
@@ -1701,7 +1706,31 @@ class CorePageFeed:
             rows = (await connection.execute(query)).mappings().all()
         changes: list[PageChange] = []
         for row in rows:
-            body = "" if row["tombstone"] else (await self.blob.get(row["body_ref"])).decode()
+            tombstone = bool(row["tombstone"])
+            body = ""
+            if not tombstone:
+                try:
+                    body = (await self.blob.get(row["body_ref"])).decode()
+                except BlobNotFound:
+                    warn(
+                        "page_feed.body_missing",
+                        page_id=str(row["uid"]),
+                        source_id=str(row["source_uid"]),
+                        body_ref=row["body_ref"],
+                        revision=row["revision"],
+                    )
+                    async with workspace_tx() as connection:
+                        await connection.execute(
+                            sa.update(tables.page)
+                            .values(tombstone=True, updated_at=datetime.now(UTC))
+                            .where(
+                                tables.page.c.workspace_id == ws_current().workspace_id,
+                                tables.page.c.uid == row["uid"],
+                                tables.page.c.body_ref == row["body_ref"],
+                                tables.page.c.tombstone.is_(False),
+                            )
+                        )
+                    tombstone = True
             record_as_of = row["record_updated_at"] or row["record_created_at"]
             changes.append(
                 PageChange(
@@ -1713,7 +1742,7 @@ class CorePageFeed:
                     body=body,
                     digest=row["digest"],
                     revision=row["revision"],
-                    tombstone=bool(row["tombstone"]),
+                    tombstone=tombstone,
                     indexed=bool(row["indexed"]),
                     created_at=row["created_at"],
                     as_of=(

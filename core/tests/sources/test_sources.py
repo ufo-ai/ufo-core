@@ -2609,6 +2609,88 @@ async def test_a_cancelled_commit_keeps_the_bodies_its_rows_name(
     assert await blob.get(body_ref) == b"launch plan"
 
 
+async def test_a_failed_attempt_under_a_replayed_claim_keeps_the_body_another_committed(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    driver = SyncDriver(
+        backends={SCRIPTED_BACKEND: _ScriptedSource([])},
+        blob=blob,
+        postgres=database_url.startswith("postgresql"),
+    )
+    old = Page(source_ref="docs/plan", body="old plan", stream="docs", title="Plan")
+    new = SyncResult(pages=(old.model_copy(update={"body": "new plan"}),))
+    write = SyncDriver._write
+
+    with ws(workspace_id):
+        (claimed,) = await driver._claim_due("replayed")
+        await driver._commit(claimed, SyncResult(pages=(old,)))
+        await _make_due()
+        (claimed,) = await driver._claim_due("replayed")
+
+        async def overtaken(syncing: SyncDriver, *args: object, **kwargs: object) -> None:
+            monkeypatch.setattr(SyncDriver, "_write", write)
+            await syncing._commit(claimed, new)
+            raise sync._SourceClaimLost(str(claimed.source_uid))
+
+        monkeypatch.setattr(SyncDriver, "_write", overtaken)
+        with pytest.raises(sync._SourceClaimLost):
+            await driver._commit(claimed, new)
+        async with workspace_tx() as connection:
+            body_ref = (
+                await connection.execute(
+                    sa.select(tables.page.c.body_ref).where(tables.page.c.source_uid == source_id)
+                )
+            ).scalar_one()
+
+    assert await blob.get(body_ref) == b"new plan"
+
+
+async def test_a_page_whose_body_is_gone_reads_as_a_tombstone_until_the_next_sync(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    await _seed_scripted_source(workspace_id, None)
+    plan = Page(source_ref="docs/plan", body="launch plan", stream="docs", title="Plan")
+    notes = Page(source_ref="docs/notes", body="meeting notes", stream="docs", title="Notes")
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    fetched = SyncResult(pages=(plan, notes), snapshot=True)
+    driver = SyncDriver(
+        backends={SCRIPTED_BACKEND: _ScriptedSource([fetched, fetched])},
+        blob=blob,
+        postgres=database_url.startswith("postgresql"),
+    )
+    feed = CorePageFeed(blob)
+
+    await _sync(driver)
+    with ws(workspace_id):
+        first = await feed.pages_changed_since(None, 10)
+        lost = next(change for change in first.changes if change.title == "Plan")
+        async with workspace_tx() as connection:
+            body_ref = (
+                await connection.execute(
+                    sa.select(tables.page.c.body_ref).where(tables.page.c.uid == lost.page_id)
+                )
+            ).scalar_one()
+        await blob.delete(body_ref)
+        replayed = await feed.pages_changed_since(None, 10)
+        await _make_due()
+    await _sync(driver)
+    with ws(workspace_id):
+        healed = await feed.pages_changed_since(replayed.next_cursor, 10)
+
+    assert replayed.next_cursor == first.next_cursor
+    assert {change.title: (change.tombstone, change.body) for change in replayed.changes} == {
+        "Plan": (True, ""),
+        "Notes": (False, "meeting notes"),
+    }
+    assert [(change.title, change.tombstone, change.body) for change in healed.changes] == [
+        ("Plan", False, "launch plan")
+    ]
+
+
 async def test_page_feed_reads_one_immutable_page_version_during_a_sync(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
