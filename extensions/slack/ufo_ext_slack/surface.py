@@ -4234,7 +4234,7 @@ async def _reconcile_slack_reply(
     thread_ts: str | None,
     delivery_id: str,
 ) -> str | None:
-    if channel.startswith("U"):
+    if channel.startswith(("U", "W")):
         resolved = await _member_dm_channel(bot_token, channel)
         if resolved == channel:
             return None

@@ -4333,7 +4333,10 @@ async def test_long_writeback_retry_resumes_after_its_last_accepted_part(
     assert progress is None
 
 
-async def test_a_private_reply_reconciles_through_its_member_dm(db: None, monkeypatch) -> None:
+@pytest.mark.parametrize("member_id", ("U1", "W1"))
+async def test_a_private_reply_reconciles_through_its_member_dm(
+    db: None, monkeypatch, member_id: str
+) -> None:
     recorder: list[httpx.Request] = []
     delivery_id = "turn:private:0:markdown"
 
@@ -4345,7 +4348,7 @@ async def test_a_private_reply_reconciles_through_its_member_dm(db: None, monkey
                 200,
                 json={
                     "ok": True,
-                    "channels": [{"id": "D1", "is_im": True, "user": "U1"}],
+                    "channels": [{"id": "D1", "is_im": True, "user": member_id}],
                     "response_metadata": {"next_cursor": ""},
                 },
             )
@@ -4371,7 +4374,9 @@ async def test_a_private_reply_reconciles_through_its_member_dm(db: None, monkey
 
     _patch_httpx(monkeypatch, httpx.MockTransport(handler))
     async with httpx.AsyncClient() as client:
-        reconciled = await slack._reconcile_slack_reply(client, BOT_TOKEN, "U1", None, delivery_id)
+        reconciled = await slack._reconcile_slack_reply(
+            client, BOT_TOKEN, member_id, None, delivery_id
+        )
 
     assert reconciled == "999.100"
     assert [str(request.url).split("?")[0] for request in recorder] == [
@@ -7482,7 +7487,8 @@ async def test_a_submit_whose_member_is_linked_names_its_sender_and_sources_its_
     assert len(_fetches(recorder, slack.SLACK_GET_PERMALINK_URL)) == 1
 
 
-async def test_a_dm_past_the_listed_pages_is_posted_to_the_member_id() -> None:
+@pytest.mark.parametrize("member_id", ("U1", "W1"))
+async def test_a_dm_past_the_listed_pages_is_posted_to_the_member_id(member_id: str) -> None:
     sent: list[httpx.Request] = []
 
     def endless(request: httpx.Request) -> httpx.Response:
@@ -7498,8 +7504,18 @@ async def test_a_dm_past_the_listed_pages_is_posted_to_the_member_id() -> None:
 
     with pytest.MonkeyPatch.context() as patch:
         _patch_httpx(patch, httpx.MockTransport(endless))
-        assert await slack._member_dm_channel(BOT_TOKEN, "U1") == "U1"
-    assert len(sent) == slack.SLACK_CONVERSATIONS_MAX_PAGES
+        assert await slack._member_dm_channel(BOT_TOKEN, member_id) == member_id
+        async with httpx.AsyncClient() as client:
+            assert (
+                await slack._reconcile_slack_reply(
+                    client, BOT_TOKEN, member_id, None, "turn:private:0:markdown"
+                )
+                is None
+            )
+    assert len(sent) == 2 * slack.SLACK_CONVERSATIONS_MAX_PAGES
+    assert all(
+        str(request.url).split("?")[0] == slack.SLACK_CONVERSATIONS_LIST_URL for request in sent
+    )
 
 
 async def test_a_targeted_question_is_private_and_answers_its_original_conversation(
