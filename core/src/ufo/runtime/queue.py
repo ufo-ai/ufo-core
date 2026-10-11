@@ -1202,6 +1202,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             run = engine.run_intent if turn.admission_source == INTENT_ADMISSION else engine.run
             frame = await run()
         except TurnParked:
+            await sessions.close()
             return "parked"
         except Exception as error:
             await _commit_failed_terminal(runtime.hub, UUID(turn_id), attempt, error)

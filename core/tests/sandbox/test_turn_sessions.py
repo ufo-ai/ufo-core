@@ -17,7 +17,7 @@ from ufo.harness.sandbox.session import RunTokenCodec, SandboxProviderUnavailabl
 from ufo.runtime.access.connectors import CliCredential, GitWire
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.egress_resolver import PerAgentRules
-from ufo.runtime.access.egress_rules import UFO_MODELS_SECRET, Bind, policy_hosts
+from ufo.runtime.access.egress_rules import UFO_MODELS_SECRET, Bind, SessionPolicy, policy_hosts
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.access.proxy_sessions import (
     IDEMPOTENCY_HEADER,
@@ -409,6 +409,42 @@ async def test_close_logs_and_never_raises(
     assert [entry["error_class"] for entry in failed] == ["SandboxProviderUnavailable"]
 
 
+@pytest.mark.parametrize("detached", [False, True])
+async def test_a_parked_turn_drops_all_session_authority_and_restores_it_on_resume(
+    fake: Starlette, proxy: ProxySessions, seeded: _Seeded, detached: bool
+) -> None:
+    sessions = _sessions(seeded, proxy)
+    base = await sessions.reconcile("turn")
+    acting = await sessions.reconcile(seeded.member_b)
+    assert base is not None and acting is not None
+    deadlines = {key: held["expires_at"] for key, held in fake.state.sessions.items()}
+    if detached:
+        with ws(seeded.turn.workspace_id):
+            await mark_detached(seeded.turn, "build", "/home/user/.ufo/runs/build")
+    sent = len(fake.state.calls)
+
+    await _commit(seeded, "parked")
+    await sessions.close()
+
+    closing = fake.state.calls[sent:]
+    assert [method for method, _, _, _ in closing] == ["GET", "PATCH", "PATCH"]
+    assert all(
+        json.loads(body)["policy"] == SessionPolicy().model_dump(mode="json")
+        for method, _, _, body in closing
+        if method == "PATCH"
+    )
+    assert {key: held["expires_at"] for key, held in fake.state.sessions.items()} == deadlines
+    assert all(held["revoked_at"] is None for held in fake.state.sessions.values())
+
+    await _commit(seeded, "running")
+    resumed = await sessions.reconcile(seeded.member_b)
+    assert resumed is not None and resumed.id == acting.id
+    policy = fake.state.sessions[resumed.id]["policy"]
+    assert UFO_MODELS_SECRET in {entry["secret"] for entry in policy["bind"]}
+    assert "GH_TOKEN" in {entry["env"] for entry in policy["bind"]}
+    assert policy["routes"]
+
+
 async def test_an_outage_at_open_is_a_provider_outage(
     fake: Starlette, proxy: ProxySessions, seeded: _Seeded
 ) -> None:
@@ -498,7 +534,7 @@ async def test_close_leaves_the_sessions_of_a_turn_whose_terminal_is_not_committ
     assert opened is not None
     sent = len(fake.state.calls)
 
-    for status in ("running", "parked", "queued"):
+    for status in ("running", "queued"):
         await _commit(seeded, status)
         await sessions.close()
     left = fake.state.calls[sent:]

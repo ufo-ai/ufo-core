@@ -502,7 +502,9 @@ slot, `connection:<id>`, `ufo/models` — never its value, and `routes` to the r
 The env the session answers (the proxy variables carrying its token, a sentinel per bound env) is
 exported into the sandbox at open and at each dispatch. Every dispatch renews the session and,
 when the recompiled policy's digest moved, PATCHes it; a session that expired between dispatches
-gives way to a new one. The committed terminal revokes the turn's sessions by label or, while a
+gives way to a new one. A parked turn replaces each session's policy with no hosts, binds or routes
+and no internet access, without extending its deadline. An authorized resume restores the compiled
+policy. The committed terminal revokes the turn's sessions by label or, while a
 detached command is followed, narrows each to a network-only policy (no model key, no route)
 renewed until `detached_until`. A probe — the off-turn exec a jobs-role handler runs — opens its own
 short session under `probe:<probe>` with no model key and no routes, revoked when the exec ends.

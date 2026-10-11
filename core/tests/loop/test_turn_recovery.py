@@ -56,6 +56,7 @@ from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.egress_resolver import PerAgentRules
+from ufo.runtime.access.egress_rules import UFO_MODELS_SECRET, Bind, SessionPolicy
 from ufo.runtime.access.proxy_sessions import ProxySessions
 from ufo.runtime.access.turn_sessions import SandboxAuthorizer
 from ufo.runtime.hub import InProcessHub
@@ -225,6 +226,7 @@ def _install_runtime(
     workspace_root: Path,
     sessions: ProxySessions | None = None,
     off_cluster: bool = False,
+    rules: PerAgentRules | None = None,
 ) -> None:
     recovery_dbos = replay_safe_client(config.database.system_url)
     loop_queue.init_runtime(
@@ -260,7 +262,7 @@ def _install_runtime(
             index=default_index(),
             embed=_StubEmbed(),
             artifact_token_secret="",
-            rules=PerAgentRules(),
+            rules=PerAgentRules() if rules is None else rules,
             sessions=sessions,
         )
     )
@@ -463,6 +465,93 @@ def _registry(client: object) -> ModelRegistry:
     )
 
 
+@dataclass(frozen=True)
+class _CapAfterFirstCommandModel:
+    workspace_id: UUID
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.spend_cap)
+                    .where(tables.spend_cap.c.workspace_id == self.workspace_id)
+                    .values(limit_micro_usd=1)
+                )
+        call_id = "c2" if answered else "c1"
+        yield ToolCallStart(id=call_id, name="bash")
+        yield ToolCallDelta(id=call_id, partial_json=json.dumps({"command": "true"}))
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+@pytest.mark.serial
+async def test_a_turn_parked_by_its_cap_drops_its_proxy_authority(
+    db: None, dbos_launched: Config, tmp_path: Path
+) -> None:
+    fake = proxy_app(PROXY_BEARER)
+    workspace_id, _, turn_id = await _seed_turn()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.spend_cap).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                scope="workspace",
+                subject_id=None,
+                window_seconds=3600,
+                limit_micro_usd=1_000_000,
+                on_breach="park",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    saved = loop_queue._runtime
+    loop_queue.reset_runtime()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=fake), base_url=PROXY_URL
+    ) as http:
+        _install_runtime(
+            dbos_launched,
+            _registry(_CapAfterFirstCommandModel(workspace_id)),
+            tmp_path / "workspaces",
+            ProxySessions(PROXY_URL, _Bearer(), http),
+            off_cluster=True,
+            rules=PerAgentRules(
+                binds=(
+                    Bind(
+                        host="api.anthropic.com",
+                        header="x-api-key",
+                        secret=UFO_MODELS_SECRET,
+                        env="ANTHROPIC_API_KEY",
+                    ),
+                )
+            ),
+        )
+        try:
+            with SetWorkflowID(str(turn_id)):
+                status = await loop_queue.turn_workflow(str(workspace_id), str(turn_id))
+        finally:
+            asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+            loop_queue._runtime.dbos.destroy()
+            loop_queue.reset_runtime()
+            if saved is not None:
+                loop_queue.init_runtime(saved)
+
+    assert status == "parked"
+    (session,) = fake.state.sessions.values()
+    assert session["revoked_at"] is None
+    assert session["policy"] == SessionPolicy().model_dump(mode="json")
+    created = [
+        json.loads(body)["policy"]
+        for method, target, _, body in fake.state.calls
+        if method == "POST" and target == "/v1/sessions"
+    ]
+    assert UFO_MODELS_SECRET in {bind["secret"] for bind in created[0]["bind"]}
+
+
 async def _await_revoked(fake: Starlette) -> None:
     async with asyncio.timeout(RECOVERY_TIMEOUT_SECONDS):
         while True:
@@ -545,7 +634,6 @@ async def test_a_turn_parked_by_a_proxy_outage_keeps_its_session(
     (session,) = fake.state.sessions.values()
     assert session["revoked_at"] is None
     assert not [target for _, target, _, _ in fake.state.calls if target.endswith("/revoke")]
-    assert not [method for method, _, _, _ in fake.state.calls if method == "GET"]
 
 
 @pytest.mark.serial

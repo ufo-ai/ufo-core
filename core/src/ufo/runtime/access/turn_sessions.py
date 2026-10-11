@@ -114,11 +114,12 @@ class TurnSessions:
             return held.session
 
     async def close(self) -> None:
-        """End the turn's authority once its terminal is committed: a turn that left detached
+        """Remove all authority while parked; restore it on the next authorized open. End the
+        turn's authority once its terminal is committed: a turn that left detached
         commands keeps every live session under its label, an earlier run's included, narrowed to
         a policy that binds no model key and no route, until the last command's follow ends; any
-        other has every session under its label revoked. A turn whose row is not terminal, as
-        when a later attempt has claimed it, keeps its sessions; a cancelled turn's are closed by
+        other has every session under its label revoked. A running or queued turn, as when a
+        later attempt has claimed it, keeps its sessions; a cancelled turn's are closed by
         the cancel that commits `cancelled`. A fault is logged and never raised, since each
         session's deadline bounds what it leaves behind."""
         if self.proxy is None:
@@ -126,10 +127,10 @@ class TurnSessions:
         try:
             status, detached_until = await self._ending()
             now = datetime.now(UTC)
-            if status in NON_TERMINAL_STATUSES:
+            if status in NON_TERMINAL_STATUSES and status != "parked":
                 log("turn.sessions.left_open", turn_id=str(self.turn.id), turn_status=status)
                 return
-            if detached_until is None or detached_until <= now:
+            if status != "parked" and (detached_until is None or detached_until <= now):
                 revoked = await self.proxy.revoke_labelled(
                     self.turn.workspace_id, TURN_LABEL, str(self.turn.id)
                 )
@@ -142,8 +143,11 @@ class TurnSessions:
                 error_class=type(error).__name__,
             )
             return
-        remaining = math.ceil((detached_until - now).total_seconds())
-        ttl_s = min(remaining, PROXY_SESSION_MAX_TTL_SECONDS)
+        ttl_s = (
+            min(math.ceil((detached_until - now).total_seconds()), PROXY_SESSION_MAX_TTL_SECONDS)
+            if detached_until is not None and status != "parked"
+            else None
+        )
         try:
             listed = await self.proxy.labelled(
                 self.turn.workspace_id, TURN_LABEL, str(self.turn.id)
@@ -161,9 +165,14 @@ class TurnSessions:
             member = session.labels.get(MEMBER_LABEL)
             actor = self.actor(None if member is None else UUID(member))
             try:
-                narrowed = await self._policy(actor, running=False)
+                narrowed = (
+                    SessionPolicy()
+                    if status == "parked"
+                    else await self._policy(actor, running=False)
+                )
                 await self.proxy.update(self.turn.workspace_id, session.id, narrowed)
-                await self.proxy.renew(self.turn.workspace_id, session.id, ttl_s)
+                if ttl_s is not None:
+                    await self.proxy.renew(self.turn.workspace_id, session.id, ttl_s)
             except Exception as error:
                 warn(
                     "turn.sessions.close_failed",
@@ -171,6 +180,8 @@ class TurnSessions:
                     session_id=str(session.id),
                     error_class=type(error).__name__,
                 )
+        if status == "parked":
+            self.opened.clear()
 
     def labels(self, actor: RunActor) -> dict[str, str]:
         """The labels a session of this turn carries: the turn, its conversation and agent, and the
