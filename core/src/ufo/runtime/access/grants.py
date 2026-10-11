@@ -43,17 +43,9 @@ than the window the state is signed for, and by more than a consent flow takes: 
 the end of its own signing window sends the member to a page the callback then refuses, and the
 member reads that as the connection failing. Minting is local, so the cost of a fresh one is
 nothing."""
-GRANT_SENTINEL_PREFIX = "UFO_SENTINEL_GRANT_"
 CONNECTED_MESSAGE = "Connected {provider}: {account}."
 CONNECTED_KEY_PREFIX = "connect:"
 CONNECTED_KEY_DIGEST_LENGTH = 32
-
-
-def grant_sentinel(account_id: str) -> str:
-    """The sentinel a grant's CLI credential rides the wire as — deterministic from the connected
-    account, so the engine (exporting it into the sandbox env) and the egress proxy (swapping the
-    account's token in for it) agree without a shared registration."""
-    return f"{GRANT_SENTINEL_PREFIX}{account_id}"
 
 
 def cli_accounts(

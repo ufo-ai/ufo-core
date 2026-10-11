@@ -8,7 +8,7 @@ The lockfile is the deploy's pinned extension set: when it exists, only the exte
 and each must match its pinned digest or boot fails loud — tamper and drift are refused, not run.
 With no lockfile the deploy is in dev mode and every discovered extension is active. `ufoctl ext`
 and `ufoctl bundle` write this file; `load_manifests` reads it, so the set the operator pinned is
-exactly what every derivation (tools, jobs, routes, proxy rules) sees.
+exactly what every derivation (tools, jobs, routes, session policies) sees.
 
 `turn_tools` reads the active manifests into the set a turn dispatches against and the owning
 ExtensionContext for each extension tool; `turn_hooks` reads them into the turn's reactive
@@ -92,8 +92,10 @@ from ufo.runtime.ext.manifest import (
     MemorySearchProviderSpec,
     NotRegisteredError,
     Pack,
+    ProxyCredentials,
     SubagentProfile,
     declared_slots,
+    minted_slots,
 )
 from ufo.runtime.ext.surface import TurnTailer
 from ufo.runtime.indexing import EmbedClient, IndexBackend
@@ -194,13 +196,16 @@ def write_lockfile(path: Path, lockfile: Lockfile) -> None:
 def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
     """Every extension installed in this environment, keyed by manifest name, with the entry point
     its digest is computed from. Duplicate manifest names are rejected here so no reader downstream
-    has to."""
+    has to, and so is a second extension declaring `proxy_credentials`: a deploy presents one
+    bearer to the proxy service."""
     found: dict[str, tuple[Manifest, EntryPoint]] = {}
     first_party = first_party_distributions()
     for entry in entry_points(group=EXTENSION_ENTRY_POINT_GROUP):
         manifest = entry.load()()
         if (
             manifest.member_context_read
+            or manifest.vault_read
+            or manifest.proxy_credentials is not None
             or manifest.workspace_founded
             or manifest.deploy_routes
             or manifest.commands
@@ -208,6 +213,7 @@ def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
             or manifest.operator_rules
             or manifest.member_added
             or manifest.spend_gates
+            or any(slot.minted for slot in manifest.credentials)
         ) and (entry.dist is None or entry.dist.name not in first_party):
             raise ValueError(
                 f"third-party extension {manifest.name!r} cannot declare privileged capabilities"
@@ -215,6 +221,15 @@ def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
         if manifest.name in found:
             raise ValueError(f"duplicate extension name: {manifest.name}")
         found[manifest.name] = (manifest, entry)
+    bearers = sorted(
+        repr(name)
+        for name, (manifest, _) in found.items()
+        if manifest.proxy_credentials is not None
+    )
+    if len(bearers) > 1:
+        raise ValueError(
+            f"Only one extension may declare proxy_credentials; {', '.join(bearers)} do."
+        )
     return found
 
 
@@ -360,9 +375,9 @@ def _pack_manifests(pack: str, active: dict[str, Manifest]) -> tuple[Manifest, .
 
 
 def connector_clis(manifests: tuple[Manifest, ...]) -> dict[str, CliCredential]:
-    """Each installed connector's declared CLI credential, keyed by provider — the map the engine
-    reads to export each usable grant's sentinel env and git helper, and the egress proxy's per-turn
-    resolver folds into its injection rules, both live from the current deploy's manifests."""
+    """Each installed connector's declared CLI credential, keyed by provider — the map the session
+    policy binds each usable grant's connection under and the sandbox's git helper config reads,
+    both live from the current deploy's manifests."""
     return {
         connector.oauth.provider: connector.cli
         for manifest in manifests
@@ -372,44 +387,40 @@ def connector_clis(manifests: tuple[Manifest, ...]) -> dict[str, CliCredential]:
 
 
 def exported_env(manifests: tuple[Manifest, ...]) -> frozenset[str]:
-    """Every sandbox variable this deploy exports — each connector CLI's, each injecting slot's
-    sentinel, each host choice's resolved host, and the ones core itself exports on every open
-    (the model-key sentinels, the proxy and CA variables, git's config channel). An extension
-    resolving a slot per workspace may claim none of them, since one variable carries one value
-    and the later export wins the merge."""
+    """Every sandbox variable this deploy exports — each connector CLI's, each injecting slot's,
+    each host choice's resolved host, and the ones core itself exports on every open (the model
+    keys a session binds, the proxy and CA variables, git's config channel). An extension resolving
+    a slot per workspace may claim none of them, since one variable carries one value and the later
+    export wins the merge."""
     clis = connector_clis(manifests)
-    names: set[str | None] = {cli.env for cli in clis.values()}
+    names: set[str] = {cli.env for cli in clis.values()}
     names |= set(sandbox_exported_env(clis))
     for manifest in manifests:
         for slot in manifest.credentials:
             if slot.injection is None:
                 continue
             names.add(slot.injection.env)
-            if isinstance(slot.injection.host, HostChoice):
+            if isinstance(slot.injection.host, HostChoice) and slot.injection.host.env is not None:
                 names.add(slot.injection.host.env)
-    return frozenset(name for name in names if name is not None)
+    return frozenset(names)
 
 
 def injecting_slots(manifests: tuple[Manifest, ...]) -> tuple[CredentialSlot, ...]:
-    """Every declared slot the egress proxy swaps onto the wire — the deploy's keyed providers, read
-    live from the current manifests by the proxy's rule resolver and by the engine that exports each
-    filled slot's sentinel into the sandbox. Both roles collect them through here, so what would
-    silently mis-authenticate is refused in one place, because a row is meant to cost no code and no
-    test: nothing else would stop the next one from taking a name already in use.
+    """Every declared slot a session binds — the deploy's keyed providers, read live from the
+    current manifests by the session policy and by the sandbox open that exports each filled slot's
+    host. Both roles collect them through here, so what would silently mis-authenticate is refused
+    in one place, because a row is meant to cost no code and no test: nothing else would stop the
+    next one from taking a name already in use.
 
-    A `sentinel` two slots share draws whichever secret matches first. **One sandbox variable
-    carries one value**, so every exported name — a slot's `env`, a host choice's `env`, and a
-    connector's `CliCredential.env`, all merged into one dict per sandbox — is claimed in a single
-    namespace beside what it carries; a second claimant carrying anything else is refused, since the
-    later export silently wins the merge. Claims carrying the *same* value stay legal, which is what
-    lets both Datadog keys export `DD_HOST`: they name one `HostChoice`, and a frozen value object
-    compares by every field it has rather than by a tuple someone listed. A host choice must also
-    name a slot some installed extension declares, since no writer fills an undeclared slot — every
-    one gates on the declared set — so a typo would pin the host to the default forever. A host is
-    metered once however many keys reach it, so slots that can reach one host must agree on the
-    dimension. The claim spans every host a declaration could resolve to — a fixed host, or every
-    host in a choice — because the derivation groups by the host it *resolved*: two rows aliasing
-    one literal through different declarations would otherwise drop the later dimension silently."""
+    **One sandbox variable carries one value**, so every exported name — a slot's `env`, a host
+    choice's `env`, and a connector's `CliCredential.env`, all merged into one dict per sandbox — is
+    claimed in a single namespace beside what it carries; a second claimant carrying anything else
+    is refused, since the later export silently wins the merge. A slot's `env` carries that slot's
+    own secret, so two slots never share one. Claims carrying the *same* value stay legal, which is
+    what lets both Datadog keys export `DD_HOST`: they name one `HostChoice`, and a frozen value
+    object compares by every field it has rather than by a tuple someone listed. A host choice must
+    also name a slot some installed extension declares, since no writer fills an undeclared slot —
+    every one gates on the declared set — so a typo would pin the host to the default forever."""
     slots = tuple(
         slot
         for manifest in manifests
@@ -418,34 +429,14 @@ def injecting_slots(manifests: tuple[Manifest, ...]) -> tuple[CredentialSlot, ..
     )
     declared = {slot.name for manifest in manifests for slot in manifest.credentials}
     exported: dict[str, tuple[str, object]] = {
-        cli.env: (f"connector {provider!r}'s CLI credential", f"the {provider!r} grant sentinel")
+        cli.env: (f"connector {provider!r}'s CLI credential", f"the {provider!r} connection")
         for provider, cli in connector_clis(manifests).items()
     }
-    sentinels: dict[str, str] = {}
-    dimensions: dict[str, tuple[str, str]] = {}
     for slot in slots:
         target = slot.injection
         if target is None:
             continue
-        owner = sentinels.setdefault(target.sentinel, slot.name)
-        if owner != slot.name:
-            raise RuntimeError(
-                f"credential slots {owner!r} and {slot.name!r} both declare sentinel "
-                f"{target.sentinel!r}; a shared sentinel draws whichever secret matches first"
-            )
-        if target.dimension is not None:
-            reachable = (target.host,) if isinstance(target.host, str) else target.host.hosts
-            for host in reachable:
-                metered = dimensions.setdefault(host, (slot.name, target.dimension))
-                if metered[1] != target.dimension:
-                    raise RuntimeError(
-                        f"credential slots {metered[0]!r} and {slot.name!r} can both reach "
-                        f"{host!r} but meter it as {metered[1]!r} and {target.dimension!r}; a host "
-                        "is metered once, so the later dimension would be dropped"
-                    )
-        claims: list[tuple[str, object]] = []
-        if target.env is not None:
-            claims.append((target.env, f"the sentinel of slot {slot.name!r}"))
+        claims: list[tuple[str, object]] = [(target.env, f"the secret of slot {slot.name!r}")]
         if isinstance(target.host, HostChoice):
             if target.host.slot not in declared:
                 raise RuntimeError(
@@ -479,8 +470,8 @@ def deploy_claims(manifests: tuple[Manifest, ...]) -> DeployCredentials:
 
 def workspace_slot_source(manifests: tuple[Manifest, ...]) -> WorkspaceSlots:
     """Every injecting slot a workspace can hold: this deploy's own declarations, and the reader
-    each extension that resolves slots per workspace contributes. The proxy's rule derivation and
-    the sandbox's environment take this one source, so neither knows which half a slot came from.
+    each extension that resolves slots per workspace contributes. The session policy and the
+    sandbox's environment take this one source, so neither knows which half a slot came from.
 
     A provider's reader runs under its extension's own workspace-scoped context — the handle its
     tools and jobs receive — because the rows it reads are the extension's own."""
@@ -501,6 +492,17 @@ def workspace_slot_source(manifests: tuple[Manifest, ...]) -> WorkspaceSlots:
     )
 
 
+def proxy_credentials(manifests: tuple[Manifest, ...]) -> ProxyCredentials | None:
+    """The source of the bearer the runtime presents to the proxy service: the one active
+    extension declaring `proxy_credentials`, built over its plain workspace-scoped context, so it
+    reads its own storage under whichever workspace the session client binds. None when no
+    extension declares it, and every session call then finds the proxy service unavailable."""
+    for manifest in manifests:
+        if manifest.proxy_credentials is not None:
+            return manifest.proxy_credentials.build(_extension_context(manifest))
+    return None
+
+
 def _resolved_slot_names(manifest: Manifest) -> Callable[[], Awaitable[frozenset[str]]] | None:
     """`ctx.credentials` gates a per-workspace slot on these names, so a declaration the extension's
     own rows carry counts as a manifest's."""
@@ -519,7 +521,11 @@ def _resolved_slot_names(manifest: Manifest) -> Callable[[], Awaitable[frozenset
 def _extension_context(manifest: Manifest) -> ExtensionContext:
     """The plain workspace-scoped context for one manifest, with nothing wired that a credential
     read does not reach."""
-    return context_for(manifest.name, frozenset(slot.name for slot in manifest.credentials))
+    return context_for(
+        manifest.name,
+        frozenset(slot.name for slot in manifest.credentials),
+        minted=minted_slots(manifest),
+    )
 
 
 def turn_tools(
@@ -599,6 +605,7 @@ def turn_tools(
             probes=probes,
             deploy_credentials=deploy_credentials,
             workspace_credentials=_resolved_slot_names(manifest),
+            minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
         )
@@ -690,6 +697,7 @@ def member_object_registry(
             artifact_token_secret=artifact_token_secret,
             deploy_credentials=deploy_credentials,
             workspace_credentials=_resolved_slot_names(manifest),
+            minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
         )
@@ -880,7 +888,7 @@ async def turn_member_skills(
                 f"extension {manifest.name!r} provides member skills but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(manifest.name, declared, index, embed)
+        context = context_for(manifest.name, declared, index, embed, minted=minted_slots(manifest))
         for card in await manifest.member_skills.cards(context):
             if card.agents and agent_name not in card.agents:
                 continue
@@ -920,7 +928,7 @@ async def member_skill_listing(
                 f"extension {manifest.name!r} provides member skills but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(manifest.name, declared, index, embed)
+        context = context_for(manifest.name, declared, index, embed, minted=minted_slots(manifest))
         for skill in await manifest.member_skills.materialize_all(context):
             if skill.name in listed:
                 log("skill.member_card_collision", skill=skill.name, extension=manifest.name)
@@ -950,7 +958,7 @@ def index_backend(
             declared = frozenset(slot.name for slot in manifest.credentials)
             if declared and credential_store is None:
                 raise RuntimeError(f"index backend {name!r} needs a credential key but none is set")
-            context = context_for(manifest.name, declared)
+            context = context_for(manifest.name, declared, minted=minted_slots(manifest))
             return spec.factory(context)
     raise NotRegisteredError(f"config selects index backend {name!r} but no extension registers it")
 
@@ -973,7 +981,7 @@ def embed_backend(
             declared = frozenset(slot.name for slot in manifest.credentials)
             if declared and credential_store is None:
                 raise RuntimeError(f"embed backend {name!r} needs a credential key but none is set")
-            context = context_for(manifest.name, declared)
+            context = context_for(manifest.name, declared, minted=minted_slots(manifest))
             return spec.factory(context)
     raise NotRegisteredError(f"config selects embed backend {name!r} but no extension registers it")
 
@@ -1003,7 +1011,8 @@ def memory_search(
             f"memory search provider {manifest.name!r} declares credential slots "
             "but no credential key is set"
         )
-    return MemorySearch(spec.build(context_for(manifest.name, declared, index, embed)))
+    context = context_for(manifest.name, declared, index, embed, minted=minted_slots(manifest))
+    return MemorySearch(spec.build(context))
 
 
 def validate_ext_tools(
@@ -1090,6 +1099,7 @@ async def turn_workspace_facts(
                 surface.name for surface in manifest.surfaces if surface.addressed
             ),
             audience=audience,
+            minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
         )
@@ -1156,6 +1166,7 @@ def turn_hooks(
             audience=audience,
             public_base_url=public_base_url,
             search=search,
+            minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
         )
@@ -1222,6 +1233,7 @@ def connection_hooks(
             frozenset(slot.name for slot in manifest.credentials),
             index,
             embed,
+            minted=minted_slots(manifest),
             spend=spend,
             ledger=ledger,
         )

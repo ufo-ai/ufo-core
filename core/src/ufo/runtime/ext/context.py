@@ -15,8 +15,9 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Any, Literal, Protocol
+from datetime import UTC, datetime, timedelta
+from functools import partial
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -42,7 +43,7 @@ from ufo.harness.models.interface import (
 from ufo.harness.models.pricing import ModelPrice, Pricing, pricing_from
 from ufo.harness.o11y import BACKGROUND_PROFILE, emit_histogram, emit_metric, log
 from ufo.harness.sandbox.conversation import ConversationSandbox
-from ufo.harness.sandbox.session import ExecResult, ProbeToken, ProbeTokenCodec
+from ufo.harness.sandbox.session import ExecResult
 from ufo.runtime.agent_scope import agent, agent_current
 from ufo.runtime.billing.accounting import (
     UNGATED_LEDGER,
@@ -52,9 +53,13 @@ from ufo.runtime.billing.accounting import (
     SpendRollup,
     SpendTotals,
     UsageExport,
+    UsageLine,
     ack_usage_exports,
     mint_usage_exports,
     read_pending_usage_exports,
+    session_spend,
+    token_spend,
+    usage_lines,
 )
 from ufo.runtime.billing.spend import (
     ALLOW,
@@ -126,6 +131,11 @@ from ufo.schema.records import (
     TurnStatus,
     Usage,
 )
+
+if TYPE_CHECKING:
+    from ufo.runtime.access.proxy_sessions import SessionCreated
+    from ufo.runtime.access.turn_sessions import ProbeSessions
+    from ufo.runtime.access.vault import SecretValue, VaultReads
 
 CORE_EXTENSION = "core"
 SPEND_REFUSAL_NOTICE_KEY = "spend_refusal_notice"
@@ -348,10 +358,15 @@ class CredentialAccess:
     slot authored that declaration itself, so gating its own row behind a manifest name it cannot
     write would leave the value reachable by the proxy and the sandbox and by nothing in-process.
     That gap is what forces one fixed slot to hold a map of many secrets, and a map cannot carry a
-    row's owner."""
+    row's owner.
+
+    `minted` names the declared slots the extension mints, the only ones `put` writes: a value the
+    extension creates for itself needs no member to hand it over, and code never overwrites a slot
+    a member fills."""
 
     declared: frozenset[str]
     resolved: Callable[[], Awaitable[frozenset[str]]] | None = None
+    minted: frozenset[str] = frozenset()
 
     @property
     def workspace_id(self) -> UUID:
@@ -387,6 +402,13 @@ class CredentialAccess:
         than asking about one slot it already has in hand. Slots this extension neither declares nor
         resolves never appear, so this discloses no more than `stored` would."""
         return await ws_current().stored_credential_slots() & await self._gated()
+
+    async def put(self, slot: str, plaintext: str) -> None:
+        """Write the bound workspace's value for a slot this extension mints, whether or not one is
+        stored. Any other slot raises, and so does an empty value."""
+        if slot not in self.minted:
+            raise UndeclaredCredentialSlot(slot)
+        await ws_current().put_credential(slot, plaintext)
 
     async def rotate(self, slot: str, expected: str, plaintext: str) -> bool:
         """Compare-and-swap an existing declared slot after an external provider rotates it. This
@@ -553,30 +575,39 @@ class ConversationFiles:
         await self._sandboxes.prune_runtime(conversation_id, category, rel_prefix, keep)
 
 
-async def conversation_agent_id(workspace_id: UUID, conversation_id: UUID) -> UUID | None:
-    """The agent a conversation is permanently bound to, or None when the id names no conversation
-    in this workspace. One read behind both askers: the handler resolving an opaque id to an agent
-    wall, and an off-turn exec deciding whose scope it runs under."""
+async def conversation_agent(workspace_id: UUID, conversation_id: UUID) -> tuple[UUID, bool] | None:
+    """The agent a conversation is permanently bound to and whether that agent allows the internet,
+    or None when the id names no conversation in this workspace. One read behind every asker: the
+    handler resolving an opaque id to an agent wall, and an off-turn exec deciding whose scope it
+    runs under."""
     async with workspace_tx() as connection:
         found = (
             await connection.execute(
-                sa.select(tables.conversation.c.agent_id).where(
+                sa.select(tables.agent.c.id, tables.agent.c.internet_access_allowed)
+                .select_from(
+                    tables.conversation.join(
+                        tables.agent, tables.agent.c.id == tables.conversation.c.agent_id
+                    )
+                )
+                .where(
                     tables.conversation.c.workspace_id == workspace_id,
                     tables.conversation.c.id == conversation_id,
+                    tables.agent.c.workspace_id == workspace_id,
                 )
             )
         ).one_or_none()
-    return None if found is None else found.agent_id
+    return None if found is None else (found.id, bool(found.internet_access_allowed))
 
 
 PROBE_TIMEOUT_SECONDS = 60
 PROBE_TIMEOUT_MAX_SECONDS = 120
 
 ProbeEnvironment = Callable[[UUID, UUID, UUID | None], Awaitable[dict[str, str]]]
-"""What a probe's sandbox open exports, answered for one conversation, one probe id, and the
-member the probe acts for: git proxy-auth and credential config, that member's connector CLI
-sentinels, and the conversation id. The derivation reads the deploy's declared credential slots,
-so it is wired in by the deploy that holds them rather than reached from here."""
+"""What a probe's sandbox open exports beside its session, answered for one conversation, one probe
+id, and the member the probe acts for: git's config channel, that member's committer identity, the
+selected hosts of the workspace's keyed slots, and the conversation id. The derivation reads the
+deploy's declared credential slots, so it is wired in by the deploy that holds them rather than
+reached from here."""
 
 
 @dataclass(frozen=True)
@@ -587,20 +618,20 @@ class ConversationProbes:
     work meant to outlive its arming turn loses the network the moment the turn commits, and a
     container the carrier suspended has nothing left running to ask. A probe re-enters the
     conversation's own sandbox — the same `/workspace` the agent's files live in, resumed on touch —
-    under a token this deployment signs for that one exec, and hands back what the command reported.
+    and hands back what the command reported.
 
-    Its capability is the conversation's agent, that agent's snapshotted internet policy, the
-    workspace's keyed credentials, and the connector grants of the member the caller acts for.
-    The one thing it deliberately lacks is the deployment's model key: no sentinel is exported and
-    the proxy resolves no injection for it, so an unattended exec cannot spend the deployment's
-    model budget.
+    Where the sandbox egresses through the proxy service, the exec runs under a session of its own,
+    revoked when the exec ends: the conversation's agent, that agent's internet policy, the
+    workspace's keyed credentials, and the connections of the member the caller acts for. The one
+    thing it deliberately lacks is the deployment's model key, which its policy never binds, so an
+    unattended exec cannot spend the deployment's model budget.
 
     A conversation bound to a member's terminal raises `TerminalGone` when that terminal is not
     connected. That reaches the caller rather than reading as an empty result: a probe that could
     not run is not a probe that found nothing."""
 
     _sandboxes: ConversationSandbox
-    _probe_tokens: ProbeTokenCodec
+    _sessions: "ProbeSessions | None"
     _env: ProbeEnvironment
 
     async def run(
@@ -618,17 +649,15 @@ class ConversationProbes:
 
         `acting_member_id` names the member the exec acts for — the creator of the watch that runs
         it — so that member's private connections reach it beside the shared ones; None reaches the
-        shared ones alone. `internet_access=False` preserves a caller's narrower internet policy.
+        shared ones alone. `internet_access=False` narrows the agent's internet policy for the
+        exec.
 
         The exec runs bound to the conversation's own agent. A job binds a workspace and no agent —
         nothing has an agent to bind, since a probe answers to no turn — yet the environment is
-        derived from that agent's connector grants, and the proxy resolves this probe's rules under
-        the same agent. Binding it here is what makes those two agree, and what keeps an
-        agent-scoped read anywhere under this call from failing on an unbound scope.
+        derived from that agent's connector grants. Binding it here is what keeps an agent-scoped
+        read anywhere under this call from failing on an unbound scope.
 
-        The token's deadline is this timeout, minted before the sandbox is opened, so the probe's
-        egress window is bounded by the exec it belongs to and closes with nothing having to revoke
-        it. Raises on a conversation outside the ambient workspace, and on a timeout over
+        Raises on a conversation outside the ambient workspace, and on a timeout over
         `PROBE_TIMEOUT_MAX_SECONDS`: an unattended exec able to hold a sandbox open longer than that
         is a wait with no end rather than a probe."""
         if not 0 < timeout_s <= PROBE_TIMEOUT_MAX_SECONDS:
@@ -636,25 +665,39 @@ class ConversationProbes:
                 f"a probe timeout of {timeout_s}s is outside 1..{PROBE_TIMEOUT_MAX_SECONDS}s"
             )
         workspace_id = ws_current().workspace_id
-        agent_id = await conversation_agent_id(workspace_id, conversation_id)
-        if agent_id is None:
+        found = await conversation_agent(workspace_id, conversation_id)
+        if found is None:
             raise ValueError(f"conversation {conversation_id} is not in this workspace")
-        probe = ProbeToken(
-            workspace_id=workspace_id,
-            conversation_id=conversation_id,
-            probe_id=uuid4(),
-            expires_at=int(datetime.now(UTC).timestamp()) + timeout_s,
-            member_id=acting_member_id,
-            internet_access=internet_access,
-        )
-        with agent(agent_id):
-            session = await self._sandboxes.open(
+        agent_id, internet_access_allowed = found
+        probe_id = uuid4()
+        sessions = self._sessions
+        opened: set[UUID] = set()
+
+        async def proxied(sessions: "ProbeSessions") -> "SessionCreated":
+            session = await sessions.open(
+                probe_id,
                 conversation_id,
-                None,
-                self._probe_tokens.encode(probe),
-                await self._env(conversation_id, probe.probe_id, probe.member_id),
+                agent_id,
+                acting_member_id,
+                internet_access_allowed and internet_access is None,
+                timeout_s,
             )
-            return await session.bash(command, timeout_s=timeout_s)
+            opened.add(session.id)
+            return session
+
+        with agent(agent_id):
+            try:
+                session = await self._sandboxes.open(
+                    conversation_id,
+                    None,
+                    await self._env(conversation_id, probe_id, acting_member_id),
+                    proxied=None if sessions is None else partial(proxied, sessions),
+                )
+                return await session.bash(command, timeout_s=timeout_s)
+            finally:
+                if sessions is not None:
+                    for session_id in opened:
+                        await sessions.revoke(workspace_id, session_id)
 
 
 def trajectory_workspaces() -> WorkspaceCandidates:
@@ -1351,21 +1394,33 @@ class ExtensionContext:
     artifact_token_secret: str = ""
     spend: SpendGates | None = None
     ledger: Ledger | None = None
+    vault_read_allowed: bool = False
+    vault: "VaultReads | None" = None
 
     @property
     def workspace_id(self) -> UUID:
         return self.store.workspace_id
 
-    async def spend_admitted(self, model: str | None = None) -> SpendDecision:
+    async def spend_admitted(
+        self, model: str | None = None, *, platform_paid: bool = False
+    ) -> SpendDecision:
         """What the spend gates would decide for the bound workspace now, read at the `status`
         moment — whether the workspace may spend, as a handler reporting it states. Caps are not
         asked: what lifts a gate does not lift a cap, and a cap holds the work it bounds at
         admission and at each round. `model` names the model the work would run on; with none, the
-        workspace's own key for any model of the deploy counts as paying its way."""
+        workspace's own key for any model of the deploy counts as paying its way. `platform_paid`
+        names work the platform pays for whatever key the workspace stores, which no own key
+        exempts."""
         if self.spend is None:
             raise RuntimeError("spend_admitted requires the deploy's spend gates; none are wired")
         async with workspace_tx() as connection:
-            return await self.spend.admit(connection, STATUS_MOMENT, self.workspace_id, model=model)
+            return await self.spend.admit(
+                connection,
+                STATUS_MOMENT,
+                self.workspace_id,
+                model=model,
+                self_funded=False if platform_paid else None,
+            )
 
     async def meter_tokens(
         self, call_id: UUID, model: str, usage: Usage, price: ModelPrice, *, byok: bool
@@ -1382,6 +1437,53 @@ class ExtensionContext:
                 pricing_from({model: price}),
                 byok,
                 call_id,
+            )
+
+    async def record_usage(
+        self,
+        service: str,
+        unit: str,
+        backend: str | None,
+        amount: int,
+        *,
+        token_id: UUID | None,
+        session_id: UUID | None,
+        labels: Mapping[str, str],
+        resource_id: str | None,
+        attempt: str,
+        occurred_at: datetime,
+        byok: bool,
+        price_micro_usd: int,
+        price_digest: str,
+        model: str = "",
+        usage: Usage | None = None,
+    ) -> bool:
+        """Book one record a service metered in the bound workspace's ledger, once per
+        `(service, resource_id or session_id, unit, attempt)`: True when this call wrote it, False
+        for a replay of the same record, `TurnUsageConflict` for a replay whose content differs.
+        `unit` is one `SERVICE_UNITS` names for the service; a `tokens` record carries `model` and
+        its six token classes in `usage`, summing to `amount`."""
+        if self.ledger is None:
+            raise RuntimeError("record_usage requires the deploy's ledger; none is wired")
+        async with workspace_tx() as connection:
+            return await self.ledger.record_service_usage(
+                connection,
+                self.workspace_id,
+                service=service,
+                dimension=unit,
+                backend=backend,
+                amount=amount,
+                token_id=token_id,
+                session_id=session_id,
+                labels=labels,
+                resource_id=resource_id,
+                attempt=attempt,
+                occurred_at=occurred_at,
+                byok=byok,
+                priced_micro_usd=price_micro_usd,
+                price_digest=price_digest,
+                model=model,
+                usage=usage,
             )
 
     def image_preview_url(self, blob_key: str, size_bytes: int) -> str | None:
@@ -1414,6 +1516,18 @@ class ExtensionContext:
         return shared_artifact_preview_link(
             self.artifact_token_secret, self.public_base_url, self.workspace_id, artifact
         )
+
+    async def resolve_secret(self, name: str, host: str, member_id: UUID | None) -> "SecretValue":
+        """The value the secret `name` takes on the wire to `host` for the bound workspace: a
+        credential slot, `connection:<id>`, or `ufo/models`, each released only on a host its
+        declaration admits and otherwise `SecretUnbound`. `member_id` is the member the asking
+        session was created for: a connection that is not shared answers only its owner. Only a
+        manifest declaring `vault_read` asks, and the deploy's vault answers."""
+        if not self.vault_read_allowed:
+            raise PermissionError("This extension cannot resolve secrets.")
+        if self.vault is None:
+            raise RuntimeError("resolve_secret requires the deploy's vault; none is wired.")
+        return await self.vault.resolve(self.workspace_id, name, host, member_id)
 
     async def scheduled_runs(
         self,
@@ -1794,6 +1908,46 @@ class ExtensionContext:
         async with workspace_tx() as connection:
             return await SpendRollup(self.workspace_id).read_totals(connection, window_seconds)
 
+    async def usage_lines(
+        self,
+        since: datetime,
+        until: datetime,
+        *,
+        keys: frozenset[str],
+        label_keys: frozenset[str] = frozenset(),
+        backend: str | None = None,
+        byok: bool | None = None,
+        labels: Mapping[str, str] = {},
+    ) -> tuple[UsageLine, ...]:
+        """The bound workspace's usage in `[since, until)` per UTC day, grouped by `keys`
+        (`USAGE_KEYS`) and by the labels `label_keys` names, filtered to `backend`, `byok` and the
+        label values `labels` names. A read grouped or filtered by a label covers turn rows and the
+        days the nightly fold has not closed."""
+        async with workspace_tx() as connection:
+            return await usage_lines(
+                connection,
+                self.workspace_id,
+                since,
+                until,
+                keys=keys,
+                label_keys=label_keys,
+                backend=backend,
+                byok=byok,
+                labels=labels,
+            )
+
+    async def token_spend(self, token_id: UUID, window_seconds: int) -> int:
+        """What the platform paid for a token's records in the bound workspace over the last
+        `window_seconds`, in micro-USD; a day the nightly fold closed counts whole."""
+        since = datetime.now(UTC) - timedelta(seconds=window_seconds)
+        async with workspace_tx() as connection:
+            return await token_spend(connection, self.workspace_id, token_id, since)
+
+    async def session_spend(self, session_id: UUID) -> int:
+        """What the platform paid for a session's records in the bound workspace, in micro-USD."""
+        async with workspace_tx() as connection:
+            return await session_spend(connection, self.workspace_id, session_id)
+
     async def pending_usage_exports(self, floor: datetime, limit: int) -> tuple[UsageExport, ...]:
         """This extension's settled, unacknowledged usage deltas, at most `limit`, minting new
         intents first — the billing-export read seam. Consumer-keyed by the extension's stable
@@ -1944,7 +2098,8 @@ class ExtensionContext:
         """The agent this workspace's conversation is permanently bound to, or None when the id
         names no conversation here — how a handler resolves an opaque conversation id to the agent
         wall a member-facing link addresses."""
-        return await conversation_agent_id(self.workspace_id, conversation_id)
+        found = await conversation_agent(self.workspace_id, conversation_id)
+        return None if found is None else found[0]
 
     async def conversation_facts(
         self, conversation_ids: tuple[UUID, ...]
@@ -2767,16 +2922,19 @@ def context_for(
     home_surface: str | None = None,
     deploy_credentials: DeployCredentials = NO_DEPLOY_CREDENTIALS,
     workspace_credentials: Callable[[], Awaitable[frozenset[str]]] | None = None,
+    minted: frozenset[str] = frozenset(),
     spend: SpendGates | None = None,
     ledger: Ledger | None = None,
+    vault_read: bool = False,
+    vault: "VaultReads | None" = None,
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
-    workspace is bound when a handler runs. `declared` gates credential slots and `surfaces` gates
-    installation registration; a `model_resolver` wires the metered model seam, keyed and billed
-    to that same workspace, and `model_job` is the job key that seam's spend and latency are
-    attributed to — required wherever a resolver is wired, so a metered call can never reach the
-    `ufo.model_*` series unattributed.
+    workspace is bound when a handler runs. `declared` gates credential slots, `minted` names the
+    declared ones the handler writes itself, and `surfaces` gates installation registration; a
+    `model_resolver` wires the metered model seam, keyed and billed to that same workspace, and
+    `model_job` is the job key that seam's spend and latency are attributed to — required wherever
+    a resolver is wired, so a metered call can never reach the `ufo.model_*` series unattributed.
     `public_base_url` is the deploy's externally reachable base, which a
     kind listing rows a member opens needs and cannot reach any other way, and
     `artifact_token_secret` is what a link into the artifact namespace is signed with — a kind whose
@@ -2787,14 +2945,18 @@ def context_for(
     `search` is the deploy's selected web-search backend: the seam a handler grounding a turn
     before the model runs reads, built once at boot and reaching its key host-side. `spend` and
     `ledger` are the deploy's gates and ledger, which the metered model seam and a handler's own
-    metering and spend reads go through; a context wired with neither refuses both reads."""
+    metering and spend reads go through; a context wired with neither refuses both reads.
+    `vault_read` is the manifest's privileged capability to resolve a bound secret through the
+    deploy's `vault`, which a context without it never carries."""
     if model_resolver is not None and model_job is None:
         raise ValueError("a wired model_resolver needs the model_job its spend is attributed to")
     if model_resolver is not None and (spend is None or ledger is None):
         raise ValueError("a wired model_resolver needs the deploy's spend gates and ledger")
     return ExtensionContext(
         store=ScopedStore(extension=extension),
-        credentials=CredentialAccess(declared=declared, resolved=workspace_credentials),
+        credentials=CredentialAccess(
+            declared=declared, resolved=workspace_credentials, minted=minted
+        ),
         audience=audience,
         installations=SurfaceInstallationAccess(declared=surfaces, addressed=addressed_surfaces),
         index=index,
@@ -2823,4 +2985,6 @@ def context_for(
         deploy_credentials=deploy_credentials,
         spend=spend,
         ledger=ledger,
+        vault_read_allowed=vault_read,
+        vault=vault if vault_read else None,
     )

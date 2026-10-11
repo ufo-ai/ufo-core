@@ -1194,6 +1194,7 @@ def test_bridge_lists_the_dispatcher_and_gates_it_on_the_action_grant(
         subagents=SubagentRegistry((sample.manifest().subagents[0],)),
         subagent_grants={},
         actions=actions,
+        sessions=None,
     )
     Parent = namedtuple("Parent", ("subagent_profile", "tools"))
     assert bridge._allowed(Parent(None, None), dispatcher) is True
@@ -1208,6 +1209,7 @@ def test_bridge_lists_the_dispatcher_and_gates_it_on_the_action_grant(
         subagents=SubagentRegistry((sample.manifest().subagents[0],)),
         subagent_grants={SUBAGENT_NAME: frozenset({POLISH_ID})},
         actions=actions,
+        sessions=None,
     )
     assert granted._allowed(profile_parent, dispatcher) is True
     reads = [tool for tool in tools if tool.name in {"object_list", "object_get"}]
@@ -1232,5 +1234,6 @@ def test_bridge_lists_the_dispatcher_and_gates_it_on_the_action_grant(
         subagents=SubagentRegistry((sample.manifest().subagents[0],)),
         subagent_grants={SUBAGENT_NAME: frozenset({"load_skill"})},
         actions=actions,
+        sessions=None,
     )
     assert implied._allowed(profile_parent, dispatcher) is True

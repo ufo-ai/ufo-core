@@ -2,7 +2,7 @@
 
 The local carrier has no fake to stand in for — it runs the host's own shell, so these drive it
 end to end: create the workspace, exec a command that writes into it, rewrite the logical
-`/workspace` path, carry the egress environment, reach a service on the sandbox's own loopback,
+`/workspace` path, carry the spec's environment, reach a service on the sandbox's own loopback,
 and stream a file out in bounded chunks. The last test proves the payoff — the file tools run
 through the default carrier against the `ufo` client on its command PATH, no container."""
 
@@ -27,9 +27,8 @@ from ufo.harness.sandbox.local import (
     provision_scratch,
 )
 from ufo.harness.sandbox.session import (
-    SENTINEL_MODEL_KEY,
+    PROXY_SESSION_ENV_NAMES,
     WORKSPACE_DIR,
-    ProxyEndpoint,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
@@ -37,8 +36,6 @@ from ufo.harness.sandbox.session import (
 from ufo.runtime.skills.runtime import RuntimeSkill, SystemSkillBundle
 
 ROOT = Path(__file__).parents[3]
-RUN_TOKEN = "run-token-abc"
-PROXY_PORT = 9999
 PROBE_SYSTEM_HELPER = "probe-system-helper-that-never-runs"
 PROBE_GLOBAL_HELPER = "probe-global-helper-that-never-runs"
 PROBE_ENV_HELPER = "probe-env-helper-that-never-runs"
@@ -212,8 +209,6 @@ def _spec(workspace: Path) -> SandboxSpec:
         conversation_id=uuid4(),
         image_ref="ufo-sandbox:latest",
         workspace_host_path=str(workspace),
-        proxy=ProxyEndpoint(port=PROXY_PORT, ca_cert="CA-PEM-BYTES"),
-        run_token=RUN_TOKEN,
     )
 
 
@@ -415,26 +410,31 @@ async def test_a_logical_path_inside_a_file_a_command_reads_is_not_rewritten(
     assert result.stdout.strip() == "False"
 
 
-async def test_exec_carries_the_egress_environment(tmp_path: Path) -> None:
+async def test_exec_carries_the_spec_env_and_no_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in PROXY_SESSION_ENV_NAMES:
+        monkeypatch.setenv(name, "http://serve-proxy.test")
     carrier = LocalCarrier()
-    handle = await carrier.create(_spec(tmp_path / "workspace"))
+    handle = await carrier.create(
+        replace(_spec(tmp_path / "workspace"), env={"ACME_KEY": "spec-carried"})
+    )
+    names = sorted(PROXY_SESSION_ENV_NAMES)
 
     result = await carrier.exec(
         handle,
         (
             "bash",
             "-lc",
-            'printf "%s|%s|%s|%s" "$HTTPS_PROXY" "$ANTHROPIC_API_KEY" '
-            '"$GIT_SSL_CAINFO" "$CARGO_HTTP_CAINFO"',
+            'printf "%s|" "$ACME_KEY" "${SSL_CERT_FILE:-none}" '
+            + " ".join(f'"${{{name}:-none}}"' for name in names),
         ),
         30,
     )
 
-    proxy, sentinel, git_ca, cargo_ca = result.stdout.split("|")
-    assert proxy == f"http://{RUN_TOKEN}:ufo@127.0.0.1:{PROXY_PORT}"
-    assert sentinel == SENTINEL_MODEL_KEY
-    assert git_ca and git_ca == handle.egress_env["SSL_CERT_FILE"]
-    assert cargo_ca == git_ca
+    assert result.stdout.split("|")[:-1] == ["spec-carried", "none", *["none"] * len(names)]
+    assert PROXY_SESSION_ENV_NAMES.isdisjoint(handle.egress_env)
+    assert "SSL_CERT_FILE" not in handle.egress_env
 
 
 async def test_the_serve_environment_does_not_reach_a_command(
@@ -689,15 +689,15 @@ async def test_exec_env_rides_the_handle_not_the_conversation(tmp_path: Path) ->
     carrier = LocalCarrier()
     conversation = uuid4()
     base = replace(_spec(tmp_path / "workspace"), conversation_id=conversation)
-    first = await carrier.create(replace(base, run_token="turn-a"))
-    second = await carrier.create(replace(base, run_token="turn-b", env={"GH_TOKEN": "sent-b"}))
+    first = await carrier.create(base)
+    second = await carrier.create(replace(base, env={"GH_TOKEN": "sent-b"}))
 
-    probe = ("bash", "-lc", 'printf "%s|%s" "$HTTPS_PROXY" "${GH_TOKEN:-none}"')
+    probe = ("bash", "-lc", 'printf "%s" "${GH_TOKEN:-none}"')
     result_a = await carrier.exec(first, probe, 30)
     result_b = await carrier.exec(second, probe, 30)
 
-    assert result_a.stdout == f"http://turn-a:ufo@127.0.0.1:{PROXY_PORT}|none"
-    assert result_b.stdout == f"http://turn-b:ufo@127.0.0.1:{PROXY_PORT}|sent-b"
+    assert result_a.stdout == "none"
+    assert result_b.stdout == "sent-b"
 
 
 async def test_background_descendant_keeps_its_authority_across_later_execs(
@@ -706,35 +706,22 @@ async def test_background_descendant_keeps_its_authority_across_later_execs(
     workspace = tmp_path / "workspace"
     carrier = LocalCarrier()
     base = SandboxSession(carrier=carrier, handle=await carrier.create(_spec(workspace)))
-    first = base.authorize(
-        "member-a",
-        frozenset(("GH_TOKEN",)),
-        {"GH_TOKEN": "sent-a"},
-    )
-    second = base.authorize(
-        "member-b",
-        frozenset(("GH_TOKEN",)),
-        {"GH_TOKEN": "sent-b"},
-    )
+    first = await base.authorize(frozenset(("GH_TOKEN",)), {"GH_TOKEN": "sent-a"})
+    second = await base.authorize(frozenset(("GH_TOKEN",)), {"GH_TOKEN": "sent-b"})
 
     launched = await first.bash(
         "nohup sh -c 'while [ ! -f release ]; do :; done; "
-        'printf "%s|%s" "$HTTPS_PROXY" "$GH_TOKEN" > first.tmp && mv first.tmp first.txt\' '
+        'printf "%s" "$GH_TOKEN" > first.tmp && mv first.tmp first.txt\' '
         ">/dev/null 2>&1 &"
     )
     assert launched.exit_code == 0
     written = await second.bash(
-        'printf "%s|%s" "$HTTPS_PROXY" "$GH_TOKEN" > second.txt; '
-        "touch release; while [ ! -f first.txt ]; do :; done"
+        'printf "%s" "$GH_TOKEN" > second.txt; touch release; while [ ! -f first.txt ]; do :; done'
     )
     assert written.exit_code == 0
 
-    assert (workspace / "first.txt").read_text() == (
-        f"http://member-a:ufo@127.0.0.1:{PROXY_PORT}|sent-a"
-    )
-    assert (workspace / "second.txt").read_text() == (
-        f"http://member-b:ufo@127.0.0.1:{PROXY_PORT}|sent-b"
-    )
+    assert (workspace / "first.txt").read_text() == "sent-a"
+    assert (workspace / "second.txt").read_text() == "sent-b"
 
 
 async def test_a_second_write_never_shows_a_reader_a_half_written_file(tmp_path: Path) -> None:

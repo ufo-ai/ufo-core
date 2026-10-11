@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crossterm::event::{Event as TermEvent, KeyEventKind};
 
 use ufo::clipboard::{self, Clip};
-use ufo::cmd::{cp, fscli, llm, run, sandbox, tools};
+use ufo::cmd::{cp, fscli, llm, proxy, run, sandbox, tools};
 #[cfg(unix)]
 use ufo::interrupt;
 use ufo::ops::{self, OpRuntime};
@@ -31,6 +31,7 @@ Usage: ufo [--resume ID] [--remote] [--model MODEL] [--no-internet] [--environme
        ufo cp SRC DST  (one side is CHANNEL:PATH; directories sync)
        ufo fs {read|write|edit|grep|glob|changes} <json>
        ufo llm [--model MODEL] [--max-tokens N] PROMPT
+       ufo proxy --session TOKEN [--env | --stop]
        ufo run [--task PATH] [--detach] -- COMMAND [ARG...]
        ufo tool TOOL [--describe]
 
@@ -40,6 +41,7 @@ Commands:
   cp             Copy files or sync a folder with a conversation's workspace.
   fs             Run one file op inside a sandbox and print its JSON result.
   llm            Ask a model one question through the sandbox's egress proxy.
+  proxy          Start a loopback proxy for a session and print its environment.
   run            Run a command with task state and sandbox egress.
   tool           Describe or call an object or connector tool with JSON.
 
@@ -67,6 +69,7 @@ asks prints with the command that answers it.
 ";
 
 const GATEWAY_URL_DEFAULT: Option<&str> = option_env!("UFO_GATEWAY_URL_DEFAULT");
+const PROXY_URL_DEFAULT: Option<&str> = option_env!("UFO_PROXY_URL_DEFAULT");
 const ONBOARDING_CHANNEL: &str = "onboard";
 const RECONNECT_PAUSE: Duration = Duration::from_secs(1);
 const RECONNECT_ATTEMPTS: u32 =
@@ -83,6 +86,7 @@ fn main() {
         Some("cp") => process::exit(cp::main(&args[1..])),
         Some("fs") => process::exit(fscli::main(&args[1..])),
         Some("llm") => process::exit(llm::main(&args[1..])),
+        Some("proxy") => process::exit(proxy::main(&args[1..], PROXY_URL_DEFAULT)),
         Some("run") => process::exit(run::main(&args[1..])),
         Some("sandbox") => process::exit(sandbox::main(&args[1..])),
         Some("tool") => process::exit(tools::main(&args[1..])),

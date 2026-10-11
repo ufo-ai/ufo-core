@@ -6,6 +6,7 @@ asserted: every assertion reads real rows, real recall results, and real spend d
 the real backend. On the sqlite param this runs against the real DefaultIndex over SQLite FTS5; on
 the postgres param against real Postgres + pgvector."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -25,7 +26,16 @@ from ufo_testsupport.index import default_index
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
-from ufo.runtime.billing.accounting import UNGATED_LEDGER, SpendEvaluator
+from ufo.harness.models.catalog import PRICE_DIGEST
+from ufo.runtime.billing.accounting import (
+    MODELS_SERVICE,
+    PROXY_VIA,
+    TOKENS_DIMENSION,
+    TURN_LABEL,
+    UNGATED_LEDGER,
+    VIA_LABEL,
+    SpendEvaluator,
+)
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.ext.source_reader import SourceReader
 from ufo.runtime.indexing import TextChunker
@@ -301,7 +311,7 @@ async def test_member_fact_recall_is_isolated_from_other_members(db: None) -> No
         )
 
 
-async def test_metered_sandbox_tokens_breach_a_member_cap_and_park(db: None) -> None:
+async def test_models_tokens_via_proxy_breach_a_member_cap_and_park(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed_billable(connection)
         await _set_member_cap(
@@ -313,8 +323,24 @@ async def test_metered_sandbox_tokens_breach_a_member_cap_and_park(db: None) -> 
         turn_id = await _seed_running_turn(
             connection, workspace_id, conversation_id, agent_id, speaker_member_id=member_id
         )
-        await UNGATED_LEDGER.record_sandbox_tokens(
-            connection, workspace_id, turn_id, "claude-opus-4-8", HEAVY_USAGE
+        await UNGATED_LEDGER.record_service_usage(
+            connection,
+            workspace_id,
+            service=MODELS_SERVICE,
+            dimension=TOKENS_DIMENSION,
+            backend=None,
+            amount=10_000,
+            token_id=None,
+            session_id=uuid4(),
+            labels={VIA_LABEL: PROXY_VIA, TURN_LABEL: str(turn_id)},
+            resource_id=None,
+            attempt="flush-1",
+            occurred_at=datetime.now(UTC),
+            byok=False,
+            priced_micro_usd=96_500,
+            price_digest=PRICE_DIGEST,
+            model="claude-opus-4-8",
+            usage=HEAVY_USAGE,
         )
         decision = await evaluator.decide(connection, 0)
     assert decision.outcome == "park"

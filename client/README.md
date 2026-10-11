@@ -26,6 +26,7 @@ in the workspace's configured sandbox.
 ```
 ufo [--resume ID] [--remote] [--wait SECONDS] [--authorize ID CHOICE] [--json] [message...]
 ufo login | logout
+ufo proxy --session TOKEN [--env | --stop]
 ```
 
 A program that runs `ufo` in a pipe reads plain lines and needs no other mode. stdout is the
@@ -47,6 +48,14 @@ sign-in over, and `ufo logout` forgets it.
 your own terminal conversations, and with a conversation id joins a conversation from any surface.
 A terminal conversation runs in the directory you are in; a joined conversation keeps the sandbox it
 already has, so file and command requests in it never reach your machine.
+
+`ufo proxy --session TOKEN` puts a program on this machine behind a proxy service session. It reads
+the session's environment from the proxy service, writes `$UFO_HOME/proxy/ca.pem` (this machine's
+roots plus the proxy's CA), starts a loopback daemon that relays to the proxy over TLS (reusing one
+that already relays to the same proxy service and replacing one that relays elsewhere), and prints
+the variables to set: the four proxy variables pointing at the daemon, `NO_PROXY`, each binding's
+sentinel, and the CA bundle for every tool that reads one. `--env` prints them as `export` lines
+for `eval "$(ufo proxy --session TOKEN --env)"`, and `--stop` ends the daemon.
 
 ## Run it in development
 
@@ -73,13 +82,15 @@ scripts/build-gh.sh aarch64-apple-darwin /tmp/ufo-gh.gz
 UFO_GH_ARCHIVE=/tmp/ufo-gh.gz cargo build --release
 ```
 
-CI builds that release for each supported platform. `UFO_GATEWAY_URL_DEFAULT` at build time names
-the sign-in gateway a client with nothing stored reaches; this repository's build sets none.
+CI builds that release for each supported platform. At build time `UFO_GATEWAY_URL_DEFAULT` names
+the sign-in gateway a client with nothing stored reaches, and `UFO_PROXY_URL_DEFAULT` names the proxy
+service `ufo proxy` reaches; this repository's build sets neither.
 
 | Variable | What it does |
 |---|---|
 | `UFO_URL` | Base URL of the sign-in gateway, ahead of the one stored after sign-in and the build's default. |
-| `UFO_HOME` | Directory holding the credential, current workspace, input history, and system skill cache. Defaults to `~/.ufo`. |
+| `UFO_PROXY_URL` | Base URL of the proxy service `ufo proxy` reaches, ahead of the build's default. |
+| `UFO_HOME` | Directory holding the credential, current workspace, input history, system skill cache, and `ufo proxy` state. Defaults to `~/.ufo`. |
 | `WORKSPACE_URL` | Talks to one workspace directly, instead of the one in `$UFO_HOME/workspace`. |
 | `UFO_CHANNEL` | Names the conversation to join instead of starting a fresh one. |
 | `UFO_PLAIN` | Any value forces the plain line renderer. `NO_COLOR` and `TERM=dumb` do the same. |

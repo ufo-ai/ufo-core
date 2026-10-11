@@ -124,6 +124,7 @@ def _bridge(dbos: _DBOS, hub: InProcessHub) -> ToolBridge:
         tools=bridge_tools(()),
         subagents=SubagentRegistry(()),
         subagent_grants={},
+        sessions=None,
     )
 
 

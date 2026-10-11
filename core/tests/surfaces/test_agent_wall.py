@@ -23,7 +23,6 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.ext.manifest import SubagentProfile
@@ -85,7 +84,6 @@ def _context(workspace_id: UUID, surface: str) -> SurfaceContext:
             backend="local",
             off_cluster=False,
             image_ref=SANDBOX_IMAGE_REF,
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             workspace_root=Path("workspaces"),
         ),
         _admitter=MemberAdmission(
@@ -271,6 +269,7 @@ async def test_subagent_conversation_inherits_the_parents_agent(db: None) -> Non
         registry=SubagentRegistry((profile,)),
         parent=parent,
         audience=conversation_audience(None),
+        sessions=None,
     )
     with ws(workspace_id):
         spawned = await subagents.spawn("research", {"task": "acme"}, background=True)

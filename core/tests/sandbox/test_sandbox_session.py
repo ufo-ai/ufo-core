@@ -6,10 +6,8 @@ import logging
 import subprocess
 import sys
 from collections.abc import AsyncIterator
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
@@ -22,15 +20,9 @@ from ufo.harness.auth.token_signing import sign_token
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
-    CA_SANDBOX_PATH,
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     DOCUMENT_READ_EXEC_TIMEOUT_SECONDS,
-    NO_PROXY_HOSTS,
-    PROBE_TOKEN_KIND,
-    PROXY_ENV_NAMES,
-    PROXY_PASSWORD,
     SANDBOX_PYTHON_FLAG,
-    SENTINEL_MODEL_KEY,
     SKILL_LOAD_PROG,
     SKILL_STAGING_DIRNAME,
     SYSTEM_SKILL_SYNC_PROG,
@@ -38,15 +30,11 @@ from ufo.harness.sandbox.session import (
     WORKSPACE_DIR,
     WORKSPACE_SCOPE_HINT,
     ExecResult,
-    ProbeToken,
-    ProbeTokenCodec,
-    ProxyEndpoint,
     RunToken,
     RunTokenCodec,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
-    egress_proxy_env,
     host_argv,
     runtime_relative,
     shell_path,
@@ -69,7 +57,6 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 
 RUN_TOKENS = RunTokenCodec(b"run-token-test-secret")
-PROBE_TOKENS = ProbeTokenCodec(b"run-token-test-secret")
 LARGE_SKILL_BYTES = 1_000_000
 LINUX_MAX_ARG_STRLEN = 131_072
 
@@ -81,45 +68,21 @@ def _check_shell_path_expands_only_the_runtime_home_prefix() -> None:
     assert shell_path("/workspace/run file.mjs") == "'/workspace/run file.mjs'"
 
 
-def _check_egress_proxy_env_embeds_run_token_and_sentinels() -> None:
-    proxy = ProxyEndpoint(port=9, ca_cert="PEM", public_url="https://proxy.example.com")
-    env = egress_proxy_env(proxy, "tok-123")
-    assert env["HTTPS_PROXY"] == "https://tok-123:ufo@proxy.example.com"
-    assert env["HTTP_PROXY"] == env["https_proxy"] == env["http_proxy"] == env["HTTPS_PROXY"]
-    assert env["ANTHROPIC_API_KEY"] == SENTINEL_MODEL_KEY
-    assert env["OPENAI_API_KEY"] == SENTINEL_MODEL_KEY
-    assert env["NO_PROXY"] == env["no_proxy"] == NO_PROXY_HOSTS
-    assert env["NODE_EXTRA_CA_CERTS"] == CA_SANDBOX_PATH
-
-
-def _check_egress_proxy_env_refuses_missing_or_http_url() -> None:
-    with pytest.raises(RuntimeError, match="proxy_public_url"):
-        egress_proxy_env(ProxyEndpoint(port=9, ca_cert="PEM"), "tok")
-    with pytest.raises(RuntimeError, match="HTTPS"):
-        egress_proxy_env(
-            ProxyEndpoint(port=9, ca_cert="PEM", public_url="http://proxy.example.com"), "tok"
-        )
-
-
-def _basic(username: str) -> str:
-    return "Basic " + base64.b64encode(f"{username}:{PROXY_PASSWORD}".encode()).decode()
-
-
-def _check_run_token_round_trips_encode_then_proxy_auth() -> None:
+def _check_run_token_round_trips_encode_then_decode() -> None:
     token = RunToken(workspace_id=uuid4(), turn_id=uuid4(), acts_for=uuid4())
-    assert RUN_TOKENS.from_proxy_auth(_basic(RUN_TOKENS.encode(token))) == token
+    assert RUN_TOKENS.decode(RUN_TOKENS.encode(token)) == token
 
 
 def _check_run_token_wire_carries_a_member_the_turn_or_nobody() -> None:
     workspace_id, turn_id, member_id = uuid4(), uuid4(), uuid4()
     for actor, expected in ((str(member_id), member_id), ("-", "turn"), ("~", "nobody")):
         payload = f"ufo-run/{workspace_id}/{turn_id}/{actor}".encode()
-        decoded = RUN_TOKENS.from_proxy_auth(_basic(sign_token(RUN_TOKENS.secret, payload)))
+        decoded = RUN_TOKENS.decode(sign_token(RUN_TOKENS.secret, payload))
         assert decoded == RunToken(workspace_id, turn_id, acts_for=expected)
         assert RUN_TOKENS.encode(decoded) == sign_token(RUN_TOKENS.secret, payload)
-    with pytest.raises(ValueError):
-        RUN_TOKENS.from_proxy_auth(
-            _basic(sign_token(RUN_TOKENS.secret, f"ufo-run/{workspace_id}/{turn_id}".encode()))
+    with pytest.raises(ValueError, match="signed"):
+        RUN_TOKENS.decode(
+            sign_token(RUN_TOKENS.secret, f"ufo-run/{workspace_id}/{turn_id}".encode())
         )
 
 
@@ -128,168 +91,97 @@ def _check_run_token_member_is_keyword_only() -> None:
         RunToken(uuid4(), uuid4(), uuid4())
 
 
-def _check_encoded_token_is_url_safe_userinfo() -> None:
+def _check_encoded_token_is_a_header_value() -> None:
     encoded = RUN_TOKENS.encode(RunToken(workspace_id=uuid4(), turn_id=uuid4()))
     assert all(char.isalnum() or char in "-_." for char in encoded)
 
 
-def _check_from_proxy_auth_rejects_non_basic_scheme() -> None:
-    with pytest.raises(ValueError, match="basic"):
-        RUN_TOKENS.from_proxy_auth("Bearer " + RUN_TOKENS.encode(RunToken(uuid4(), uuid4())))
+def _check_decode_rejects_a_malformed_run_token() -> None:
+    for token in ("", "not-a-run-token", "Basic " + RUN_TOKENS.encode(RunToken(uuid4(), uuid4()))):
+        with pytest.raises(ValueError, match="signed"):
+            RUN_TOKENS.decode(token)
 
 
-def _check_from_proxy_auth_rejects_missing_header() -> None:
-    with pytest.raises(ValueError, match="basic"):
-        RUN_TOKENS.from_proxy_auth("")
-
-
-def _check_from_proxy_auth_rejects_a_malformed_run_token() -> None:
-    with pytest.raises(ValueError):
-        RUN_TOKENS.from_proxy_auth(_basic("not-a-run-token"))
+def _check_decode_rejects_another_domain() -> None:
+    payload = f"ufo-session/{uuid4()}/{uuid4()}/-".encode()
+    with pytest.raises(ValueError, match="signed"):
+        RUN_TOKENS.decode(sign_token(RUN_TOKENS.secret, payload))
 
 
 def _check_run_token_rejects_a_valid_shape_signed_by_another_deployment() -> None:
     run = RunToken(uuid4(), uuid4())
     forged = RunTokenCodec(b"other-deployment").encode(run)
     with pytest.raises(ValueError, match="signed"):
-        RUN_TOKENS.from_proxy_auth(_basic(forged))
+        RUN_TOKENS.decode(forged)
 
 
-def _probe(
-    expires_at: int = 1_800_000_000,
-    member_id: UUID | None = None,
-    internet_access: Literal[False] | None = None,
-) -> ProbeToken:
-    return ProbeToken(
-        workspace_id=uuid4(),
-        conversation_id=uuid4(),
-        probe_id=uuid4(),
-        expires_at=expires_at,
-        member_id=member_id,
-        internet_access=internet_access,
-    )
-
-
-def _check_probe_token_round_trips_encode_then_proxy_auth() -> None:
-    probe = _probe(member_id=uuid4(), internet_access=False)
-    assert PROBE_TOKENS.from_proxy_auth(_basic(PROBE_TOKENS.encode(probe))) == probe
-
-
-def _check_probe_token_wire_carries_the_member_in_eight_fields() -> None:
-    probe = _probe(member_id=uuid4())
-    head = (
-        f"{PROBE_TOKEN_KIND}/{probe.workspace_id}/{probe.conversation_id}/"
-        f"{probe.probe_id}/{probe.member_id}/{probe.expires_at}"
-    )
-    assert PROBE_TOKENS.encode(probe) == sign_token(PROBE_TOKENS.secret, f"{head}/-/-".encode())
-    with pytest.raises(ValueError):
-        PROBE_TOKENS.from_proxy_auth(_basic(sign_token(PROBE_TOKENS.secret, f"{head}/-".encode())))
-
-
-def _check_probe_token_reads_the_outgoing_images_connection_list_as_no_member() -> None:
-    probe = _probe(member_id=uuid4())
-    outgoing = (
-        f"{PROBE_TOKEN_KIND}/{probe.workspace_id}/{probe.conversation_id}/{probe.probe_id}/"
-        f"connections/{probe.expires_at}/{uuid4().hex},{uuid4().hex}/0"
-    )
-    assert PROBE_TOKENS.from_proxy_auth(
-        _basic(sign_token(PROBE_TOKENS.secret, outgoing.encode()))
-    ) == replace(probe, member_id=None, internet_access=False)
-
-
-def _check_encoded_probe_token_is_url_safe_userinfo() -> None:
-    encoded = PROBE_TOKENS.encode(_probe())
-    assert all(char.isalnum() or char in "-_." for char in encoded)
-
-
-def _check_probe_from_proxy_auth_rejects_non_basic_scheme() -> None:
-    with pytest.raises(ValueError, match="basic"):
-        PROBE_TOKENS.from_proxy_auth("Bearer " + PROBE_TOKENS.encode(_probe()))
-
-
-def _check_probe_from_proxy_auth_rejects_a_malformed_probe_token() -> None:
-    with pytest.raises(ValueError):
-        PROBE_TOKENS.from_proxy_auth(_basic("not-a-probe-token"))
-
-
-def _check_probe_token_rejects_a_valid_shape_signed_by_another_deployment() -> None:
-    forged = ProbeTokenCodec(b"other-deployment").encode(_probe())
-    with pytest.raises(ValueError, match="signed"):
-        PROBE_TOKENS.from_proxy_auth(_basic(forged))
-
-
-def _check_neither_codec_reads_the_other_domain_under_one_secret() -> None:
-    run = RUN_TOKENS.encode(RunToken(uuid4(), uuid4()))
-    probe = PROBE_TOKENS.encode(_probe())
-    with pytest.raises(ValueError, match="probe token"):
-        PROBE_TOKENS.from_proxy_auth(_basic(run))
-    with pytest.raises(ValueError, match="run token"):
-        RUN_TOKENS.from_proxy_auth(_basic(probe))
-
-
-def _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base() -> None:
-    conversation_id = uuid4()
-    common = RUN_TOKENS.encode(RunToken(uuid4(), uuid4()))
-    scoped = RUN_TOKENS.encode(RunToken(uuid4(), uuid4(), acts_for=uuid4()))
-    proxy = f"http://{common}:{PROXY_PASSWORD}@proxy:9000"
+async def _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base() -> (
+    None
+):
+    base_env = {
+        "HTTPS_PROXY": "https://ufo-session-turn:ufo@proxy.test",
+        "ALICE_KEY": "alice",
+        "UNRELATED": "kept",
+    }
     base = SandboxSession(
         carrier=_RecordingCarrier(),
         system_skill_archive=b"bundle",
-        handle=SandboxHandle(
-            conversation_id=conversation_id,
-            container_id="c",
-            run_token=common,
-            egress_env={
-                "HTTP_PROXY": proxy,
-                "HTTPS_PROXY": proxy,
-                "http_proxy": proxy,
-                "https_proxy": proxy,
-                "ALICE_KEY": "alice",
-                "UNRELATED": common,
-            },
-        ),
+        handle=SandboxHandle(conversation_id=uuid4(), container_id="c", egress_env=base_env),
     )
 
-    authorized = base.authorize(
-        scoped,
+    authorized = await base.authorize(
         frozenset(("ALICE_KEY", "BOB_KEY")),
-        {"BOB_KEY": "bob"},
+        {"BOB_KEY": "bob", "HTTPS_PROXY": "https://ufo-session-member:ufo@proxy.test"},
     )
 
-    assert authorized.handle.run_token == scoped
     assert authorized.system_skill_archive == b"bundle"
-    assert all(
-        scoped in authorized.handle.egress_env[name]
-        for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
-    )
-    assert authorized.handle.egress_env["UNRELATED"] == common
-    assert "ALICE_KEY" not in authorized.handle.egress_env
-    assert authorized.handle.egress_env["BOB_KEY"] == "bob"
-    assert base.handle.run_token == common
-    assert base.handle.egress_env["HTTP_PROXY"] == proxy
+    assert authorized.handle.egress_env == {
+        "HTTPS_PROXY": "https://ufo-session-member:ufo@proxy.test",
+        "UNRELATED": "kept",
+        "BOB_KEY": "bob",
+    }
+    assert base.handle.egress_env == base_env
 
 
-def _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
+async def _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
     """A tool runs commands through a member-authorized session while cancel uses the base one.
     Both name the same turn, so the stop reaches its command groups alone."""
     turn_id = uuid4()
-    common = RUN_TOKENS.encode(RunToken(uuid4(), turn_id))
-    scoped = RUN_TOKENS.encode(RunToken(uuid4(), turn_id, acts_for=uuid4()))
-    proxy = f"http://{common}:{PROXY_PASSWORD}@proxy:9000"
     base = SandboxSession(
         carrier=_RecordingCarrier(),
-        handle=SandboxHandle(
-            conversation_id=uuid4(),
-            container_id="c",
-            run_token=common,
-            egress_env=dict.fromkeys(PROXY_ENV_NAMES, proxy),
-            turn_id=turn_id,
-        ),
+        handle=SandboxHandle(conversation_id=uuid4(), container_id="c", turn_id=turn_id),
     )
 
-    authorized = base.authorize(scoped, frozenset(), {})
+    authorized = await base.authorize(frozenset(), {})
 
     assert authorized.handle.turn_id == turn_id
+
+
+async def _check_only_an_enforced_session_lays_the_egress_env_beneath_the_authority() -> None:
+    asked: list[str] = []
+
+    async def egress() -> dict[str, str]:
+        asked.append("egress")
+        return {"HTTPS_PROXY": "https://ufo-session-member:ufo@proxy.test", "GH_TOKEN": "session"}
+
+    handle = SandboxHandle(
+        conversation_id=uuid4(), container_id="c", egress_env={"UNRELATED": "kept"}
+    )
+    unenforced = SandboxSession(carrier=_RecordingCarrier(), handle=handle)
+    enforced = SandboxSession(carrier=_RecordingCarrier(), handle=handle, enforced=True)
+
+    plain = await unenforced.authorize(frozenset(), {"GIT_AUTHOR_NAME": "B"}, egress)
+    assert asked == []
+    assert plain.handle.egress_env == {"UNRELATED": "kept", "GIT_AUTHOR_NAME": "B"}
+
+    proxied = await enforced.authorize(frozenset(), {"GH_TOKEN": "identity"}, egress)
+    assert asked == ["egress"]
+    assert proxied.enforced
+    assert proxied.handle.egress_env == {
+        "UNRELATED": "kept",
+        "HTTPS_PROXY": "https://ufo-session-member:ufo@proxy.test",
+        "GH_TOKEN": "identity",
+    }
 
 
 def _check_host_argv_names_a_logical_path_under_the_host_root() -> None:
@@ -396,8 +288,6 @@ async def _live_ctx(
             ),
             image_ref=SANDBOX_IMAGE_REF,
             workspace_host_path=str(tmp_path / "my ws"),
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
-            run_token="off-turn-test",
         )
     )
     return _tool_ctx(
@@ -1456,26 +1346,13 @@ async def test_a_command_that_failed_on_its_own_records_no_timeout(
 def test_sandbox_session_sync_contract() -> None:
     for check in (
         _check_shell_path_expands_only_the_runtime_home_prefix,
-        _check_egress_proxy_env_embeds_run_token_and_sentinels,
-        _check_egress_proxy_env_refuses_missing_or_http_url,
-        _check_run_token_round_trips_encode_then_proxy_auth,
+        _check_run_token_round_trips_encode_then_decode,
         _check_run_token_wire_carries_a_member_the_turn_or_nobody,
         _check_run_token_member_is_keyword_only,
-        _check_encoded_token_is_url_safe_userinfo,
-        _check_from_proxy_auth_rejects_non_basic_scheme,
-        _check_from_proxy_auth_rejects_missing_header,
-        _check_from_proxy_auth_rejects_a_malformed_run_token,
+        _check_encoded_token_is_a_header_value,
+        _check_decode_rejects_a_malformed_run_token,
+        _check_decode_rejects_another_domain,
         _check_run_token_rejects_a_valid_shape_signed_by_another_deployment,
-        _check_probe_token_round_trips_encode_then_proxy_auth,
-        _check_probe_token_wire_carries_the_member_in_eight_fields,
-        _check_probe_token_reads_the_outgoing_images_connection_list_as_no_member,
-        _check_encoded_probe_token_is_url_safe_userinfo,
-        _check_probe_from_proxy_auth_rejects_non_basic_scheme,
-        _check_probe_from_proxy_auth_rejects_a_malformed_probe_token,
-        _check_probe_token_rejects_a_valid_shape_signed_by_another_deployment,
-        _check_neither_codec_reads_the_other_domain_under_one_secret,
-        _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base,
-        _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to,
         _check_host_argv_names_a_logical_path_under_the_host_root,
         _check_host_argv_leaves_the_substring_that_is_not_this_workspace,
         _check_runtime_relative_refuses_an_escape,
@@ -1486,6 +1363,9 @@ def test_sandbox_session_sync_contract() -> None:
 
 async def test_sandbox_session_async_contract() -> None:
     for check in (
+        _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base,
+        _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to,
+        _check_only_an_enforced_session_lays_the_egress_env_beneath_the_authority,
         _check_a_carrier_that_declares_no_stop_is_never_asked_for_one,
         _check_skills_load_from_one_staged_container_payload,
         _check_large_skill_payload_never_enters_a_container_command_argument,

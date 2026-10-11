@@ -25,7 +25,6 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Protocol
-from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from ufo.harness.document_renderer import (
@@ -35,9 +34,7 @@ from ufo.harness.document_renderer import (
 )
 from ufo.harness.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
-    EGRESS_CA_CERT_ENV,
-    NO_PROXY_HOSTS,
-    PROXY_PASSWORD,
+    PROXY_CA_CERT_ENV,
     RUNTIME_DIRNAME,
     TOOL_CALL_ID,
     UFO_HOME_ENV,
@@ -598,12 +595,11 @@ class TerminalCarrier:
         directory refuses by naming both, since a workspace that moves under a thread makes every
         earlier line of its transcript a lie.
 
-        The proxy env carries the run token in its userinfo. `ufo run` replaces a public URL with a
-        plaintext loopback for its child and forwards the bytes over verified TLS; with no public
-        URL the env names the client's own loopback, where nothing answers, so a command that
-        honours the env fails closed instead of leaking unmetered. A command that ignores it was
-        never metered on this carrier anyway, and the re-authorization every exec runs keeps its
-        invariant that the proxy env carries the turn's token."""
+        The session env rides the spec: on a proxied open its proxy variables carry the session
+        token, and the session's CA is exported as `PROXY_CA_CERT_ENV`. `ufo run` replaces the
+        public proxy URL with a plaintext loopback for its child and forwards the bytes over
+        verified TLS. An unenforced open carries neither, and the member's commands reach the
+        network as their own shell does."""
         bound = await self.terminals.arrived(spec.conversation_id, ARRIVAL_GRACE_SECONDS)
         if bound is None:
             raise TerminalAbsent(
@@ -615,29 +611,15 @@ class TerminalCarrier:
                 f"this conversation's workspace is {spec.workspace_host_path}; the connected "
                 f"terminal is at {bound.cwd}"
             )
-        if spec.proxy.public_url is not None:
-            parts = urlsplit(spec.proxy.public_url)
-            proxy_url = (
-                f"{parts.scheme}://{spec.run_token}:{PROXY_PASSWORD}@{parts.netloc}{parts.path}"
-            )
-        else:
-            proxy_url = f"http://{spec.run_token}:{PROXY_PASSWORD}@127.0.0.1:{spec.proxy.port}"
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=spec.workspace_host_path,
             workspace_host_path=spec.workspace_host_path,
-            run_token=spec.run_token,
             turn_id=spec.turn_id,
             runtime_root=f"${UFO_HOME_ENV}/{RUNTIME_DIRNAME}/{bound.runtime_id}",
             egress_env={
-                "HTTP_PROXY": proxy_url,
-                "HTTPS_PROXY": proxy_url,
-                "http_proxy": proxy_url,
-                "https_proxy": proxy_url,
-                "NO_PROXY": NO_PROXY_HOSTS,
-                "no_proxy": NO_PROXY_HOSTS,
-                EGRESS_CA_CERT_ENV: spec.proxy.ca_cert,
                 **spec.env,
+                **({PROXY_CA_CERT_ENV: spec.proxy_ca} if spec.proxy_ca else {}),
             },
         )
 
@@ -653,7 +635,6 @@ class TerminalCarrier:
             conversation_id=spec.conversation_id,
             container_id=bound.cwd,
             workspace_host_path=bound.cwd,
-            run_token=spec.run_token,
             turn_id=spec.turn_id,
             runtime_root=f"${UFO_HOME_ENV}/{RUNTIME_DIRNAME}/{bound.runtime_id}",
         )
@@ -667,14 +648,15 @@ class TerminalCarrier:
     ) -> ExecResult:
         """One command on the member's machine, in the bound directory, under their own user. The
         `/workspace` paths tools pass are rewritten here — path logic never reaches the client.
-        `EGRESS_CA_CERT_ENV` rides the env whole; the client merges it with the machine's own trust
-        store into one bundle and points each CA variable there, since only the client knows both a
-        path on its own disk and the roots the member already trusts — the container carriers reach
-        the same bundle by installing the CA into the system store, which a member's machine is
-        never asked to accept. Model-generated shell commands invoke `ufo run`, whose child sees the
-        plaintext forward-proxy protocol standard clients speak while its public hop uses TLS. A
-        `gh` operation uses the client's embedded Go 1.27 build, whose verifier reads that bundle
-        without changing the member's certificate store.
+        The session env rides the spec into the handle, and every exec carries it whole: a proxied
+        open's `PROXY_CA_CERT_ENV` holds the session's CA, which the client merges with the
+        machine's own trust store into one bundle and points each CA variable there, since only the
+        client knows both a path on its own disk and the roots the member already trusts — a
+        member's machine is never asked to accept the CA into its system store. Model-generated
+        shell commands invoke `ufo run`, whose child sees the plaintext forward-proxy protocol
+        standard clients speak while its public hop uses TLS. A `gh` operation uses the client's
+        embedded Go 1.27 build, whose verifier reads that bundle without changing the member's
+        certificate store.
 
         `model_command` rides down as `safety_argv`, and it is the only text this carrier ever asks
         the client to classify. The argv cannot answer the question on its own: the journal wraps a

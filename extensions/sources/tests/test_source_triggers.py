@@ -52,7 +52,7 @@ from ufo_ext_sources.triggers import SourceTrigger, SourceTriggerStore, source_t
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import RUNTIME_DIRNAME, ProxyEndpoint
+from ufo.harness.sandbox.session import RUNTIME_DIRNAME
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.grants import GrantStore
@@ -437,7 +437,6 @@ def _sandboxes(tmp_path) -> ConversationSandbox:
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
         workspace_root=tmp_path / "workspaces",
     )
 

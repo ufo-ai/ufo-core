@@ -75,35 +75,32 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class InjectionTarget:
-    """The wire-injection descriptor a credential slot may carry: on the wire to `host`, the proxy
-    swaps the `sentinel` value of `header` for the real secret, per workspace and only for a live
-    turn. A set `dimension` also meters the host.
+    """The bind a credential slot may declare: on the wire to `host`, the proxy service puts the
+    slot's secret into `header` where the sandbox sent the sentinel the session minted for `env`.
 
-    `env` is the sandbox variable the sentinel is exported as, so the agent's own HTTP client
+    `env` is the sandbox variable that sentinel is exported as, so the agent's own HTTP client
     authenticates the provider by sending it as ordinary auth — the GitHub `GH_TOKEN` pattern, for a
     key this deploy holds rather than a broker. `host` is a fixed hostname, or a `HostChoice` for a
     provider that pins its API host per account (a Datadog site, an OpsGenie region): the member
     selects from the closed set the declaration offers, so what reaches the wire is always a literal
-    the row wrote. Two slots naming one host each inject their own header, which is how a provider
+    the row wrote. Two slots naming one host each bind their own header, which is how a provider
     taking more than one key on the wire is expressed."""
 
     host: str | HostChoice
     header: str
-    sentinel: str
-    env: str | None = None
-    dimension: str | None = None
+    env: str
 
 
 @dataclass(frozen=True)
 class WorkspaceCredentials:
     """Credential slots an extension resolves per workspace, beside the ones its manifest declares
     for the whole deploy. `read` answers one workspace's slots from the extension's own rows, and
-    core hands them to exactly the code a manifest's slot already drives: the egress proxy's
-    injection, the sandbox's exported sentinel, the `credential` object kind, and the portal panel.
+    core hands them to exactly the code a manifest's slot already drives: the session policy's
+    binds, the sandbox's exported sentinel, the `credential` object kind, and the portal panel.
 
     The host such a slot names is written inside the workspace rather than by this deploy's own
-    code, so the scope core derives for it is pinned: the proxy resolves the name and refuses the
-    CONNECT when it answers a private address, which an exact scope otherwise skips."""
+    code; the proxy service resolves every host a session names and refuses one that answers a
+    private address."""
 
     read: Callable[[ExtensionContext, UUID], Awaitable[tuple["CredentialSlot", ...]]]
 
@@ -113,11 +110,21 @@ class CredentialSlot:
     """A named secret an extension needs. With an InjectionTarget the proxy swaps it onto the
     wire so the sandbox never holds it; without one it is readable only in-process.
 
-    A slot holds one secret, and its fill state is the whole of what a read can say."""
+    A slot holds one secret, and its fill state is the whole of what a read can say. A `minted`
+    slot holds a value the extension mints and reissues itself through `credentials.put`: no member
+    hands it over, so no member-facing projection offers it, and the proxy never injects it. Only a
+    first-party distribution declares one."""
 
     name: str
     description: str
     injection: InjectionTarget | None = None
+    minted: bool = False
+
+    def __post_init__(self) -> None:
+        if self.minted and self.injection is not None:
+            raise ValueError(
+                f"Minted credential slot {self.name!r} cannot carry an injection target."
+            )
 
 
 JOB_FAULT_MAX_CHARS = 500
@@ -130,8 +137,8 @@ class JobFault(RuntimeError):
 
     A stack says where a job died and never why. `formatted_stack` carries frames and classes and
     no exception message, because a message is text this process did not write — a sandbox
-    command's stderr arrives as a `RuntimeError` carrying the run token the sandbox echoed into
-    `HTTP_PROXY`, and a field name is all redaction matches — so a provider outage, a revoked
+    command's stderr arrives as a `RuntimeError` carrying the session token the sandbox echoed
+    into `HTTP_PROXY`, and a field name is all redaction matches — so a provider outage, a revoked
     token, and a bug leave one indistinguishable record and the answer lives only in a pod's
     stderr. This is the seam that closes that, and it closes it the way `StreamFault` does for a
     source stream: the handler authored the text against the call it made, so it names the status
@@ -178,13 +185,15 @@ class RouteSpec:
     """An HTTP endpoint an extension serves. The app mounts `handler` for `method` at
     `/ext/<name>/<path>`; each request is handed the extension's scoped ExtensionContext and the
     incoming Request, and the handler returns the Response. `identify` verifies and returns a
-    request's workspace, which core binds for the handler; it is required because the shared fleet
-    is the only runtime and every request must resolve its workspace before touching any data."""
+    request's workspace, which core binds for the handler, and a request it names none for is
+    answered 401. It has no default, because the shared fleet is the only runtime and a request
+    that touches data must resolve its workspace first; a route that touches none — a document
+    every caller reads alike — declares `None` and runs with no workspace bound."""
 
     method: Literal["GET", "POST"]
     path: str
     handler: Callable[[ExtensionContext, Request], Awaitable[Response]]
-    identify: Callable[[Request], UUID | None]
+    identify: Callable[[Request], UUID | None] | None
 
 
 @dataclass(frozen=True)
@@ -259,8 +268,7 @@ class CarrierSpec:
     boot. The selected carrier is held for the process's life as `Runtime.carrier`. `off_cluster`
     marks a backend whose sandbox runs outside the serve pod's network (e2b) and so cannot reach
     the in-pod egress proxy over a host-local address: selecting one with no `[sandbox]
-    proxy_public_url` fails loud at boot, since its sandbox would otherwise egress open and
-    unmetered."""
+    proxy_url` fails loud at boot, since its sandbox would otherwise egress open and unmetered."""
 
     name: str
     factory: Callable[[], Carrier]
@@ -272,6 +280,23 @@ class CarrierSpec:
     runtime_digest: Callable[[], str] | None = None
     """A digest of carrier-owned runtime inputs absent from core config, such as a remote
     provider's published template references."""
+
+
+class ProxyCredentials(Protocol):
+    """The source of the bearer the runtime presents to the proxy service's session API, answered
+    for the bound workspace."""
+
+    async def bearer(self) -> str: ...
+
+
+@dataclass(frozen=True)
+class ProxyCredentialSpec:
+    """Where the runtime's proxy bearer comes from. `build` makes the source once at boot from the
+    declaring extension's workspace-scoped context, and the session client asks it for the bound
+    workspace's bearer on every call and keeps nothing, so the extension decides where the bearer
+    lives and when it is minted."""
+
+    build: Callable[[ExtensionContext], ProxyCredentials]
 
 
 @dataclass(frozen=True)
@@ -889,7 +914,11 @@ class Manifest:
     when the first job that needs one raises. `deploy_bearer_env` names the deploy key whose
     value gates this extension's `deploy_routes`, so it is also one of `deploy_keys`.
     `operator_rules` registers who may operate the deploy's operator surfaces; boot builds only the
-    rule `[operator] rule` names, and only a first-party distribution may register one."""
+    rule `[operator] rule` names, and only a first-party distribution may register one.
+    `vault_read` lets the extension resolve a bound secret's value on the host its declaration
+    admits (`ExtensionContext.resolve_secret`), and `proxy_credentials` answers the bearer the
+    runtime presents to the proxy service; only a first-party distribution declares either, and
+    one extension at most declares `proxy_credentials`."""
 
     name: str
     version: str
@@ -927,7 +956,9 @@ class Manifest:
     memory_search: tuple[MemorySearchProviderSpec, ...] = ()
     conversation_slots: tuple[ConversationSlotProvider, ...] = ()
     workspace_credentials: WorkspaceCredentials | None = None
+    proxy_credentials: ProxyCredentialSpec | None = None
     member_context_read: bool = False
+    vault_read: bool = False
     sandbox_internet: bool = False
     requires: tuple[str, ...] = field(default_factory=tuple)
     deploy_keys: tuple[str, ...] = field(default_factory=tuple)
@@ -1021,19 +1052,27 @@ def declared_slot(slot: CredentialSlot, extension: str) -> DeclaredSlot:
         description=slot.description,
         extension=extension,
         host=None if slot.injection is None else slot.injection.host,
-        env="" if slot.injection is None else slot.injection.env or "",
+        env="" if slot.injection is None else slot.injection.env,
         header="" if slot.injection is None else slot.injection.header,
     )
 
 
 def declared_slots(manifests: tuple[Manifest, ...]) -> tuple[DeclaredSlot, ...]:
     """Every active manifest's declared BYOK slots, the one assembly every projection over the
-    declarations shares — the `credential` object kind and the portal's credentials panel."""
+    declarations shares — the `credential` object kind and the portal's credentials panel. A slot
+    its extension mints is no member's to fill, so none of them offers it."""
     return tuple(
         declared_slot(slot, manifest.name)
         for manifest in manifests
         for slot in manifest.credentials
+        if not slot.minted
     )
+
+
+def minted_slots(manifest: Manifest) -> frozenset[str]:
+    """The slots `manifest` mints: what every context core builds for the extension lets its
+    handlers write through `credentials.put`."""
+    return frozenset(slot.name for slot in manifest.credentials if slot.minted)
 
 
 class NotRegisteredError(RuntimeError):

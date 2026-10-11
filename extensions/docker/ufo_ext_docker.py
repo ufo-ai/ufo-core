@@ -1,4 +1,4 @@
-"""The Docker carrier extension: a per-conversation container reached only through the egress proxy.
+"""The Docker carrier extension: a per-conversation container whose egress runs unenforced.
 
 Core's default is the local carrier; a deploy that sets `[sandbox] backend = "docker"` runs its
 sandboxes as sibling containers. `/workspace` is a host bind mount, so this carrier reclaims its
@@ -8,12 +8,10 @@ its workspace persists for any later touch to reconnect and start again: a conve
 turn was merely quiet survives its own reclaim at the cost of one restart. Core
 reclaims nothing, because for a carrier whose `/workspace` lives inside its sandbox the container
 *is* the workspace. Every command runs through `docker exec`
-under its turn's egress env: HTTP(S)_PROXY points at the egress proxy running on the host, reached
-at `host.docker.internal`, and carries the turn's run token as its basic-auth username so the proxy
-attributes each metered request to the turn; the proxy refuses any host its rules do not allow and
-swaps the sentinel for the real key on the wire, so the raw credential never enters the sandbox.
-The env is per-exec, never baked into the container — a container outlives its first turn, and a
-later turn must not run under an earlier turn's token."""
+under the env its open carries — no proxy, no CA, and no model key, since an in-cluster carrier
+opens no proxy session and its container reaches the network directly. The env is per-exec, never
+baked into the container — a container outlives its first turn, and a later turn must not run
+under an earlier turn's env."""
 
 import asyncio
 import errno
@@ -27,12 +25,8 @@ from uuid import UUID
 
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.sandbox import (
-    NO_PROXY_HOSTS,
-    PROXY_PASSWORD,
     SANDBOX_GID,
     SANDBOX_UID,
-    SENTINEL_MODEL_KEY,
-    SYSTEM_CA_BUNDLE,
     WORKSPACE_DIR,
     CarrierSpec,
     DialTarget,
@@ -71,10 +65,8 @@ STOP_TIMEOUT_SECONDS = 30
 START_TIMEOUT_SECONDS = 30
 UUID_NAME_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 DEFAULT_NETWORK = "ufo-sandbox"
-HOST_GATEWAY_NAME = "host.docker.internal"
-HOST_GATEWAY_MAPPING = f"{HOST_GATEWAY_NAME}:host-gateway"
+HOST_GATEWAY_MAPPING = "host.docker.internal:host-gateway"
 DROP_NET_RAW_ARGS = ("--cap-drop", "NET_RAW")
-DOCKER_CA_PATH = "/usr/local/share/ca-certificates/ufo-proxy.crt"
 EXEC_TIMEOUT_CODE = 124
 TIMED_OUT_CODE = -1000
 """`_docker`'s own deadline, told apart from every code a process can report: an exit status is
@@ -111,58 +103,34 @@ class DockerCarrier:
     )
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        """Create-or-attach the conversation's container. The egress env is never baked into the
-        container — a container outliving its first turn must not pin that turn's run token — it
-        rides the returned handle and every exec carries it, so each turn's commands run under its
-        own token and sentinel entries.
+        """Create-or-attach the conversation's container. The spec's env is never baked into the
+        container — a container outliving its first turn must not pin that turn's env — it rides
+        the returned handle and every exec carries it.
 
         The daemon arbitrates concurrent creates for one conversation: both race `docker run` under
         the same deterministic name, the loser's run answers a name conflict, and the loser attaches
-        to the winner's container — nothing here holds a lock, and no second container ever exists.
-        The CA installs on every path out, not only the fresh run: a container outliving a serve
-        restart still trusts the dead process's proxy CA, and the local proxy mints a fresh one per
-        process, so every request from a reused container would fail TLS until the new CA lands."""
+        to the winner's container — nothing here holds a lock, and no second container ever
+        exists."""
         await self._reclaim_idle(spec.conversation_id)
         name = f"{CONTAINER_NAME_PREFIX}{spec.conversation_id}"
-        proxy_url = (
-            f"http://{spec.run_token}:{PROXY_PASSWORD}@{HOST_GATEWAY_NAME}:{spec.proxy.port}"
-        )
-        egress_env = {
-            "HTTP_PROXY": proxy_url,
-            "HTTPS_PROXY": proxy_url,
-            "http_proxy": proxy_url,
-            "https_proxy": proxy_url,
-            "NO_PROXY": NO_PROXY_HOSTS,
-            "no_proxy": NO_PROXY_HOSTS,
-            "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
-            "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
-            "SSL_CERT_FILE": SYSTEM_CA_BUNDLE,
-            "REQUESTS_CA_BUNDLE": SYSTEM_CA_BUNDLE,
-            "CURL_CA_BUNDLE": SYSTEM_CA_BUNDLE,
-            "NODE_EXTRA_CA_CERTS": DOCKER_CA_PATH,
-            **spec.env,
-        }
+        egress_env = {**spec.env}
         running = await self._running_id(name)
         if running is not None:
-            await self._install_ca(running, spec.proxy.ca_cert)
             await self._prepare_mounts(running, spec.conversation_id)
             return SandboxHandle(
                 conversation_id=spec.conversation_id,
                 container_id=running,
                 workspace_host_path=spec.workspace_host_path,
-                run_token=spec.run_token,
                 runtime_root=sandbox_runtime_root(spec.conversation_id),
                 egress_env=egress_env,
             )
         stopped = await self._stopped_id(name)
         if stopped is not None and await self._revive(spec.conversation_id, stopped):
-            await self._install_ca(stopped, spec.proxy.ca_cert)
             await self._prepare_mounts(stopped, spec.conversation_id)
             return SandboxHandle(
                 conversation_id=spec.conversation_id,
                 container_id=stopped,
                 workspace_host_path=spec.workspace_host_path,
-                run_token=spec.run_token,
                 runtime_root=sandbox_runtime_root(spec.conversation_id),
                 egress_env=egress_env,
             )
@@ -194,25 +162,21 @@ class DockerCarrier:
                 if NAME_CONFLICT_MARKER in detail:
                     winner = await self._running_id(name)
                     if winner is not None:
-                        await self._install_ca(winner, spec.proxy.ca_cert)
                         await self._prepare_mounts(winner, spec.conversation_id)
                         return SandboxHandle(
                             conversation_id=spec.conversation_id,
                             container_id=winner,
                             workspace_host_path=spec.workspace_host_path,
-                            run_token=spec.run_token,
                             runtime_root=sandbox_runtime_root(spec.conversation_id),
                             egress_env=egress_env,
                         )
                 raise RuntimeError(f"docker run failed: {detail}")
             container_id = stdout.decode().strip()
-            await self._install_ca(container_id, spec.proxy.ca_cert)
             await self._prepare_mounts(container_id, spec.conversation_id)
             return SandboxHandle(
                 conversation_id=spec.conversation_id,
                 container_id=container_id,
                 workspace_host_path=spec.workspace_host_path,
-                run_token=spec.run_token,
                 runtime_root=sandbox_runtime_root(spec.conversation_id),
                 egress_env=egress_env,
             )
@@ -249,7 +213,6 @@ class DockerCarrier:
             conversation_id=spec.conversation_id,
             container_id=running,
             workspace_host_path=spec.workspace_host_path,
-            run_token=spec.run_token,
             runtime_root=sandbox_runtime_root(spec.conversation_id),
         )
 
@@ -571,21 +534,6 @@ class DockerCarrier:
         code, _, stderr = await _docker("network", "create", network)
         if code != 0 and NETWORK_EXISTS_MARKER not in stderr.decode():
             raise RuntimeError(f"docker network create failed: {stderr.decode().strip()}")
-
-    async def _install_ca(self, container_id: str, ca_cert: str) -> None:
-        write = await _docker(
-            "exec",
-            "-i",
-            "-u",
-            "root",
-            container_id,
-            "sh",
-            "-c",
-            "cat > /usr/local/share/ca-certificates/ufo-proxy.crt && update-ca-certificates",
-            stdin=ca_cert.encode(),
-        )
-        if write[0] != 0:
-            raise RuntimeError(f"CA install failed: {write[2].decode().strip()}")
 
     async def _prepare_mounts(self, container_id: str, conversation_id: UUID) -> None:
         runtime_root = sandbox_runtime_root(conversation_id)

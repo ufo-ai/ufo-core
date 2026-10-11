@@ -155,7 +155,7 @@ modes. See the [terminal guide](https://ufo.ai/docs/work/terminal/) for more det
 | Agent access | A member's account reaches an agent only through a connector grant made in chat; the granting turn is the audit record. The workspace's own keyed accounts reach only the main agent until a member grants them to another. |
 | Workspace scope | Every request, turn, and job binds one workspace, and every query filters on it. |
 | Keys | The Rust services under `servers/` hold no customer keys; every secret stays in the runtime. |
-| Sandbox | The default `local` carrier confines writes with Seatbelt or Landlock, but can read the whole host, and the kernel does not enforce its egress. For untrusted input or several workspaces, use `docker` or `e2b`. |
+| Sandbox | The default `local` carrier confines writes with Seatbelt or Landlock, but can read the whole host, and its egress is unenforced. For untrusted input or several workspaces, use `docker` or `e2b`. |
 
 ## Extend it
 

@@ -161,10 +161,10 @@ async def test_declared_slot_lists_reads_and_clears_without_the_value(db: None) 
         fetched = yaml.safe_load(fetched_text)
         assert fetched["spec"] == {
             "slot": sample.API_SLOT,
-            "description": "BYOK key the egress proxy swaps onto the sample host.",
+            "description": "BYOK key the proxy service binds on the sample host.",
             "extension": sample.NAME,
             "host": sample.INJECTION_HOST,
-            "env": "",
+            "env": sample.INJECTION_ENV,
             "header": "authorization",
             "host_slot": "",
             "host_options": [],
@@ -335,9 +335,7 @@ async def test_a_host_choice_slot_renders_its_options_through_tool_dispatch(db: 
             CredentialSlot(
                 name="probe_api_key",
                 description="Probe API key.",
-                injection=InjectionTarget(
-                    host=choice, header="X-Probe-Key", sentinel="S_PROBE", env="PROBE_KEY"
-                ),
+                injection=InjectionTarget(host=choice, header="X-Probe-Key", env="PROBE_KEY"),
             ),
             CredentialSlot(name="probe_api_host", description="Probe site."),
         ),

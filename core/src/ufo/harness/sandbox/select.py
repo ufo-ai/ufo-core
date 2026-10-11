@@ -2,7 +2,6 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from urllib.parse import urlparse
 
 from ufo.config import Config
 from ufo.harness.sandbox.local import LocalCarrier
@@ -28,10 +27,10 @@ def select_carriers(config: Config, manifests: tuple[Manifest, ...]) -> DeployCa
     point (`docker`, `e2b`). An extension name that collides with the built-in or
     another extension fails loud, a name no carrier registers fails loud, and a resume backend
     repeating the default fails loud — so every configured name resolves to exactly one factory,
-    built once here and held for the process's life. A remote backend with no `[sandbox]
-    proxy_public_url` fails loud wherever it appears: its sandbox could reach neither the
-    process-local proxy nor a metered egress route, so it would run open — never a silent
-    default."""
+    built once here and held for the process's life. A backend whose sandbox runs off the cluster
+    fails loud wherever it appears unless `[sandbox] proxy_url` names the proxy service: its sandbox
+    reaches the network only through that service, so without it the sandbox would run open — never
+    a silent default."""
     specs: dict[str, CarrierSpec] = {"local": CarrierSpec(name="local", factory=LocalCarrier)}
     for manifest in manifests:
         for spec in manifest.carriers:
@@ -55,18 +54,10 @@ def _built(specs: dict[str, CarrierSpec], config: Config, name: str) -> tuple[Ca
         raise NotRegisteredError(
             f"sandbox backend {name!r} is not a registered carrier (have {sorted(specs)})"
         )
-    if selected.off_cluster:
-        public_url = config.sandbox.proxy_public_url
-        if not public_url:
-            raise RuntimeError(
-                f"sandbox backend {name!r} is remote and cannot reach the process-local egress "
-                "proxy; set [sandbox] proxy_public_url to the externally reachable HTTPS proxy "
-                "URL so in-sandbox egress is credential-injected, default-denied, and metered"
-            )
-        parsed = urlparse(public_url)
-        if parsed.scheme != "https" or parsed.hostname is None:
-            raise RuntimeError(
-                f"sandbox backend {name!r} is remote; [sandbox] proxy_public_url must be an "
-                "HTTPS URL so its run token is encrypted in transit"
-            )
+    if selected.off_cluster and config.sandbox.proxy_url is None:
+        raise RuntimeError(
+            f"sandbox backend {name!r} runs off the cluster and egresses only through the proxy "
+            "service; set [sandbox] proxy_url to its https URL so in-sandbox egress is "
+            "credential-injected, default-denied, and metered"
+        )
     return selected.factory(), selected

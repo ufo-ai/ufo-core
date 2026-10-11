@@ -267,6 +267,17 @@ def ledger_id_for(workspace_id: UUID, turn_id: UUID, dimension: str, attempt: st
     return uuid5(NAMESPACE_URL, f"{workspace_id}/turn/{turn_id}/{dimension}/{attempt}")
 
 
+def service_ledger_id_for(
+    workspace_id: UUID, service: str, resource: str, dimension: str, attempt: str
+) -> UUID:
+    """One ledger row per record a service meters: the resource (or session) it metered, the unit,
+    and the attempt — the service's own flush id — so a replayed batch collapses onto the rows its
+    first delivery wrote, and the next flush of the same resource is a row of its own."""
+    return uuid5(
+        NAMESPACE_URL, f"{workspace_id}/service/{service}/{resource}/{dimension}/{attempt}"
+    )
+
+
 def mid_turn_reply_id_for(
     turn_id: UUID, round_index: int, span_index: int, attempt: str = ""
 ) -> UUID:

@@ -25,6 +25,7 @@ from ufo.runtime.billing.spend import (
     NO_SPEND_GATES,
     PARK,
     REJECT,
+    STATUS_MOMENT,
     GateDeploy,
     SpendDecision,
     SpendGates,
@@ -340,6 +341,34 @@ async def test_a_members_own_key_is_not_the_workspaces_to_spend(db: None) -> Non
         assert (
             await keyed.admit(connection, ADMIT_MOMENT, workspace_id, agent_id=agent_id)
         ) == ALLOWED
+
+
+async def test_a_platform_paid_ask_is_never_self_funded(db: None) -> None:
+    keyed = SpendGates(
+        gates=SPEND.gates,
+        key_slot_for=lambda _model: OPENAI_KEY_SLOT,
+        own_key_slots=(OPENAI_KEY_SLOT,),
+    )
+    async with workspace_tx() as connection:
+        workspace_id, *_ = await _seed(connection)
+        await allow(connection, workspace_id, 0, "reject")
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot=OPENAI_KEY_SLOT,
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        own_key = await keyed.admit(connection, STATUS_MOMENT, workspace_id)
+        platform_paid = await keyed.admit(
+            connection, STATUS_MOMENT, workspace_id, self_funded=False
+        )
+    assert own_key == ALLOWED
+    assert platform_paid == SpendDecision(
+        outcome=REJECT, message="The sample allowance is spent at status."
+    )
 
 
 async def test_the_status_frame_names_what_holds_a_parked_turn(db: None) -> None:

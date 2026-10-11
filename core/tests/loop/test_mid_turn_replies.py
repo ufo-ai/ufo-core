@@ -59,7 +59,7 @@ from ufo.harness.models.interface import (
 )
 from ufo.harness.replies import MarkedReply, marked_artifacts
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import SandboxSession, SandboxSpec
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.billing.spend import GateDeploy, SpendGates
 from ufo.runtime.engine import FORCE_FINAL_PROMPT, TurnEngine
@@ -443,8 +443,6 @@ async def _local_sandbox(conversation_id: UUID, workspace: Path) -> SandboxSessi
             conversation_id=conversation_id,
             image_ref="ufo-sandbox:latest",
             workspace_host_path=str(workspace),
-            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
-            run_token="run-token",
         )
     )
     return SandboxSession(carrier=carrier, handle=handle)

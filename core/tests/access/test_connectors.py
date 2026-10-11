@@ -1,14 +1,13 @@
 """The core connectors seam: a manifest's `connectors` point becomes the connect-flow provider
-registry and the derived grant's admit/meter at the egress proxy plus its connected-account id for
+registry and the derived grant's host in a session policy plus its connected-account id for
 server-side execution.
 
 The installed sample extension is the real consumer — its stub connector (a canned OAuth handoff and
 one server-side-execute tool) stands in for a provider so the seam runs end to end without a live
 provider. These tests source the provider registry the way `serve` does (`_connect_flow` over the
 manifests) and read the resulting grant back through the turn's tool context. The broker holds the
-account's token and executes tools server-side, so a grant admits and meters its host but injects
-nothing on the wire — the admit/meter rules the grant derives are proved in `test_egress_rules` and
-`test_egress_control`, the wire that enforces them in the Rust `proxy_it`."""
+account's token and executes tools server-side, so a grant admits its host but binds nothing on the
+wire — the hosts a grant compiles to are proved in `test_session_policy`."""
 
 import asyncio
 from collections.abc import Iterator

@@ -15,9 +15,8 @@ in core's sealed `credential` row under the same slot name, and arrives through 
 `request_credentials` handoff, so it never enters the transcript.
 
 The host is a declaration's one dangerous field, because an exactly scoped host is the proxy's
-allowlist and an admin writes it. `_validate` refuses what is not a public DNS name, and core pins
-the scope it derives for a per-workspace slot: the proxy resolves a pinned host and refuses the
-CONNECT when the name answers a private address, which an exact scope otherwise skips."""
+allowlist and an admin writes it. `validate` refuses what is not a public DNS name, and the proxy
+service resolves every host a session names and refuses one that answers a private address."""
 
 import re
 from dataclasses import dataclass
@@ -49,8 +48,6 @@ NAME = "workspace_credentials"
 VERSION = "0.1.0"
 SLOT_KIND = "credential_slot"
 SECTION_NAME = "workspace_credentials"
-SENTINEL_PREFIX = "UFO_SENTINEL_WORKSPACE_"
-REQUEST_DIMENSION = "requests"
 DEFAULT_HEADER = "Authorization"
 DECLARATION_GATE = "only a workspace admin can declare a credential slot"
 DELETE_GATE = "only a workspace admin can remove a credential slot"
@@ -92,8 +89,8 @@ class SlotInvalid(ValueError):
 @dataclass(frozen=True)
 class WorkspaceSlot:
     """One declaration as the row holds it: what an admin named, and nothing derived from the
-    workspace it belongs to. `sentinel` is what the sandbox holds in `env`, and the proxy swaps it
-    for the stored secret on the wire to `host`."""
+    workspace it belongs to. The sandbox holds a sentinel in `env`, and the proxy service puts the
+    stored secret in its place on the wire to `host`."""
 
     slot: str
     env: str
@@ -101,23 +98,13 @@ class WorkspaceSlot:
     header: str
     description: str
 
-    @property
-    def sentinel(self) -> str:
-        return f"{SENTINEL_PREFIX}{self.slot}".upper()
-
     def credential_slot(self) -> CredentialSlot:
-        """The declaration as a manifest carries it — the one projection the egress proxy's
-        injection and the sandbox's export both read."""
+        """The declaration as a manifest carries it — the one projection the session policy's
+        bind and the sandbox's export both read."""
         return CredentialSlot(
             name=self.slot,
             description=self.description,
-            injection=InjectionTarget(
-                host=self.host,
-                header=self.header,
-                sentinel=self.sentinel,
-                env=self.env,
-                dimension=REQUEST_DIMENSION,
-            ),
+            injection=InjectionTarget(host=self.host, header=self.header, env=self.env),
         )
 
 
@@ -316,7 +303,7 @@ class SlotObjects:
         found = await self._named(ctx, name)
         if found is None:
             return None
-        return {"sentinel": found.sentinel}
+        return {}
 
     async def apply(
         self,

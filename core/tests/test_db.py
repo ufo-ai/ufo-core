@@ -480,9 +480,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         scripts = ScriptDirectory.from_config(config)
         heads = scripts.get_heads()
     core_head = _core_migration_head()
-    core_revisions = {
-        revision.revision for revision in scripts.iterate_revisions(core_head, "base")
-    }
+    core_revisions = _reached({core_head})
     for head in heads:
         if head == core_head:
             continue

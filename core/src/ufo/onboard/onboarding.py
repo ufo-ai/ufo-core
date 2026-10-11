@@ -27,7 +27,7 @@ from ufo.runtime.access.credentials import CredentialStore, deploy_env
 from ufo.runtime.billing.accounting import Ledger
 from ufo.runtime.billing.spend import SpendGates
 from ufo.runtime.ext.context import context_for
-from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.ext.manifest import Manifest, minted_slots
 from ufo.runtime.kinds.provisioning import AgentProvisioning
 from ufo.runtime.provisioning import DEFAULT_AGENT_REASONING, Provisioned, Provisioning
 from ufo.runtime.workspace import ws
@@ -66,6 +66,7 @@ async def run_onboarding_steps(
             context = context_for(
                 manifest.name,
                 frozenset(slot.name for slot in manifest.credentials),
+                minted=minted_slots(manifest),
                 spend=spend,
                 ledger=ledger,
             )

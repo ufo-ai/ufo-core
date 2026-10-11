@@ -124,7 +124,6 @@ MOVED_MODULES = {
     "ufo.object_views": "ufo.runtime.object_views",
     "ufo.objects": "ufo.runtime.objects",
     "ufo.sandbox": "ufo.harness.sandbox",
-    "ufo.sandbox.cache": "ufo.harness.sandbox.cache",
     "ufo.sandbox.client_binary": "ufo.harness.sandbox.client_binary",
     "ufo.sandbox.conversation": "ufo.harness.sandbox.conversation",
     "ufo.sandbox.exec_env": "ufo.harness.sandbox.exec_env",

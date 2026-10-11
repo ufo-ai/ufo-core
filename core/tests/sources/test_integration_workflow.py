@@ -7,13 +7,6 @@ PULL_START = "Start pulling the published sandbox image"
 PULL_JOIN = "Reuse the published sandbox image"
 TESTS = "make test-integration SHARD=${{ matrix.shard }}"
 BINARIES = {
-    "egress": {
-        "prefix": "ufo-egress",
-        "crate": "servers/egress",
-        "path": "servers/egress/target/debug/ufo-egress",
-        "builds": ("cargo build --manifest-path servers/egress/Cargo.toml",),
-        "actions": (),
-    },
     "client": {
         "prefix": "ufo-client-musl",
         "crate": "client",

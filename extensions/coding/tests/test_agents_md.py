@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from ufo_ext_coding import agents_md
 
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import SandboxSession, SandboxSpec
 from ufo.runtime.ext.hooks import BoundHook, HookResolution
 from ufo.sdk.context import Agent, CredentialAccess, ExtensionContext, ScopedStore, Turn
 from ufo.sdk.manifest import HookChain, HookEvent, PostToolUse
@@ -422,8 +422,6 @@ async def test_the_block_survives_a_carrier_whose_workspace_is_a_host_directory(
             conversation_id=conversation,
             image_ref="ufo-sandbox:latest",
             workspace_host_path=str(workspace),
-            proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
-            run_token="agents-md",
         )
     )
     sandbox = SandboxSession(carrier=carrier, handle=handle)

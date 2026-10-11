@@ -1,24 +1,36 @@
 from uuid import UUID
 
 from ufo.sdk.bearer import workspace_claim
-from ufo.sdk.context import ExtensionContext
+from ufo.sdk.context import ExtensionContext, JsonValue, WorkspaceUnbound
 from ufo.sdk.http import PlainTextResponse, Request, Response
 
 ROUTE_PATH = "hook"
 ROUTE_KEY = "route:hit"
+UNBOUND_PATH = "unbound"
+UNBOUND_REPLY = "No workspace is bound."
 
 
 async def hook(ctx: ExtensionContext, request: Request) -> Response:
     body = (await request.body()).decode()
+    minted: list[JsonValue] = [slot for slot in sorted(ctx.credentials.minted)]
     await ctx.store.put(
         ROUTE_KEY,
         {
             "body": body,
             "home_url": ctx.home_url(),
             "spend": (await ctx.spend_admitted()).outcome,
+            "minted": minted,
         },
     )
     return PlainTextResponse(body)
+
+
+async def unbound(ctx: ExtensionContext, request: Request) -> Response:
+    try:
+        workspace_id = ctx.store.workspace_id
+    except WorkspaceUnbound:
+        return PlainTextResponse(UNBOUND_REPLY)
+    return PlainTextResponse(str(workspace_id))
 
 
 def resolve_workspace(request: Request) -> UUID | None:

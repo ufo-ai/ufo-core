@@ -46,7 +46,6 @@ from ufo_ext_sample.connectors import (
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     WORKSPACE_DIR,
-    ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
 )
@@ -880,8 +879,6 @@ async def _sandbox(workspace_root: Path) -> SandboxSession:
             conversation_id=uuid4(),
             image_ref="unused",
             workspace_host_path=str(workspace_root),
-            proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
-            run_token="run-token",
         )
     )
     return SandboxSession(carrier=carrier, handle=handle)
@@ -1440,8 +1437,6 @@ async def test_decoded_bytes_are_never_written_straight_to_their_shared_path(
             conversation_id=uuid4(),
             image_ref="unused",
             workspace_host_path=str(workspace),
-            proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
-            run_token="run-token",
         )
     )
     recorder = _RecordingCarrier(carrier)

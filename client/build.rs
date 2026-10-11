@@ -16,6 +16,13 @@ fn main() {
             panic!("UFO_GATEWAY_URL_DEFAULT must be an http(s) URL, not {gateway:?}");
         }
     }
+    println!("cargo:rerun-if-env-changed=UFO_PROXY_URL_DEFAULT");
+    if let Some(proxy) = env::var_os("UFO_PROXY_URL_DEFAULT") {
+        let proxy = proxy.to_string_lossy();
+        if !proxy.starts_with("https://") {
+            panic!("UFO_PROXY_URL_DEFAULT must be an https URL, not {proxy:?}");
+        }
+    }
     println!("cargo:rerun-if-env-changed=UFO_GH_ARCHIVE");
     let destination = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set")).join("gh.gz");
     match env::var_os("UFO_GH_ARCHIVE") {

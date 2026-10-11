@@ -15,14 +15,17 @@ from dbos import DBOSClient
 
 from ufo.db import workspace_tx
 from ufo.harness.o11y import emit_metric, turn_profile
+from ufo.runtime.access.turn_sessions import DeploySessions, TurnSessions
 from ufo.runtime.object_name import ObjectRef
 from ufo.runtime.turns.changes import turn_conversation_changed
 from ufo.runtime.turns.dispatch import dispatch_next_turn
 from ufo.schema import tables
-from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES, TerminalFrame
+from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES, TerminalFrame, Turn
 
 
-async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | None:
+async def cancel_one_turn(
+    client: DBOSClient, sessions: DeploySessions | None, turn_id: UUID
+) -> TerminalFrame | None:
     """Cancel a single turn: cancel its live workflow, then commit its cancelled terminal.
     Returns the committed frame iff this call transitioned the turn to cancelled — carrying
     the objects the row already says the turn created, so a member who stopped a turn is
@@ -40,7 +43,8 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | 
     `cancel_workflow_async` silently no-ops on an absent or complete workflow, so a queued turn
     never enqueued needs no special case. This is where a cancelled turn is counted: the turn's own
     execution never writes the row, and a turn cancelled before one started has no execution at
-    all."""
+    all. It is also where a cancelled turn's proxy sessions end: once `cancelled` is committed, they
+    end as `TurnSessions.close` ends any terminal turn's."""
     while True:
         async with workspace_tx() as connection:
             row = (
@@ -58,12 +62,11 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | 
             current = (
                 await connection.execute(
                     sa.select(
-                        tables.turn.c.status,
-                        tables.turn.c.subagent_profile,
-                        tables.turn.c.parent_turn_id,
-                        tables.turn.c.conversation_id,
-                        tables.turn.c.running_attempt,
-                        tables.turn.c.created_refs,
+                        tables.turn,
+                        sa.select(tables.agent.c.internet_access_allowed)
+                        .where(tables.agent.c.id == tables.turn.c.agent_id)
+                        .scalar_subquery()
+                        .label("agent_internet_access_allowed"),
                     )
                     .where(tables.turn.c.id == turn_id)
                     .with_for_update()
@@ -102,4 +105,15 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | 
         profile=turn_profile(row.subagent_profile, spawned=row.parent_turn_id is not None),
     )
     await dispatch_next_turn(client, row.conversation_id)
+    if sessions is not None:
+        turn = Turn.model_validate({**row._mapping, "status": CANCELLED, "terminal": frame})
+        await TurnSessions(
+            proxy=sessions.proxy,
+            rules=sessions.rules,
+            run_tokens=sessions.run_tokens,
+            turn=turn,
+            agent_id=turn.agent_id,
+            internet_access_allowed=bool(row.agent_internet_access_allowed)
+            and (turn.runtime_config is None or turn.runtime_config.internet_access is None),
+        ).close()
     return frame

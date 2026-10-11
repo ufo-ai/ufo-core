@@ -35,7 +35,6 @@ from ufo.db import workspace_tx
 from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
@@ -88,7 +87,6 @@ def _mounted(
             backend="local",
             off_cluster=False,
             image_ref=SANDBOX_IMAGE_REF,
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             workspace_root=tmp_path / "workspaces",
         ),
         InProcessHub(),
@@ -102,6 +100,7 @@ def _mounted(
         member_skill_listing=no_member_skills,
         sign_in_path=sign_in_path,
         sites=sites,
+        deploy_sessions=None,
     )
     return AsyncClient(transport=ASGITransport(app=app), base_url=PUBLIC_BASE_URL)
 

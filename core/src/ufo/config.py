@@ -20,7 +20,6 @@ DEFAULT_CDP_PROVIDER = "sandbox_chrome"
 DEFAULT_AUTO_MODEL = "claude-opus-5-5"
 DEFAULT_AMBIENT_REPLY_MODEL = "gpt-5.6-luna"
 DEFAULT_BACKGROUND_JOBS_MODEL = "gpt-5.6-luna"
-DEFAULT_PROXY_PORT = 8888
 DEFAULT_INGRESS_PORT = 8100
 DEFAULT_FLAG_CACHE_TTL_SECONDS = 30.0
 DEFAULT_CONTEXT_STRATEGY = "compact"
@@ -227,10 +226,10 @@ class SandboxConfig(BaseModel):
     reference lets an eval or deploy bind the runtime tools it validated instead of resolving a
     mutable local tag after validation.
 
-    `proxy_port` is the stable port the egress proxy binds. `proxy_public_url` is the externally
-    reachable base a remote sandbox carrier such as E2B dials; local carriers leave it unset and
-    reach the process-local proxy directly. `serve` fails loud when a remote carrier has no public
-    proxy URL — open, unmetered egress is never a silent default.
+    `proxy_url` names the proxy service, `https` and a host with nothing after it: a carrier whose
+    sandbox runs off the cluster, such as E2B, egresses only through it, and `serve` fails loud
+    when one is selected without it — open, unmetered egress is never a silent default. The
+    in-cluster carriers run unenforced and open no proxy session.
 
     `ingress_port` is the stable port the sandbox ingress binds. `ingress_public_url` is the
     wildcard base every served sandbox port is a subdomain of (`https://example.com`, backed
@@ -248,28 +247,18 @@ class SandboxConfig(BaseModel):
     `backend`. Every name must resolve to a registered carrier, and repeating `backend` here fails
     loud."""
     workspace_root: Path = Path("./workspaces")
-    proxy_port: int = DEFAULT_PROXY_PORT
-    proxy_public_url: str | None = None
+    proxy_url: str | None = None
     ingress_port: int = DEFAULT_INGRESS_PORT
     ingress_public_url: str | None = None
     apps_dev_server: str | None = None
     """`http://host:port` of a dev server holding the app pages from source. Set, the ingress relays
     a shipped app page there — its root at `/<slug>/`, every other path verbatim — in place of the
     published bundle: the local stack's edit loop. Unset, a shipped page is the bundle."""
-    cache_daemon: str | None = None
-    """`host:port` of the sandbox cache daemon co-located with the egress proxy. Set enables
-    the cache: the proxy relays the cache host to it and internet-holding sandboxes route git and
-    npm through it. Unset, no sandbox is rewritten and the cache host is not admitted."""
     preview_service: str | None = None
-    """`host:port` of the preview service the proxy relays the preview host to. Set
-    admits that host for every sandbox, whatever its internet policy. Unset, the host is not
-    admitted, document reads are unavailable, and a share carries no rendered preview."""
-    residential_hosts: tuple[str, ...] = ()
-    """Hosts every sandbox reaches through the residential provider the proxy carries
-    (`UFO_EGRESS_RESIDENTIAL_PROXY`) instead of the cluster's own address, for an origin that
-    refuses a datacenter one. A host here opens no egress of its own — it is reached by the scope or
-    the internet rule that already admits it. Empty routes every host straight out; a host here on a
-    proxy with no provider configured is refused rather than dialed direct."""
+    """`host:port` of the preview service `/internal/egress/preview/render` relays to. Set with
+    `proxy_url`, a running turn's session routes the preview host to that relay, whatever its
+    internet policy. Unset, no session routes it, document reads are unavailable, and a share
+    carries no rendered preview."""
 
     @model_validator(mode="after")
     def _ingress_base_is_addressable(self) -> "SandboxConfig":
@@ -293,6 +282,23 @@ class SandboxConfig(BaseModel):
                 "fragment, or credentials (e.g. https://example.com) — every site's address "
                 "is a label put in front of that host"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _proxy_url_is_an_origin(self) -> "SandboxConfig":
+        if self.proxy_url is None:
+            return self
+        base = urlsplit(self.proxy_url)
+        if (
+            base.scheme != "https"
+            or not base.hostname
+            or base.path
+            or base.query
+            or base.fragment
+            or base.username
+            or base.password
+        ):
+            raise ValueError("sandbox.proxy_url is the proxy service's https URL with no path")
         return self
 
     @model_validator(mode="after")

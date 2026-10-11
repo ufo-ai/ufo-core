@@ -25,7 +25,7 @@ from ufo.config import Config
 from ufo.harness.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import SandboxSession, SandboxSpec
 from ufo.host.ext.loader import HookChain, load_manifests
 from ufo.runtime.context_boundary import (
     BoundaryInputs,
@@ -66,8 +66,6 @@ async def _session(workspace: Path) -> SandboxSession:
             conversation_id=uuid4(),
             image_ref=SANDBOX_IMAGE_REF,
             workspace_host_path=str(workspace),
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
-            run_token="rollover-manifest-test",
         )
     )
     return SandboxSession(carrier=carrier, handle=handle)

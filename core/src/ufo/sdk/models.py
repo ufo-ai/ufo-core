@@ -9,6 +9,9 @@ from ufo.harness.models.catalog import (
     ANTHROPIC_KEY_SLOT as ANTHROPIC_KEY_SLOT,
 )
 from ufo.harness.models.catalog import (
+    CORE_PRICES as CORE_PRICES,
+)
+from ufo.harness.models.catalog import (
     OPENAI_KEY_SLOT as OPENAI_KEY_SLOT,
 )
 from ufo.harness.models.grant import (

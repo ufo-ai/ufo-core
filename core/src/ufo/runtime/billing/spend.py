@@ -186,8 +186,11 @@ class SpendGates:
         model: str | None = None,
         member_admission: bool = False,
         intent: IntentRef | None = None,
+        self_funded: bool | None = None,
     ) -> SpendDecision:
-        """Every gate's verdict on work starting now, composed. `model` defaults to the agent's."""
+        """Every gate's verdict on work starting now, composed. `model` defaults to the agent's.
+        `self_funded`, when given, answers whether the workspace's own key pays in place of the
+        stored-key read: work no key of the workspace ever pays for passes False."""
         if not self.gates:
             return ALLOWED
         if model is None and agent_id is not None:
@@ -204,10 +207,14 @@ class SpendGates:
             agent_id=agent_id,
             turn_id=turn_id,
             model=model,
-            self_funded=bool(
-                await connection.scalar(
-                    sa.select(self._self_funded(sa.literal(workspace_id), model))
+            self_funded=(
+                bool(
+                    await connection.scalar(
+                        sa.select(self._self_funded(sa.literal(workspace_id), model))
+                    )
                 )
+                if self_funded is None
+                else self_funded
             ),
             member_admission=member_admission,
             intent=intent,

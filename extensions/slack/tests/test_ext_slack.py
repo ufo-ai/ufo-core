@@ -54,7 +54,6 @@ from ufo.harness.sandbox.conversation import (
     ConversationSandbox,
 )
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.host.ext.loader import turn_hooks, turn_tools, turn_workspace_facts
 from ufo.host.kinds.surface_kind import SURFACE_KIND
 from ufo.runtime.access.credentials import (
@@ -471,7 +470,6 @@ def _sandboxes(tmp_path) -> ConversationSandbox:
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
         workspace_root=tmp_path / "workspaces",
     )
 
@@ -609,6 +607,7 @@ async def _mount_transport(
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
         spend=SpendGates(gates=(SampleGate(GateDeploy(public_base_url=None, home_surface=None)),)),
+        deploy_sessions=None,
     )
     client = AsyncClient(transport=ASGITransport(app=app), base_url="http://slack")
     return app, client, blob
@@ -730,6 +729,7 @@ async def test_manifest_workspace_verifies_with_its_own_signing_slot(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     body = _event_body(
         type="app_mention", user="U1", channel="C1", ts="100.5", text=f"<@{BOT_USER_ID}> hi"
@@ -1133,6 +1133,7 @@ async def test_shared_handshake_echoes_without_binding_a_workspace(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     handshake = json.dumps({"type": "url_verification", "challenge": "shared-c"}).encode()
     event = _event_body(type="app_mention", user="U1", channel="C1", ts="1.0", text="hi")
@@ -1200,6 +1201,7 @@ async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeyp
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     sealed = _install_state(store, workspace_id, member_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
@@ -1265,6 +1267,7 @@ async def test_oauth_callback_declined_carries_no_workspace_and_reflects_no_erro
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
         response = await client.get(
@@ -1302,6 +1305,7 @@ async def test_oauth_callback_refuses_a_team_bound_elsewhere(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     sealed = _install_state(store, workspace_id, member_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
@@ -1337,6 +1341,7 @@ async def test_oauth_callback_refuses_a_tampered_state(db: None, tmp_path, monke
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
         response = await client.get(
@@ -1382,6 +1387,7 @@ async def test_oauth_callback_reports_a_rejected_code(db: None, tmp_path, monkey
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     sealed = _install_state(store, workspace_id, member_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
@@ -1434,6 +1440,7 @@ async def test_an_install_with_no_app_id_lands_and_says_to_close_the_tab(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     sealed = _install_state(store, workspace_id, member_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
@@ -1472,6 +1479,7 @@ async def test_shared_oauth_callback_binds_the_sealed_workspace(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     sealed = _install_state(store, workspace_id, member_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
@@ -3408,6 +3416,7 @@ async def test_shared_slack_rejects_an_unknown_installation_without_binding(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     body = _event_body(
         type="message",
@@ -3479,6 +3488,7 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     body_a = json.dumps(
         {

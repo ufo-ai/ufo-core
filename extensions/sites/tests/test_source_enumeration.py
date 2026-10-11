@@ -11,7 +11,7 @@ from ufo_ext_sites.tools import SOURCE_SKIP_NAMES, _source_listing
 
 from ufo.blob import FilesystemBlobStore
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import WORKSPACE_DIR, ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import WORKSPACE_DIR, SandboxSession, SandboxSpec
 from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
@@ -32,8 +32,6 @@ async def _context(workspace: Path, tmp_path: Path) -> ToolContext:
             conversation_id=uuid4(),
             image_ref="unused",
             workspace_host_path=str(workspace),
-            proxy=ProxyEndpoint(port=9999, ca_cert="ca-pem"),
-            run_token="run-token",
         )
     )
     return ToolContext(

@@ -3,11 +3,9 @@
 Core's zero-dependency default — no container, no cloud. The conversation's `workspace/` subtree is
 a real host directory (the same bind-mount the Docker carrier would use), commands run as host
 subprocesses with cwd set there, and the `/workspace` paths tools pass are rewritten to it. Egress
-still routes through the sandbox proxy: each command inherits `HTTP(S)_PROXY` pointing at the proxy
-on localhost, carrying the turn's run token, plus the sentinel model keys and the proxy CA, so
-sentinel-swap and metering hold exactly as they do in a container. The `ufo` client is installed on
-the command PATH — the same binary the image bakes — so `ufo fs` serves the file tools and `ufo llm`
-serves the in-sandbox egress CLI with no container present.
+is unenforced: a command reaches the host's network directly, with no proxy, no CA, and no model
+key exported. The `ufo` client is installed on the command PATH — the same binary the image bakes —
+so `ufo fs` serves the file tools with no container present.
 
 A command's git is the sandbox's, never the host's: Apple's git ships
 `credential.helper=osxkeychain`, and storing a credential through it raises a keychain authorization
@@ -17,11 +15,9 @@ it, forever.
 Every command runs under the kernel's own sandbox, `ufo sandbox` — Seatbelt on macOS, Landlock on
 Linux — with writes confined to the workspace, the conversation's runtime root, the scratch home,
 and the temp dir, and everything readable. The binary that applies it sits on the scratch PATH
-outside every writable root, so no confined command can replace what confines the next. Egress is
-not kernel-held: a command that ignores the proxy env reaches the host's network. Docker and E2B
-are the carriers that hold both. A command's environment is built for it — the scratch HOME and
-PATH, locale and tmp passthrough, the proxy exports, the spec's own env — never serve's own, whose
-environment is the deploy's secrets."""
+outside every writable root, so no confined command can replace what confines the next. A
+command's environment is built for it — the scratch HOME and PATH, locale and tmp passthrough, the
+spec's own env — never serve's own, whose environment is the deploy's secrets."""
 
 import asyncio
 import hashlib
@@ -45,10 +41,7 @@ from uuid import uuid4
 from ufo.harness.o11y import warn
 from ufo.harness.sandbox.client_binary import CLIENT_BINARY_NAME, client_binary
 from ufo.harness.sandbox.session import (
-    NO_PROXY_HOSTS,
-    PROXY_PASSWORD,
     RUNTIME_DIRNAME,
-    SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     WORKSPACE_WRITE_MODE,
     DialTarget,
@@ -60,7 +53,6 @@ from ufo.harness.sandbox.session import (
 )
 
 LOCAL_CONTAINER_ID = "local"
-LOCAL_PROXY_HOST = "127.0.0.1"
 ENV_PASSTHROUGH = (
     "TMPDIR",
     "LANG",
@@ -69,7 +61,6 @@ ENV_PASSTHROUGH = (
     "NODE_PATH",
     "PLAYWRIGHT_BROWSERS_PATH",
 )
-CA_FILENAME = "egress-ca.pem"
 SANDBOX_VERB = "sandbox"
 SANDBOX_WRITE_FLAG = "--write"
 DEFAULT_TMPDIR = "/tmp"
@@ -269,36 +260,13 @@ class LocalCarrier:
         await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
         runtime_root = self.ufo_home / RUNTIME_DIRNAME / spec.conversation_id.hex
         await asyncio.to_thread(runtime_root.mkdir, parents=True, exist_ok=True)
-        ca_path = self._scratch / CA_FILENAME
-        await asyncio.to_thread(ca_path.write_bytes, spec.proxy.ca_cert.encode())
-        proxy_url = f"http://{spec.run_token}:{PROXY_PASSWORD}@{LOCAL_PROXY_HOST}:{spec.proxy.port}"
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=LOCAL_CONTAINER_ID,
             workspace_host_path=spec.workspace_host_path,
-            run_token=spec.run_token,
             turn_id=spec.turn_id,
             runtime_root=str(runtime_root),
-            egress_env={
-                **self._base_env(),
-                "HTTP_PROXY": proxy_url,
-                "HTTPS_PROXY": proxy_url,
-                "http_proxy": proxy_url,
-                "https_proxy": proxy_url,
-                "NO_PROXY": NO_PROXY_HOSTS,
-                "no_proxy": NO_PROXY_HOSTS,
-                "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
-                "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
-                "SSL_CERT_FILE": str(ca_path),
-                "REQUESTS_CA_BUNDLE": str(ca_path),
-                "CURL_CA_BUNDLE": str(ca_path),
-                "NODE_EXTRA_CA_CERTS": str(ca_path),
-                # git and cargo (libcurl) ignore CURL_CA_BUNDLE when they set their own CAINFO, so a
-                # MITM'd host needs these.
-                "GIT_SSL_CAINFO": str(ca_path),
-                "CARGO_HTTP_CAINFO": str(ca_path),
-                **spec.env,
-            },
+            egress_env={**self._base_env(), **spec.env},
         )
 
     def _base_env(self) -> dict[str, str]:
@@ -329,7 +297,6 @@ class LocalCarrier:
             conversation_id=spec.conversation_id,
             container_id=LOCAL_CONTAINER_ID,
             workspace_host_path=spec.workspace_host_path,
-            run_token=spec.run_token,
             turn_id=spec.turn_id,
             runtime_root=str(self.ufo_home / RUNTIME_DIRNAME / spec.conversation_id.hex),
             egress_env=self._base_env(),
@@ -344,7 +311,7 @@ class LocalCarrier:
     ) -> ExecResult:
         """Run one command as a host subprocess in the workspace. The `/workspace` paths the tools
         pass are logical, so each argv element is rewritten to the host workspace directory before
-        the subprocess sees it, and the command inherits the turn's egress environment.
+        the subprocess sees it, and the command runs under the handle's environment.
 
         Argv is the whole of the rewrite. A logical path inside a file the command reads — a script
         the agent wrote, a REPL cell — resolves against the host's own filesystem, where

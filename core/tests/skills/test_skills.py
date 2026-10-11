@@ -9,7 +9,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import SandboxSession, SandboxSpec
 from ufo.host.ext.loader import member_skill_listing, turn_member_skills
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.ext.context import ExtensionContext
@@ -484,8 +484,6 @@ async def test_install_replaces_the_user_skill_tree_already_at_the_name(tmp_path
             conversation_id=uuid4(),
             image_ref="ufo-sandbox:latest",
             workspace_host_path=str(workspace),
-            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
-            run_token="run-token",
         )
     )
     session = SandboxSession(carrier=carrier, handle=handle)

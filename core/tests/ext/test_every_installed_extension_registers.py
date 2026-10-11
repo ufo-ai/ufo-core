@@ -46,7 +46,6 @@ from ufo.harness.models.registry import model_registry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.select import select_carriers
-from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.host.ext.loader import (
     CONNECTION_RECORDED,
     NotRegisteredError,
@@ -274,7 +273,6 @@ def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) 
             backend="local",
             off_cluster=False,
             image_ref=SANDBOX_IMAGE_REF,
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             workspace_root=tmp_path / "workspaces",
         ),
         InProcessHub(),
@@ -286,6 +284,7 @@ def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) 
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
+        deploy_sessions=None,
     )
     mounted = {route.path for route in app.routes}
     for spec in manifest.surfaces:

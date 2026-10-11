@@ -139,10 +139,10 @@ async def test_an_active_extension_lists_and_reads_everything_it_declares(db: No
             {
                 "ref": f"{EXTENSION_KIND}/{sample.NAME}",
                 "name": sample.NAME,
-                "summary": f"{sample.NAME} {manifest.version}, 10 tools, 1 credential slots",
+                "summary": f"{sample.NAME} {manifest.version}, 10 tools, 2 credential slots",
                 "version": manifest.version,
                 "tool_count": 10,
-                "credential_slot_count": 1,
+                "credential_slot_count": 2,
             }
         ]
 
@@ -165,7 +165,7 @@ async def test_an_active_extension_lists_and_reads_everything_it_declares(db: No
                 "sample_connector_execute",
             ],
             "object_kinds": [WIDGET_KIND, RELIC_KIND],
-            "credential_slots": [sample.API_SLOT],
+            "credential_slots": [sample.API_SLOT, sample.MINTED_SLOT],
             "surfaces": [surface.name for surface in manifest.surfaces],
             "jobs": [job.name for job in manifest.jobs],
             "hooks": sorted({hook.event for hook in manifest.hooks}),

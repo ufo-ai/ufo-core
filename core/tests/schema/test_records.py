@@ -18,6 +18,7 @@ from ufo.schema.records import (
     TurnContext,
     TurnRuntimeConfig,
     ledger_id_for,
+    service_ledger_id_for,
     turn_id_for,
     turn_queue_for,
 )
@@ -61,11 +62,25 @@ def test_a_stored_runtime_config_loads_without_the_keys_this_release_does_not_kn
     assert TurnRuntimeConfig.model_validate(stored) == TurnRuntimeConfig(internet_access=False)
 
 
+def test_a_runtime_config_can_narrow_the_internet_but_never_open_it() -> None:
+    with pytest.raises(ValidationError, match="False"):
+        TurnRuntimeConfig.model_validate({"model": "claude-opus-4-8", "internet_access": True})
+
+
 def test_ledger_id_deterministic() -> None:
     workspace_id, turn_id = uuid4(), uuid4()
     assert ledger_id_for(workspace_id, turn_id, "tokens") == ledger_id_for(
         workspace_id, turn_id, "tokens"
     )
+
+
+def test_service_ledger_id_is_one_per_service_resource_dimension_and_attempt() -> None:
+    workspace_id = uuid4()
+    record = service_ledger_id_for(workspace_id, "proxy", "session", "gib", "flush-1")
+    assert record == service_ledger_id_for(workspace_id, "proxy", "session", "gib", "flush-1")
+    assert record != service_ledger_id_for(workspace_id, "proxy", "session", "gib", "flush-2")
+    assert record != service_ledger_id_for(workspace_id, "proxy", "session", "requests", "flush-1")
+    assert record != service_ledger_id_for(workspace_id, "proxy", "other", "gib", "flush-1")
 
 
 def _turn(status: str, terminal: TerminalFrame | None) -> Turn:

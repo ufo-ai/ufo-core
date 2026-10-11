@@ -1,14 +1,17 @@
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import sqlalchemy as sa
+from starlette.applications import Starlette
 
+from core.tests.access.proxy_fake import proxy_app
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF
@@ -16,15 +19,17 @@ from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     RUNTIME_DIRNAME,
     ExecResult,
-    ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
 )
 from ufo.host.tools.builtins import BashInput, bash_handler
+from ufo.runtime.access.egress_rules import SessionPolicy
+from ufo.runtime.access.proxy_sessions import ProxySessions, SessionCreated
 from ufo.runtime.background_tasks import (
     DETACHED_FOLLOW,
     BackgroundTaskSweep,
 )
+from ufo.runtime.billing.accounting import TURN_LABEL
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.runtime.turns.audience import conversation_audience
@@ -36,6 +41,35 @@ pytestmark = [
     pytest.mark.usefixtures("database_url"),
     pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
 ]
+BEARER = "ufo_background-tasks-system-token"
+
+
+@dataclass(frozen=True)
+class _Bearer:
+    async def bearer(self) -> str:
+        return BEARER
+
+
+@pytest.fixture
+def fake() -> Starlette:
+    return proxy_app(BEARER)
+
+
+@pytest.fixture
+async def proxy(fake: Starlette) -> AsyncIterator[ProxySessions]:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=fake), base_url="https://proxy.test"
+    ) as http:
+        yield ProxySessions("https://proxy.test", _Bearer(), http)
+
+
+async def _turn_session(proxy: ProxySessions, workspace_id: UUID, turn_id: UUID) -> SessionCreated:
+    return await proxy.open(
+        workspace_id,
+        key=f"turn:{turn_id}:-:0123456789abcdef",
+        labels={TURN_LABEL: str(turn_id)},
+        policy=SessionPolicy(),
+    )
 
 
 @dataclass
@@ -168,8 +202,6 @@ async def _rig(
             conversation_id=sandbox_conversation_id or turn.conversation_id,
             image_ref=SANDBOX_IMAGE_REF,
             workspace_host_path=str(tmp_path / "ws"),
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
-            run_token="off-turn-test",
         )
     )
     if runtime_id is not None:
@@ -273,15 +305,18 @@ async def test_a_running_task_keeps_the_stamp_and_posts_nothing(tmp_path: Path, 
 
 
 async def test_a_finished_task_is_posted_once_and_the_stamp_clears(
-    tmp_path: Path, db: None
+    tmp_path: Path, db: None, fake: Starlette, proxy: ProxySessions
 ) -> None:
     rig = await _rig(tmp_path)
+    own = await _turn_session(proxy, rig.turn.workspace_id, rig.turn.id)
+    other = await _turn_session(proxy, rig.turn.workspace_id, uuid4())
     task = await _launch(rig, "echo finished-marker; exit 3")
     base = await _task_base(rig, task)
     await _wait_for_exit(rig, task)
+    sweep = replace(rig.sweep, sessions=proxy)
 
-    await _sweep(rig)
-    await _sweep(rig)
+    await _sweep(rig, sweep)
+    await _sweep(rig, sweep)
 
     turns = await _turns(rig)
     assert len(turns) == 2
@@ -293,6 +328,31 @@ async def test_a_finished_task_is_posted_once_and_the_stamp_clears(
     assert turns[0].detached_until is None
     assert await _tasks(rig) == []
     assert rig.turn.workspace_id not in await rig.sweep.candidate_workspaces()
+    assert fake.state.sessions[own.id]["revoked_at"] is not None
+    assert fake.state.sessions[other.id]["revoked_at"] is None
+    revokes = [target for method, target, _, _ in fake.state.calls if target.endswith("/revoke")]
+    assert revokes == [f"/v1/sessions/{own.id}/revoke"]
+
+
+async def test_a_running_turns_last_task_leaves_its_sessions_live(
+    tmp_path: Path, db: None, fake: Starlette, proxy: ProxySessions
+) -> None:
+    rig = await _rig(tmp_path)
+    own = await _turn_session(proxy, rig.turn.workspace_id, rig.turn.id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(status="running", terminal=None)
+            .where(tables.turn.c.id == rig.turn.id)
+        )
+    task = await _launch(rig, "exit 0")
+    await _wait_for_exit(rig, task)
+
+    await _sweep(rig, replace(rig.sweep, sessions=proxy))
+
+    assert await _tasks(rig) == []
+    assert fake.state.sessions[own.id]["revoked_at"] is None
+    assert [method for method, _, _, _ in fake.state.calls] == ["POST"]
 
 
 async def test_a_task_whose_supervisor_died_is_posted_as_lost(tmp_path: Path, db: None) -> None:

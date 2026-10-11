@@ -1,14 +1,15 @@
 """The sandbox_chrome lease end to end: the real launch, proxy and resolve commands run through a
-real carrier under the turn's real egress environment, against a real Chrome, and the endpoint the
-lease yields answers a real CDP command.
+real carrier under a real session environment, against a real Chrome, and the endpoint the lease
+yields answers a real CDP command.
 
-The local carrier runs each command as a host subprocess carrying the turn's egress environment —
-`HTTP(S)_PROXY` pointing at the egress proxy — which is the condition the in-sandbox readiness
-probes actually run under and the one no fake carrier reproduces. The proxy refuses a destination
-that is not globally routable, so a probe that reaches Chrome only by way of the proxy cannot
-succeed; this is the live proof the whole chain (launch, the Host-rewriting proxy carrying the
-WebSocket upgrade, the resolved DevTools path, a CDP round trip) works from inside. Missing Chrome
-infrastructure fails the required integration gate and skips an optional local run."""
+The local carrier runs each command as a host subprocess carrying the env its spec rides — on a
+proxied open, `HTTP(S)_PROXY` pointing at the proxy — which is the condition the in-sandbox
+readiness probes actually run under and the one no fake carrier reproduces. The proxy refuses a
+destination that is not globally routable, so a probe that reaches Chrome only by way of the proxy
+cannot succeed; this is the live proof the whole chain (launch, the Host-rewriting proxy carrying
+the WebSocket upgrade, the resolved DevTools path, a CDP round trip) works from inside. An
+unproxied open runs the same chain with no bridge. Missing Chrome infrastructure fails the required
+integration gate and skips an optional local run."""
 
 from __future__ import annotations
 
@@ -29,8 +30,8 @@ from ufo_testsupport.plugin import integration_dependency_available
 
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
+    NO_PROXY_HOSTS,
     DialTarget,
-    ProxyEndpoint,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
@@ -68,26 +69,30 @@ class LoopbackHostCarrier(LocalCarrier):
 async def _turn_sandbox(
     tmp_path: Path,
     browser: str | None,
-    proxy_port: int = UNREACHABLE_PROXY_PORT,
-    run_token: str = "run-token-abc",
+    upstream_port: int | None = UNREACHABLE_PROXY_PORT,
+    session_token: str = "session-token-abc",
     turn_id: UUID | None = None,
 ) -> SandboxSession:
     env: dict[str, str] = {}
+    if upstream_port is not None:
+        proxy = f"http://{session_token}:ufo@127.0.0.1:{upstream_port}"
+        env = {
+            **dict.fromkeys(("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"), proxy),
+            **dict.fromkeys(("NO_PROXY", "no_proxy"), NO_PROXY_HOSTS),
+        }
     if browser is not None:
         shim = tmp_path / "bin"
         shim.mkdir(exist_ok=True)
         wrapper = shim / ext.HEADLESS_SHELL_COMMAND
         wrapper.write_text(browser)
         wrapper.chmod(0o755)
-        env = {"PATH": f"{shim}:{os.environ['PATH']}"}
+        env["PATH"] = f"{shim}:{os.environ['PATH']}"
     carrier = LoopbackHostCarrier()
     handle = await carrier.create(
         SandboxSpec(
             conversation_id=uuid4(),
             image_ref="ufo-sandbox:latest",
             workspace_host_path=str(tmp_path / "workspace"),
-            proxy=ProxyEndpoint(port=proxy_port, ca_cert="CA-PEM-BYTES"),
-            run_token=run_token,
             turn_id=turn_id or uuid4(),
             env=env,
         )
@@ -310,10 +315,10 @@ async def test_real_chrome_navigates_through_the_authenticated_egress_bridge(
                 await writer.wait_closed()
 
     server = await asyncio.start_server(upstream, "127.0.0.1", 0)
-    proxy_port = server.sockets[0].getsockname()[1]
+    upstream_port = server.sockets[0].getsockname()[1]
     lease = None
     try:
-        session = await _turn_sandbox(tmp_path, _real_chrome(), proxy_port)
+        session = await _turn_sandbox(tmp_path, _real_chrome(), upstream_port)
         lease = await ext.SandboxChromeCdpProvider().lease(session)
         assert isinstance(lease, ext.SandboxChromeCdpLease)
         assert (
@@ -330,9 +335,49 @@ async def test_real_chrome_navigates_through_the_authenticated_egress_bridge(
         head for head in connect_heads if head.startswith(b"CONNECT example.test:80 HTTP/1.1")
     ]
     assert matching_connects
-    expected_auth = base64.b64encode(b"run-token-abc:ufo")
+    expected_auth = base64.b64encode(b"session-token-abc:ufo")
     assert b"Proxy-Authorization: Basic " + expected_auth in matching_connects[0]
     assert any(head.startswith(b"GET /nightly-probe HTTP/1.1") for head in origin_heads)
+
+
+async def test_an_unproxied_sandbox_runs_no_bridge_and_navigates_directly(
+    tmp_path: Path,
+) -> None:
+    origin_heads: list[bytes] = []
+    body = b"<html><body>direct navigation</body></html>"
+
+    async def origin(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            origin_heads.append(await reader.readuntil(b"\r\n\r\n"))
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/html\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    server = await asyncio.start_server(origin, "127.0.0.1", 0)
+    origin_port = server.sockets[0].getsockname()[1]
+    lease = None
+    try:
+        session = await _turn_sandbox(tmp_path, _real_chrome(), upstream_port=None)
+        lease = await ext.SandboxChromeCdpProvider().lease(session)
+        assert isinstance(lease, ext.SandboxChromeCdpLease)
+        assert await _port_closed(lease.stack.egress_bridge_port)
+        assert (
+            await _navigate_text(lease, f"http://127.0.0.1:{origin_port}/direct")
+            == "direct navigation"
+        )
+    finally:
+        if lease is not None:
+            await lease.aclose()
+        server.close()
+        await server.wait_closed()
+
+    assert any(head.startswith(b"GET /direct HTTP/1.1") for head in origin_heads)
 
 
 async def test_a_real_download_is_read_back_out_of_the_sandbox(
@@ -374,7 +419,7 @@ async def test_the_bring_up_creates_the_download_directory(
         await lease.aclose()
 
 
-async def test_pre_token_crash_recovery_finds_the_stack_and_refreshes_its_run_token(
+async def test_pre_token_crash_recovery_finds_the_stack_and_refreshes_its_proxy_authorization(
     tmp_path: Path,
 ) -> None:
     """A hard worker crash leaves Chrome alive in the resumed conversation sandbox."""
@@ -415,7 +460,7 @@ async def test_pre_token_crash_recovery_finds_the_stack_and_refreshes_its_run_to
             tmp_path,
             _real_chrome(),
             old_server.sockets[0].getsockname()[1],
-            "old-run-token",
+            "old-session-token",
             turn_id,
         )
         provider = ext.SandboxChromeCdpProvider()
@@ -426,7 +471,7 @@ async def test_pre_token_crash_recovery_finds_the_stack_and_refreshes_its_run_to
             tmp_path,
             _real_chrome(),
             recovered_server.sockets[0].getsockname()[1],
-            "recovered-run-token",
+            "recovered-session-token",
             turn_id,
         )
         recovered = await provider.lease(recovered_session)
@@ -443,8 +488,10 @@ async def test_pre_token_crash_recovery_finds_the_stack_and_refreshes_its_run_to
         recovered_server.close()
         await asyncio.gather(old_server.wait_closed(), recovered_server.wait_closed())
 
-    old_auth = b"Proxy-Authorization: Basic " + base64.b64encode(b"old-run-token:ufo")
-    recovered_auth = b"Proxy-Authorization: Basic " + base64.b64encode(b"recovered-run-token:ufo")
+    old_auth = b"Proxy-Authorization: Basic " + base64.b64encode(b"old-session-token:ufo")
+    recovered_auth = b"Proxy-Authorization: Basic " + base64.b64encode(
+        b"recovered-session-token:ufo"
+    )
     assert any(
         head.startswith(b"CONNECT before-crash.test:80 ") and old_auth in head
         for head in old_connects
@@ -490,16 +537,16 @@ async def test_closing_one_concurrent_lease_does_not_stop_its_sibling(
     second_server = await asyncio.start_server(
         handler(second_connects, second_body), "127.0.0.1", 0
     )
-    first_proxy_port = first_server.sockets[0].getsockname()[1]
-    second_proxy_port = second_server.sockets[0].getsockname()[1]
+    first_upstream_port = first_server.sockets[0].getsockname()[1]
+    second_upstream_port = second_server.sockets[0].getsockname()[1]
     first = None
     second = None
     try:
         first_session = await _turn_sandbox(
-            tmp_path, _real_chrome(), first_proxy_port, "first-run-token"
+            tmp_path, _real_chrome(), first_upstream_port, "first-session-token"
         )
         second_session = await _turn_sandbox(
-            tmp_path, _real_chrome(), second_proxy_port, "second-run-token"
+            tmp_path, _real_chrome(), second_upstream_port, "second-session-token"
         )
         provider = ext.SandboxChromeCdpProvider()
         first, second = await asyncio.gather(
@@ -529,8 +576,8 @@ async def test_closing_one_concurrent_lease_does_not_stop_its_sibling(
         second_server.close()
         await asyncio.gather(first_server.wait_closed(), second_server.wait_closed())
 
-    first_auth = b"Proxy-Authorization: Basic " + base64.b64encode(b"first-run-token:ufo")
-    second_auth = b"Proxy-Authorization: Basic " + base64.b64encode(b"second-run-token:ufo")
+    first_auth = b"Proxy-Authorization: Basic " + base64.b64encode(b"first-session-token:ufo")
+    second_auth = b"Proxy-Authorization: Basic " + base64.b64encode(b"second-session-token:ufo")
     first_host_connects = [
         head for head in first_connects if head.startswith(b"CONNECT first-lease.test:80 ")
     ]

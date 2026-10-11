@@ -270,13 +270,13 @@ async def test_cancel_reconciler_cancels_turns_left_live_under_a_cancelled_paren
     live_parent = await _turn(workspace_id, agent_id, "running", None)
     kept = await _turn(workspace_id, agent_id, "running", live_parent)
     client = _RecordingClient()
-    await CancelReconciler(client=client).sweep()
+    await CancelReconciler(client=client, sessions=None).sweep()
     assert await _turn_status(orphan) == "cancelled"
     assert await _turn_status(grandchild) == "cancelled"
     assert await _turn_status(kept) == "running"
     assert set(client.cancelled) == {str(orphan), str(grandchild)}
     idle = _RecordingClient()
-    await CancelReconciler(client=idle).sweep()
+    await CancelReconciler(client=idle, sessions=None).sweep()
     assert idle.cancelled == []
 
 
@@ -291,7 +291,7 @@ async def test_cancel_reconciler_reaches_a_live_turn_under_a_done_intermediate(d
     grandchild = await _turn(workspace_id, agent_id, "running", done_child)
     great_grandchild = await _turn(workspace_id, agent_id, "running", grandchild)
     client = _RecordingClient()
-    await CancelReconciler(client=client).sweep()
+    await CancelReconciler(client=client, sessions=None).sweep()
     assert await _turn_status(grandchild) == "cancelled"
     assert await _turn_status(great_grandchild) == "cancelled"
     assert await _turn_status(done_child) == "done"
@@ -308,7 +308,7 @@ async def test_cancel_never_crosses_an_agent_child_boundary(db: None) -> None:
     peer = await _turn(workspace_id, agent_id, "running", cancelled_spawner, profile=None)
     peer_child = await _turn(workspace_id, agent_id, "running", peer)
     client = _RecordingClient()
-    await CancelReconciler(client=client).sweep()
+    await CancelReconciler(client=client, sessions=None).sweep()
     assert await _turn_status(peer) == "running"
     assert await _turn_status(peer_child) == "running"
     assert client.cancelled == []
@@ -317,7 +317,7 @@ async def test_cancel_never_crosses_an_agent_child_boundary(db: None) -> None:
         workspace_id, agent_id, "cancelled", cancelled_spawner, profile=None
     )
     tied = await _turn(workspace_id, agent_id, "running", cancelled_peer)
-    await CancelReconciler(client=client).sweep()
+    await CancelReconciler(client=client, sessions=None).sweep()
     assert await _turn_status(tied) == "cancelled"
     assert await _turn_status(peer) == "running"
     assert set(client.cancelled) == {str(tied)}
@@ -337,7 +337,7 @@ async def test_cancel_reconciler_cancels_an_intent_child_of_a_plain_agent_turn(d
         admission_source=INTENT_ADMISSION,
     )
     client = _RecordingClient()
-    await CancelReconciler(client=client).sweep()
+    await CancelReconciler(client=client, sessions=None).sweep()
     assert await _turn_status(bridge_child) == "cancelled"
     assert client.cancelled == [str(bridge_child)]
 
@@ -357,7 +357,7 @@ async def test_stranded_reconciler_cancels_a_turn_whose_workflow_cannot_reach_it
         workspace_id, agent_id, "running", None, attempt="wf-absent", idle_seconds=_AGED
     )
     client = _RecordingClient(carries={"wf-ended": "CANCELLED"})
-    await StrandedTurnReconciler(client=client).sweep()
+    await StrandedTurnReconciler(client=client, sessions=None).sweep()
     assert await _turn_status(ended) == "cancelled"
     assert await _turn_status(absent) == "cancelled"
     assert set(client.cancelled) == {"wf-ended", "wf-absent"}
@@ -377,7 +377,7 @@ async def test_stranded_reconciler_spares_a_live_turn_under_a_terminal_parent(db
         workspace_id, agent_id, "running", done_parent, attempt="wf-dead", idle_seconds=_AGED
     )
     client = _RecordingClient(carries={"wf-live": "PENDING", "wf-dead": "SUCCESS"})
-    await StrandedTurnReconciler(client=client).sweep()
+    await StrandedTurnReconciler(client=client, sessions=None).sweep()
     assert await _turn_status(live) == "running"
     assert await _turn_status(sibling) == "cancelled"
     assert client.cancelled == ["wf-dead"]
@@ -396,7 +396,7 @@ async def test_stranded_reconciler_spares_a_turn_that_is_merely_idle(db: None) -
         workspace_id, agent_id, "running", None, attempt="wf-delayed", idle_seconds=_AGED * 100
     )
     client = _RecordingClient(carries={"wf-enqueued": "ENQUEUED", "wf-delayed": "DELAYED"})
-    await StrandedTurnReconciler(client=client).sweep()
+    await StrandedTurnReconciler(client=client, sessions=None).sweep()
     assert await _turn_status(queued_behind) == "running"
     assert await _turn_status(waiting) == "running"
     assert client.cancelled == []
@@ -410,10 +410,10 @@ async def test_stranded_reconciler_holds_off_inside_the_grace_window(db: None) -
     agent_id = await _agent(workspace_id)
     fresh = await _turn(workspace_id, agent_id, "running", None, attempt="wf-fresh", idle_seconds=0)
     client = _RecordingClient()
-    await StrandedTurnReconciler(client=client).sweep()
+    await StrandedTurnReconciler(client=client, sessions=None).sweep()
     assert await _turn_status(fresh) == "running"
     assert client.asked == []
-    await StrandedTurnReconciler(client=client, grace_seconds=0).sweep()
+    await StrandedTurnReconciler(client=client, grace_seconds=0, sessions=None).sweep()
     assert await _turn_status(fresh) == "cancelled"
 
 
@@ -435,7 +435,7 @@ async def test_stranded_reconciler_leaves_undispatched_turns_to_the_dispatch_swe
         workspace_id, agent_id, "running", None, attempt=None, idle_seconds=_AGED
     )
     client = _RecordingClient()
-    await StrandedTurnReconciler(client=client).sweep()
+    await StrandedTurnReconciler(client=client, sessions=None).sweep()
     assert await _turn_status(queued) == "queued"
     assert await _turn_status(parked) == "parked"
     assert await _turn_status(unclaimed) == "running"

@@ -35,6 +35,7 @@ def _stopper(client: _RecordingClient, hub: InProcessHub) -> MemberStop:
         client=client,
         hub=hub,
         admission=Admission(dbos=client, durable_surfaces=frozenset(), hub=hub),
+        sessions=None,
     )
 
 

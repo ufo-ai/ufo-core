@@ -312,7 +312,7 @@ class WorkspaceScope:
         return await _store.rotate(self.workspace_id, slot, expected, plaintext)
 
     async def put_credential(self, slot: str, plaintext: str) -> None:
-        """Store an owner-authorized initial credential through the bound workspace."""
+        """Write the bound workspace's value for a slot, whether or not one is stored."""
         if _store is None:
             raise RuntimeError("credential store is not configured")
         await _store.put(self.workspace_id, slot, plaintext)
