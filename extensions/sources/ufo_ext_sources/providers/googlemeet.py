@@ -60,6 +60,7 @@ class GoogleMeetConnector(RestConnector):
     name = "googlemeet"
     base_url = MEET_API_BASE
     streams_list = GOOGLE_MEET_STREAMS
+    rate_limited = staticmethod(google.rate_limited)
     checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(

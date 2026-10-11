@@ -211,6 +211,7 @@ async def test_capped_run_resumes_at_the_last_native_checkpoint(
     assert result.pages[0].title == "items/1"
     assert result.next_cursor == "ck3"
     assert result.snapshot is False
+    assert result.capped is True
 
 
 class _RateLimitedConnector(_FeedConnector):

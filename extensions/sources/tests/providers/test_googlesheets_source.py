@@ -783,7 +783,7 @@ def _first_tab_refusing_handler(
     "reason",
     ["dailyLimitExceeded", "quotaExceeded", "rateLimitExceeded", "userRateLimitExceeded"],
 )
-async def test_a_quota_refusal_from_the_drive_list_is_not_a_scope_skip(reason: str) -> None:
+async def test_a_quota_refusal_from_the_drive_list_yields(reason: str) -> None:
     def refuse(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             403,
@@ -796,8 +796,9 @@ async def test_a_quota_refusal_from_the_drive_list_is_not_a_scope_skip(reason: s
             },
         )
 
-    with pytest.raises(httpx.HTTPStatusError):
-        await _fetch("spreadsheets", refuse)
+    result = await _fetch("spreadsheets", refuse)
+
+    assert result.retry_after_seconds == 60
 
 
 @pytest.mark.parametrize("stream", ["spreadsheets", "sheets", "sheet_values"])
@@ -806,13 +807,13 @@ async def test_a_quota_refusal_from_the_drive_list_is_not_a_scope_skip(reason: s
     [QUOTA_ERROR, RESOURCE_EXHAUSTED_ERROR],
     ids=["usage-limits-reason", "resource-exhausted-status-only"],
 )
-async def test_a_quota_refusal_on_the_sheets_get_is_not_a_metadata_fallback(
+async def test_a_quota_refusal_on_the_sheets_get_yields_instead_of_a_metadata_fallback(
     stream: str, error: dict[str, Any]
 ) -> None:
-    with pytest.raises(httpx.HTTPStatusError) as raised:
-        await _fetch(stream, _newest_refusing_handler(403, error))
+    result = await _fetch(stream, _newest_refusing_handler(403, error))
 
-    assert raised.value.response.status_code == 403
+    assert result.retry_after_seconds == 60
+    assert not {page.source_ref for page in result.pages} & _derived_refs(stream, "s1")
 
 
 @pytest.mark.parametrize(
@@ -887,13 +888,12 @@ async def test_a_refused_tab_keeps_a_later_tab_of_the_same_spreadsheet(
     )
 
 
-async def test_a_quota_refusal_during_tab_fallback_fails_the_run() -> None:
-    with pytest.raises(httpx.HTTPStatusError) as raised:
-        await _fetch(
-            "sheet_values", _first_tab_refusing_handler(403, PERMISSION_ERROR, QUOTA_ERROR)
-        )
+async def test_a_quota_refusal_during_tab_fallback_yields() -> None:
+    result = await _fetch(
+        "sheet_values", _first_tab_refusing_handler(403, PERMISSION_ERROR, QUOTA_ERROR)
+    )
 
-    assert raised.value.response.json() == QUOTA_ERROR
+    assert result.retry_after_seconds == 60
 
 
 REFUSED_FILES = {"v1": "2026-05-01T00:00:00.000Z", "v2": "2026-06-01T00:00:00.000Z"}
@@ -954,11 +954,10 @@ async def test_a_values_refusal_naming_the_grant_or_nothing_skips_the_stream(
         await _fetch("sheet_values", _values_refusing_handler(403, error))
 
 
-async def test_a_quota_refusal_on_the_values_get_fails_the_run() -> None:
-    with pytest.raises(httpx.HTTPStatusError) as raised:
-        await _fetch("sheet_values", _values_refusing_handler(403, QUOTA_ERROR))
+async def test_a_quota_refusal_on_the_values_get_yields() -> None:
+    result = await _fetch("sheet_values", _values_refusing_handler(403, QUOTA_ERROR))
 
-    assert raised.value.response.status_code == 403
+    assert result.retry_after_seconds == 60
 
 
 async def test_a_404_values_refusal_with_no_google_error_body_fails_the_run() -> None:
@@ -1593,14 +1592,7 @@ async def test_a_carried_refusal_whose_drive_row_is_refused_stays_carried() -> N
     assert json.loads(second.next_cursor) == {"watermark": ARRIVED_TIME, "refused": ["s1"]}
 
 
-@pytest.mark.parametrize(
-    ("status", "body"),
-    [(403, {"json": QUOTA_ERROR}), (404, {"json": PROXY_ERROR})],
-    ids=["quota", "no-google-error-body"],
-)
-async def test_a_carried_files_get_neither_absorbs_a_quota_nor_drops_a_bodyless_404(
-    status: int, body: dict[str, Any]
-) -> None:
+async def test_a_carried_files_get_does_not_drop_a_bodyless_404() -> None:
     modified = dict(BARREN_FILES) | {"s2": ARRIVED_TIME}
     refused = {"s1": PERMISSION_ERROR}
     first = await _fetch(
@@ -1609,15 +1601,38 @@ async def test_a_carried_files_get_neither_absorbs_a_quota_nor_drops_a_bodyless_
     with pytest.raises(httpx.HTTPStatusError) as raised:
         await _fetch(
             "spreadsheets",
-            _listing_handler(modified, tabs=2, drive_refused={"s1": (status, body)}),
+            _listing_handler(modified, tabs=2, drive_refused={"s1": (404, {"json": PROXY_ERROR})}),
             cursor=first.next_cursor,
         )
     healed = await _fetch(
         "spreadsheets", _listing_handler(modified, tabs=2), cursor=first.next_cursor
     )
 
-    assert raised.value.response.status_code == status
+    assert raised.value.response.status_code == 404
     assert {page.source_ref for page in healed.pages} == {"spreadsheets/s1", "spreadsheets/s2"}
+    assert healed.next_cursor == ARRIVED_TIME
+
+
+async def test_a_carried_files_get_yields_on_a_quota_and_keeps_the_carried_file() -> None:
+    modified = dict(BARREN_FILES) | {"s2": ARRIVED_TIME}
+    refused = {"s1": PERMISSION_ERROR}
+    first = await _fetch(
+        "spreadsheets", _listing_handler(modified, tabs=2, refused=refused), cursor=None
+    )
+    limited = await _fetch(
+        "spreadsheets",
+        _listing_handler(modified, tabs=2, drive_refused={"s1": (403, {"json": QUOTA_ERROR})}),
+        cursor=first.next_cursor,
+    )
+    healed = await _fetch(
+        "spreadsheets", _listing_handler(modified, tabs=2), cursor=limited.next_cursor
+    )
+
+    assert limited.retry_after_seconds == 60
+    assert {page.source_ref for page in [*limited.pages, *healed.pages]} == {
+        "spreadsheets/s1",
+        "spreadsheets/s2",
+    }
     assert healed.next_cursor == ARRIVED_TIME
 
 
@@ -1642,25 +1657,41 @@ async def test_a_refused_file_with_no_modified_time_reports_no_cursor() -> None:
 
 
 @pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
-@pytest.mark.parametrize(
-    ("error", "raised"),
-    [(API_DISABLED_ERROR, StreamSkipped), (QUOTA_ERROR, httpx.HTTPStatusError)],
-    ids=["grant-wide", "quota"],
-)
 async def test_a_derived_refusal_commits_no_cursor_so_the_next_run_lands_the_edit(
-    stream: str, error: dict[str, Any], raised: type[Exception]
+    stream: str,
 ) -> None:
     modified = dict(BARREN_FILES)
     first = await _fetch(stream, _listing_handler(modified, tabs=2), cursor=None)
     modified["s0"] = EDITED_TIME
-    with pytest.raises(raised):
+    with pytest.raises(StreamSkipped):
         await _fetch(
-            stream, _sheets_refusing_handler(403, {"json": error}), cursor=first.next_cursor
+            stream,
+            _sheets_refusing_handler(403, {"json": API_DISABLED_ERROR}),
+            cursor=first.next_cursor,
         )
     resumed = await _fetch(stream, _listing_handler(modified, tabs=2), cursor=first.next_cursor)
 
     assert first.next_cursor == BARREN_FILES["s1"]
     assert {page.source_ref for page in resumed.pages} == _derived_refs(
+        stream, "s0"
+    ) | _derived_refs(stream, "s1")
+    assert resumed.next_cursor == EDITED_TIME
+
+
+@pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
+async def test_a_derived_quota_yields_a_cursor_the_next_run_lands_the_edit_from(
+    stream: str,
+) -> None:
+    modified = dict(BARREN_FILES)
+    first = await _fetch(stream, _listing_handler(modified, tabs=2), cursor=None)
+    modified["s0"] = EDITED_TIME
+    limited = await _fetch(
+        stream, _sheets_refusing_handler(403, {"json": QUOTA_ERROR}), cursor=first.next_cursor
+    )
+    resumed = await _fetch(stream, _listing_handler(modified, tabs=2), cursor=limited.next_cursor)
+
+    assert limited.retry_after_seconds == 60
+    assert {page.source_ref for page in [*limited.pages, *resumed.pages]} == _derived_refs(
         stream, "s0"
     ) | _derived_refs(stream, "s1")
     assert resumed.next_cursor == EDITED_TIME

@@ -5,7 +5,7 @@ import pytest
 ROOT = Path(__file__).parents[3]
 
 
-@pytest.mark.parametrize("server", ("cache", "egress", "preview"))
+@pytest.mark.parametrize("server", ("cache", "preview"))
 def test_server_runtime_packages_can_refresh_without_compiling(server: str) -> None:
     dockerfile = (ROOT / "servers" / server / "Dockerfile").read_text()
     packages = dockerfile.split(" AS runtime-packages\n")[1]

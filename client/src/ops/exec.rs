@@ -20,7 +20,7 @@ use crate::cmd::run;
 use crate::config::Home;
 use crate::trust::{godebug, trust_bundle, CA_CERT_CONSUMERS};
 
-const CA_CERT_ENV: &str = "UFO_PROXY_CA_CERT";
+const CA_CERT_ENV: &str = "UFO_EGRESS_CA_CERT";
 const TRUST_BUNDLE_FILE: &str = "trust-bundle.pem";
 const GH_BASH_ENV: &str = "gh-bash-env";
 const GH_PATH_ENV: &str = "UFO_GH";
@@ -582,7 +582,7 @@ mod tests {
             "env": {
                 "BASH_ENV": original_bash_env,
                 "GODEBUG": "http2debug=1",
-                "UFO_PROXY_CA_CERT": "-----BEGIN CERTIFICATE-----\nPROXYCA\n-----END CERTIFICATE-----\n"
+                "UFO_EGRESS_CA_CERT": "-----BEGIN CERTIFICATE-----\nPROXYCA\n-----END CERTIFICATE-----\n"
             }
         })
         .to_string();
@@ -639,7 +639,7 @@ mod tests {
     fn materializes_the_trust_bundle() {
         let dir = scratch("ca");
         let reply = run(
-            r#"{"argv":["/bin/sh","-c","test \"$GIT_SSL_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$CARGO_HTTP_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$GODEBUG\" = \"http2debug=1,x509sslcertoverrideplatform=1\" && cat \"$SSL_CERT_FILE\"; printf %s \"${UFO_PROXY_CA_CERT:-unset}\""],"env":{"GODEBUG":"http2debug=1,x509sslcertoverrideplatform=0","UFO_PROXY_CA_CERT":"-----BEGIN CERTIFICATE-----\nPROXYCA\n-----END CERTIFICATE-----\n"}}"#,
+            r#"{"argv":["/bin/sh","-c","test \"$GIT_SSL_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$CARGO_HTTP_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$GODEBUG\" = \"http2debug=1,x509sslcertoverrideplatform=1\" && cat \"$SSL_CERT_FILE\"; printf %s \"${UFO_EGRESS_CA_CERT:-unset}\""],"env":{"GODEBUG":"http2debug=1,x509sslcertoverrideplatform=0","UFO_EGRESS_CA_CERT":"-----BEGIN CERTIFICATE-----\nPROXYCA\n-----END CERTIFICATE-----\n"}}"#,
             &dir,
             Path::new("/tmp"),
             30,

@@ -4,6 +4,7 @@ advancing the token, the shared-drive list, the three per-file children declared
 `files`, the `render` override that lifts a file's name/mimeType/owners, and `StreamSkipped` on a
 scope refusal. Offline — a canned transport, no DB, no token, no broker."""
 
+import json
 from collections.abc import Callable, Mapping
 from uuid import UUID, uuid4
 
@@ -12,7 +13,9 @@ import pytest
 from ufo_ext_sources.providers.googledrive import GoogleDriveConnector
 
 from ufo.runtime.access.connectors import Credential
-from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
+from ufo.runtime.sources import backend as backend_module
+from ufo.runtime.sources.backend import BACKFILL_KEY
+from ufo.runtime.sources.sync import CursorExpired, SourceAuth, StreamSkipped
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig, ParentPages, ParentRecord
 
 ParentsReader = Callable[[Mapping[str, tuple[ParentRecord, ...]]], ParentPages]
@@ -227,26 +230,122 @@ async def test_scope_refusal_yields_stream_skipped(parents_reader: ParentsReader
     raise AssertionError("a 403 from Drive must raise StreamSkipped")
 
 
-@pytest.mark.parametrize(
+QUOTA_ERRORS = pytest.mark.parametrize(
     "error",
     [
         {
             "code": 403,
             "message": "Rate Limit Exceeded",
-            "errors": [{"reason": "userRateLimitExceeded"}],
+            "errors": [{"reason": "rateLimitExceeded"}],
         },
         {"code": 403, "message": "Quota exceeded", "status": "RESOURCE_EXHAUSTED"},
     ],
     ids=["usage-limits-reason", "resource-exhausted-status"],
 )
-async def test_a_quota_refusal_is_not_a_scope_skip(
+
+
+FILE_4 = {**FILE_3, "id": "f4", "name": "Notes"}
+LISTED = {
+    None: ([FILE_1], "p2"),
+    "p2": ([FILE_2], "p3"),
+    "p3": ([FILE_3], "p4"),
+    "p4": ([FILE_4], None),
+}
+
+
+def _listing(
+    asked: list[str | None], refused: Mapping[str, httpx.Response] | None = None
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/drive/v3/changes/startPageToken":
+            asked.append("start")
+            return httpx.Response(200, json={"startPageToken": "tok-7"})
+        token = request.url.params.get("pageToken")
+        asked.append(token)
+        if token in (refused or {}):
+            return (refused or {})[token]
+        files, next_token = LISTED[token]
+        return httpx.Response(200, json={"files": files, "nextPageToken": next_token})
+
+    return handle
+
+
+def _cursor_at(page: str) -> str:
+    return json.dumps({"start": "tok-7", "page": page})
+
+
+@QUOTA_ERRORS
+async def test_a_quota_refusal_mid_listing_yields_a_cursor_at_the_refused_page(
     error: dict[str, object], parents_reader: ParentsReader
 ) -> None:
-    """A `403` naming a usage limit is not a refusal the grant can answer: it clears as the quota
-    window rolls, so it fails the run and takes the error backoff."""
+    asked: list[str | None] = []
+    refused = {"p2": httpx.Response(403, json={"error": error})}
 
-    def refuse(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, json={"error": error})
+    result = await _fetch("files", _listing(asked, refused), parents=parents_reader(LANDED))
+
+    assert asked == ["start", None, "p2"]
+    assert {page.source_ref for page in result.pages} == {"files/f1"}
+    assert result.retry_after_seconds == 60
+    assert json.loads(result.next_cursor or "") == json.loads(_cursor_at("p2"))
+
+
+async def test_a_resumed_listing_reads_from_its_page_and_ends_on_the_start_token(
+    parents_reader: ParentsReader,
+) -> None:
+    asked: list[str | None] = []
+
+    result = await _fetch(
+        "files", _listing(asked), parents=parents_reader(LANDED), cursor=_cursor_at("p2")
+    )
+
+    assert asked == ["p2", "p3", "p4"]
+    assert {page.source_ref for page in result.pages} == {"files/f2", "files/f3", "files/f4"}
+    assert result.next_cursor == "tok-7"
+
+
+async def test_a_listing_page_token_drive_rejects_expires_the_cursor(
+    parents_reader: ParentsReader,
+) -> None:
+    rejected = {
+        "code": 400,
+        "message": "Invalid Value",
+        "errors": [{"reason": "invalid", "location": "pageToken", "locationType": "parameter"}],
+    }
+    refused = {"p2": httpx.Response(400, json={"error": rejected})}
+
+    with pytest.raises(CursorExpired):
+        await _fetch(
+            "files",
+            _listing([], refused),
+            parents=parents_reader(LANDED),
+            cursor=_cursor_at("p2"),
+        )
+
+
+async def test_a_listing_400_naming_no_page_token_fails_the_run(
+    parents_reader: ParentsReader,
+) -> None:
+    rejected = {"code": 400, "message": "Invalid Value", "errors": [{"reason": "invalid"}]}
+    refused = {"p2": httpx.Response(400, json={"error": rejected})}
 
     with pytest.raises(httpx.HTTPStatusError):
-        await _fetch("files", refuse, parents=parents_reader(LANDED))
+        await _fetch(
+            "files",
+            _listing([], refused),
+            parents=parents_reader(LANDED),
+            cursor=_cursor_at("p2"),
+        )
+
+
+async def test_a_stored_skip_envelope_resumes_onto_a_listing_cursor(
+    parents_reader: ParentsReader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(backend_module, "MAX_RECORDS_PER_RUN", 1)
+    envelope = json.dumps(
+        {BACKFILL_KEY: {"origin": None, "skip": 1, "watermark": None}}, sort_keys=True
+    )
+
+    result = await _fetch("files", _listing([]), parents=parents_reader(LANDED), cursor=envelope)
+
+    assert {page.source_ref for page in result.pages} == {"files/f2", "files/f3"}
+    assert json.loads(result.next_cursor or "") == json.loads(_cursor_at("p4"))

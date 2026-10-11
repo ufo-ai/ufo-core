@@ -99,7 +99,7 @@ async def test_an_active_extension_emits_the_metrics_its_manifest_declares(
     assert result.content[0].text == "counted"
     points = _points(reader)
     assert [(dict(p.attributes), p.value) for p in points[f"ufo.{CALL_METRIC}"]] == [
-        ({CALL_DIMENSION: TOOL_NAME}, 1)
+        ({CALL_DIMENSION: TOOL_NAME, "workspace_id": str(workspace_id)}, 1)
     ]
     assert [p.count for p in points[f"ufo.{CALL_LATENCY_METRIC}"]] == [1]
     assert [p.value for p in points[f"ufo.{CALL_ACTIVE_METRIC}"]] == [0]

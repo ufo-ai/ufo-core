@@ -92,6 +92,7 @@ class GmailConnector(RestConnector):
     name = "gmail"
     base_url = GMAIL_API_BASE
     streams_list = GMAIL_STREAMS
+    rate_limited = staticmethod(google.rate_limited)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, run: Run

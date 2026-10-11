@@ -154,6 +154,7 @@ class GoogleSheetsConnector(RestConnector):
     name = "googlesheets"
     base_url = "https://www.googleapis.com"
     streams_list = GOOGLE_SHEETS_STREAMS
+    rate_limited = staticmethod(google.rate_limited)
     checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(

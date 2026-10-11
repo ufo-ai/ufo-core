@@ -139,12 +139,10 @@ async def test_drive_scope_refusal_yields_stream_skipped() -> None:
     ],
     ids=["usage-limits-reason", "resource-exhausted-status"],
 )
-async def test_a_quota_refusal_is_not_a_scope_skip(error: dict[str, object]) -> None:
-    """A `403` naming a usage limit is not a refusal the grant can answer: it clears as the quota
-    window rolls, so it fails the run and takes the error backoff."""
-
+async def test_a_quota_refusal_yields(error: dict[str, object]) -> None:
     def refuse(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"error": error})
 
-    with pytest.raises(httpx.HTTPStatusError):
-        await _fetch(refuse)
+    result = await _fetch(refuse)
+
+    assert result.retry_after_seconds == 60

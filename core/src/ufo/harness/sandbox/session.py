@@ -276,7 +276,7 @@ SANDBOX_GID = 1000
 PROXY_SESSION_ENV_NAMES = frozenset(
     {"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"}
 )
-PROXY_CA_CERT_ENV = "UFO_PROXY_CA_CERT"
+PROXY_CA_CERT_ENV = "UFO_EGRESS_CA_CERT"
 """The variable the terminal carrier exports a session's CA under, which the client merges with
 the member's own trust store."""
 NO_PROXY_HOSTS = "localhost,127.0.0.1,::1"

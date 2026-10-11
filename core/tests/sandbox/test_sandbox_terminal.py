@@ -278,7 +278,7 @@ async def _check_create_binds_the_directory_and_exports_the_session_env_and_ca()
     handle = await carrier.create(spec)
     assert handle.container_id == "/Users/member/proj"
     assert handle.runtime_root == f"$UFO_HOME/runs/{conversation_id.hex}"
-    assert handle.egress_env == {**spec.env, "UFO_PROXY_CA_CERT": "ca-pem"}
+    assert handle.egress_env == {**spec.env, "UFO_EGRESS_CA_CERT": "ca-pem"}
 
 
 async def _check_create_without_a_session_exports_no_proxy_and_no_ca() -> None:
