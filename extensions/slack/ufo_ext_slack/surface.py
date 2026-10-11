@@ -73,7 +73,7 @@ sit in input blocks, which dispatch nothing as they change, so a selection is lo
 own client: they switch a choice, tick and untick values, and retype until the answer reads right,
 and this surface hears none of it. Only the submit is a commit. The `interactive` route receives it,
 reads every control's held value out of the payload's `state` (each control's `block_id` names its
-question's index, its label is the question), admits them together as the conversation's next turn
+question's index; its label or indexed sections hold the full question), admits the next turn
 (idempotent per question message — the first submit wins), and rewrites the controls into the
 answers that were admitted, with who submitted them, via `chat.update`, echoing the message's own
 delivered blocks so the rewrite never re-renders content Slack already accepted. An ask holding one
@@ -111,7 +111,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import Literal, Protocol
@@ -185,6 +185,8 @@ from ufo.sdk.surfaces import (
     Writeback,
     fence_member_message,
     inbox_name,
+    is_silence_sentinel,
+    member_message_text,
     mint_marker,
     writeback_says_nothing,
 )
@@ -833,8 +835,11 @@ PROGRESS_ACTIVITY_LIMIT = 200
 PROGRESS_LINE = "{activity} · {elapsed} in"
 PROGRESS_PREPARING_RESPONSE = "Preparing the response"
 ASK_BLOCK_ID_PREFIX = "ask:"
+ASK_QUESTION_BLOCK_ID_PREFIX = "ask-question:"
 ASK_SUBMIT_ACTION_ID = "ask_submit"
 ASK_SUBMIT_TEXT = "Submit"
+ASK_FORM_TEXT = "Submit your answers below."
+ASK_REPLY_TEXT = "Reply with your answers."
 ASK_PROSE_HINT = "_Answer by replying in this thread._"
 ASK_MULTI_SELECT_NOTE = "_Select all that apply._"
 ASK_EMPTY_SUBMIT_TEXT = "Choose an answer before you submit."
@@ -852,6 +857,7 @@ between, so it guides a text box rather than standing as a group of one."""
 SLACK_BUTTON_TEXT_LIMIT = 75
 SLACK_OPTION_TEXT_LIMIT = 75
 SLACK_INPUT_LABEL_LIMIT = 2_000
+SLACK_MESSAGE_BLOCK_LIMIT = 50
 SLACK_ACTION_VALUE_LIMIT = 2_000
 
 SLACK_REPLAY_SECONDS = 300
@@ -895,6 +901,9 @@ SLACK_CONTEXT_TEXT_LIMIT = 3_000
 SLACK_TEXT_MESSAGE_LIMIT = 3_500
 MAX_SLACK_MESSAGE_BYTES = 40_000
 MAX_SLACK_BLOCK_MESSAGE_BYTES = 100_000
+SLACK_ASK_FORM_PREFIX = "ask-form/"
+SLACK_TEXT_INPUT_LIMIT = 3_000
+SLACK_REPLY_PREFLIGHT_ID = "0" * 128
 SLACK_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
 SLACK_ATTACH_MAX_FILES = 10
 SLACK_INVALID_BLOCKS_ERROR = "invalid_blocks"
@@ -1253,10 +1262,11 @@ def slack_reply_body(
     sections: bool = False,
     unfurl: bool = True,
 ) -> bytes:
-    """The chat.postMessage body for one bounded reply part: a Block Kit `markdown` block, the
-    rendered ask and connect handoff when present, and an optional final accounting context block.
-    `sections=True` uses conservative section blocks after Slack rejects markdown blocks as
-    `invalid_blocks`. `text` carries the whole part as the notification fallback.
+    """The chat.postMessage body for one bounded reply part and optional controls and footer.
+    Slack can expand markdown blocks, so separate form messages use fixed sections to keep
+    their answer updates bounded. Reply prose and connection handoffs use markdown.
+    `sections=True` selects the fallback section format. `text` carries the whole part as the
+    notification fallback.
 
     A body carrying more than one link posts with unfurling off: Slack previews every link it finds,
     so a reply that cites its sources arrives buried under a stack of cards taller than the answer.
@@ -1284,6 +1294,7 @@ def slack_reply_body(
         base["unfurl_links"] = False
         base["unfurl_media"] = False
     if blocks:
+        sections = sections or any(block["type"] == "input" for block in actions or ())
         rendered = re.sub(HEADER_PADDING_PATTERN, "\n", text)
         limit = SLACK_SECTION_TEXT_LIMIT if sections else SLACK_MARKDOWN_TEXT_LIMIT
         chunks = slack_reply_parts(rendered, limit)
@@ -1302,20 +1313,32 @@ def slack_reply_body(
                 {"type": "context", "elements": [{"type": "mrkdwn", "text": metadata}]}
             )
         with_blocks = {**base, "blocks": block_list}
-        encoded = json.dumps(with_blocks, separators=(",", ":")).encode()
+        if len(block_list) > SLACK_MESSAGE_BLOCK_LIMIT:
+            raise ValueError("Slack reply exceeds the blocks limit")
+        encoded = json.dumps(with_blocks, separators=(",", ":"), ensure_ascii=False).encode()
         bound = MAX_SLACK_BLOCK_MESSAGE_BYTES if actions is not None else MAX_SLACK_MESSAGE_BYTES
         if len(encoded) <= bound:
             return encoded
+    if actions:
+        raise ValueError("Slack question or controls require blocks within the message size limit")
     if metadata is not None:
         base["text"] = f"{text}\n\n{metadata}"
-    encoded = json.dumps(base, separators=(",", ":")).encode()
+    encoded = json.dumps(base, separators=(",", ":"), ensure_ascii=False).encode()
     if len(encoded) > MAX_SLACK_MESSAGE_BYTES:
         raise ValueError("Slack reply text is too large")
     return encoded
 
 
-def _mrkdwn_section(text: str) -> dict[str, object]:
-    return {"type": "section", "text": {"type": "mrkdwn", "text": text[:SLACK_SECTION_TEXT_LIMIT]}}
+def _ask_sections(text: str, block_id: str | None = None) -> list[dict[str, object]]:
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": part},
+            "expand": True,
+            **({"block_id": f"{block_id}:{index}"} if block_id is not None else {}),
+        }
+        for index, part in enumerate(slack_reply_parts(text, SLACK_SECTION_TEXT_LIMIT))
+    ]
 
 
 class _SlackAskBinding(BaseModel):
@@ -1326,6 +1349,13 @@ class _SlackAskBinding(BaseModel):
     queue_key: str = Field(min_length=1, max_length=SLACK_ACTION_VALUE_LIMIT)
     question_turn_id: UUID
     authorization_id: UUID | None = None
+    stored_question: bool = False
+
+
+class _SlackStoredQuestion(BaseModel):
+    binding: _SlackAskBinding
+    question: AskUserInput
+    channel: str
 
 
 def slack_ask_blocks(
@@ -1340,8 +1370,8 @@ def slack_ask_blocks(
     as it changes, so a member switches a choice, ticks and unticks values, and types until the
     answer reads right, and this surface hears none of it: only the submit arrives, carrying every
     control's held value in Slack's `state.values`. Each control's `block_id` names its question's
-    index and its label is the question it asks, so the submit reads back what was answered and
-    which question each answer belongs to without any record of its own.
+    index. The question is in its label or in indexed sections above it, so the submit reads back
+    the full question and answer. Descriptions and hints that exceed control limits use sections.
 
     An ask holding one question the form cannot express — an attachment, an option group wider than
     Slack takes, an option label past the option ceiling — renders whole as prose that lists every
@@ -1362,18 +1392,18 @@ def slack_ask_blocks(
     ):
         raise ValueError("a targeted Slack question requires its exact private binding")
     controls = [_ask_control(index, ask) for index, ask in enumerate(question.questions)]
-    title = _mrkdwn_section(f"*{question.title}*")
+    title = _ask_sections(f"*{question.title}*")
     if any(control is None for control in controls):
         if binding is not None:
             raise ValueError("a targeted Slack question requires structured controls")
         return [
-            title,
-            *(_ask_prose(ask) for ask in question.questions),
-            _mrkdwn_section(ASK_PROSE_HINT),
+            *title,
+            *(block for ask in question.questions for block in _ask_sections(_ask_prose(ask))),
+            *_ask_sections(ASK_PROSE_HINT),
         ]
     return [
-        title,
-        *(control for control in controls if control is not None),
+        *title,
+        *(block for control in controls if control is not None for block in control),
         {
             "type": "actions",
             "elements": [
@@ -1395,15 +1425,16 @@ def _ask_binding_value(binding: _SlackAskBinding) -> str:
     return value
 
 
-def _ask_control(index: int, ask: AskQuestion) -> dict[str, object] | None:
+def _ask_control(index: int, ask: AskQuestion) -> list[dict[str, object]] | None:
     if ask.allow_attachments:
         return None
     label = f"{ask.header} — {ask.question}" if ask.header else ask.question
     block_id = f"{ASK_BLOCK_ID_PREFIX}{index}"
+    sections: list[dict[str, object]] = []
     control: dict[str, object] = {
         "type": "input",
         "block_id": block_id,
-        "label": {"type": "plain_text", "text": label[:SLACK_INPUT_LABEL_LIMIT]},
+        "label": {"type": "plain_text", "text": label},
     }
     choices = () if ask.free_text_only else ask.options or ()
     if choices and (
@@ -1416,6 +1447,7 @@ def _ask_control(index: int, ask: AskQuestion) -> dict[str, object] | None:
             "type": "plain_text_input",
             "action_id": block_id,
             "multiline": True,
+            "max_length": SLACK_TEXT_INPUT_LIMIT,
         }
         lone = ask.options or ()
         written = ask.chosen or (lone[0].label if len(lone) == 1 else None)
@@ -1427,21 +1459,30 @@ def _ask_control(index: int, ask: AskQuestion) -> dict[str, object] | None:
                 f"{option.label} — {option.description}" if option.description else option.label
                 for option in ask.options
             )
-            control["hint"] = {"type": "plain_text", "text": suggested[:SLACK_INPUT_LABEL_LIMIT]}
-        return control
-    picker: dict[str, object] = {
-        "type": "checkboxes" if ask.multi_select else "radio_buttons",
-        "action_id": block_id,
-        "options": [_ask_option(option) for option in choices],
-    }
-    settled = next((option for option in choices if option.label == ask.chosen), None)
-    if settled is not None:
-        if ask.multi_select:
-            picker["initial_options"] = [_ask_option(settled)]
-        else:
-            picker["initial_option"] = _ask_option(settled)
-    control["element"] = picker
-    return control
+            if len(suggested) <= SLACK_INPUT_LABEL_LIMIT:
+                control["hint"] = {"type": "plain_text", "text": suggested}
+            else:
+                sections.extend(_ask_sections(suggested))
+    else:
+        for option in choices:
+            if option.description and len(option.description) > SLACK_OPTION_TEXT_LIMIT:
+                sections.extend(_ask_sections(f"*{option.label}* — {option.description}"))
+        picker: dict[str, object] = {
+            "type": "checkboxes" if ask.multi_select else "radio_buttons",
+            "action_id": block_id,
+            "options": [_ask_option(option) for option in choices],
+        }
+        settled = next((option for option in choices if option.label == ask.chosen), None)
+        if settled is not None:
+            if ask.multi_select:
+                picker["initial_options"] = [_ask_option(settled)]
+            else:
+                picker["initial_option"] = _ask_option(settled)
+        control["element"] = picker
+    if sections or len(label) > SLACK_INPUT_LABEL_LIMIT:
+        sections = [*_ask_sections(label, f"{ASK_QUESTION_BLOCK_ID_PREFIX}{index}"), *sections]
+        control["label"] = {"type": "plain_text", "text": f"Question {index + 1}"}
+    return [*sections, control]
 
 
 def _ask_option(option: QuestionOption) -> dict[str, object]:
@@ -1449,23 +1490,206 @@ def _ask_option(option: QuestionOption) -> dict[str, object]:
         "text": {"type": "plain_text", "text": option.label},
         "value": option.authorization_choice or option.label,
     }
-    if option.description:
+    if option.description and len(option.description) <= SLACK_OPTION_TEXT_LIMIT:
         rendered["description"] = {
             "type": "plain_text",
-            "text": option.description[:SLACK_OPTION_TEXT_LIMIT],
+            "text": option.description,
         }
     return rendered
 
 
-def _ask_prose(ask: AskQuestion) -> dict[str, object]:
+def _ask_prose(ask: AskQuestion) -> str:
     lines = [f"*{ask.header}* — {ask.question}" if ask.header else ask.question]
     lines.extend(
         f"• {option.label} — {option.description}" if option.description else f"• {option.label}"
         for option in ask.options or ()
     )
+    if ask.chosen:
+        lines.append(ask.chosen)
     if ask.multi_select:
         lines.append(ASK_MULTI_SELECT_NOTE)
-    return _mrkdwn_section("\n".join(lines))
+    return "\n".join(lines)
+
+
+def _slack_form_fits(
+    channel: str,
+    thread_ts: str | None,
+    text: str,
+    metadata: str | None,
+    actions: list[dict[str, object]] | None,
+) -> bool:
+    try:
+        for sections in (False, True):
+            body = slack_reply_body(
+                channel,
+                thread_ts,
+                text,
+                metadata,
+                delivery_id=SLACK_REPLY_PREFLIGHT_ID,
+                actions=actions,
+                sections=sections,
+            )
+            blocks = json.loads(body).get("blocks")
+            if blocks is None or any(
+                len(block["element"].get("initial_value", "")) > SLACK_TEXT_INPUT_LIMIT
+                for block in blocks
+                if block["type"] == "input"
+            ):
+                return False
+            receipts = [
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": part}
+                        for part in slack_reply_parts(
+                            ASK_SUBMITTED_LINE.format(
+                                question=block["label"]["text"],
+                                answer="\U0001f600" * SLACK_TEXT_INPUT_LIMIT,
+                            ),
+                            SLACK_CONTEXT_TEXT_LIMIT,
+                        )
+                    ],
+                }
+                if block["type"] == "input"
+                else block
+                for block in blocks
+            ]
+            if (
+                len(
+                    json.dumps(
+                        {
+                            "channel": channel,
+                            "ts": SLACK_REPLY_PREFLIGHT_ID,
+                            "text": text,
+                            "blocks": receipts,
+                        },
+                        ensure_ascii=False,
+                    ).encode()
+                )
+                > MAX_SLACK_BLOCK_MESSAGE_BYTES
+            ):
+                return False
+    except ValueError:
+        return False
+    return True
+
+
+def _slack_question_parts(
+    channel: str,
+    thread_ts: str | None,
+    text: str,
+    metadata: str | None,
+    actions: list[dict[str, object]] | None,
+) -> tuple[str, ...]:
+    limit = SLACK_MARKDOWN_TEXT_LIMIT
+    while True:
+        parts = tuple(slack_reply_parts(text, limit))
+        if all(
+            _slack_form_fits(
+                channel,
+                thread_ts,
+                part,
+                metadata if index == len(parts) - 1 else None,
+                actions if index == len(parts) - 1 else None,
+            )
+            for index, part in enumerate(parts)
+        ):
+            return parts
+        if limit == 1:
+            raise ValueError("Slack controls exceed the message size limit")
+        limit = max(1, limit // 2)
+
+
+def slack_public_question_reply(
+    channel: str,
+    thread_ts: str | None,
+    text: str,
+    metadata: str | None,
+    question: AskUserInput | None,
+    connect_actions: list[dict[str, object]] | None = None,
+) -> tuple[tuple[str, ...], list[dict[str, object]] | None]:
+    """Keep a public form when it fits; split its complete prose when it exceeds Slack limits."""
+    if question is not None and question.target_member_id is not None:
+        raise ValueError("private questions require bound controls")
+    actions = [*(slack_ask_blocks(question) or ()), *(connect_actions or ())] or None
+    parts = tuple(slack_reply_parts(text))
+    if question is None:
+        return parts, actions
+    structured = any(block["type"] == "input" for block in actions or ())
+    if is_silence_sentinel(text):
+        parts = ()
+    control_text = ASK_FORM_TEXT if structured else parts[-1] if parts else ASK_REPLY_TEXT
+    if _slack_form_fits(channel, thread_ts, control_text, metadata, actions):
+        return ((*parts, control_text) if structured or not parts else parts), actions
+    prose = "\n\n".join(
+        (question.title, *(_ask_prose(ask) for ask in question.questions), ASK_PROSE_HINT)
+    )
+    return (
+        *parts,
+        *_slack_question_parts(channel, thread_ts, prose, metadata, connect_actions),
+    ), connect_actions
+
+
+def slack_private_question_reply(
+    channel: str,
+    text: str,
+    question: AskUserInput,
+    binding: _SlackAskBinding,
+) -> tuple[tuple[str, ...], list[dict[str, object]], _SlackStoredQuestion | None]:
+    """Keep private controls together and store full questions for split messages."""
+    actions = slack_ask_blocks(question, binding)
+    assert actions is not None
+    parts = () if is_silence_sentinel(text) else tuple(slack_reply_parts(text))
+    if _slack_form_fits(channel, None, ASK_FORM_TEXT, None, actions):
+        return (*parts, ASK_FORM_TEXT), actions, None
+    bound = binding.model_copy(update={"stored_question": True})
+    compact = question.model_copy(
+        update={
+            "questions": tuple(
+                ask.model_copy(
+                    update={
+                        "header": None,
+                        "question": f"Question {index + 1}",
+                        "chosen": ask.chosen
+                        if len(ask.chosen or "") <= SLACK_TEXT_INPUT_LIMIT
+                        else None,
+                        "options": ()
+                        if ask.free_text_only
+                        else tuple(
+                            option.model_copy(update={"description": None})
+                            for option in ask.options or ()
+                        ),
+                    }
+                )
+                for index, ask in enumerate(question.questions)
+            ),
+            "title": "Questions",
+        }
+    )
+    actions = slack_ask_blocks(compact, bound)
+    assert actions is not None
+    prose = "\n\n".join(
+        (
+            question.title,
+            *(
+                f"Question {index + 1}\n{_ask_prose(ask)}"
+                for index, ask in enumerate(question.questions)
+            ),
+        )
+    )
+    parts = (*parts, *_slack_question_parts(channel, None, prose, None, None))
+    control_text = ASK_FORM_TEXT
+    if not _slack_form_fits(channel, None, control_text, None, actions):
+        raise ValueError("Private Slack controls exceed the message size limit")
+    return (
+        (*parts, control_text),
+        actions,
+        _SlackStoredQuestion(
+            binding=bound,
+            question=question,
+            channel=channel,
+        ),
+    )
 
 
 def slack_connect_blocks(
@@ -3499,6 +3723,33 @@ async def _handle_answer_submit(
         member_id = await _resolve_member(ctx, interaction.slack_user_id, interaction.is_dm, sender)
     if binding is not None and binding.target_member_id != member_id:
         return JSONResponse({"ok": True, "ignored": True})
+    if binding is not None and binding.stored_question:
+        stored = await ScopedStore(SLACK_EXTENSION).get(
+            f"{SLACK_ASK_FORM_PREFIX}{binding.question_turn_id}"
+        )
+        if stored is None:
+            return JSONResponse({"ok": True, "ignored": True})
+        form = _SlackStoredQuestion.model_validate(stored)
+        if (
+            form.binding != binding
+            or form.channel != interaction.channel
+            or tuple(answer.block_id for answer in interaction.answers)
+            != tuple(
+                f"{ASK_BLOCK_ID_PREFIX}{index}" for index in range(len(form.question.questions))
+            )
+        ):
+            return JSONResponse({"ok": True, "ignored": True})
+        interaction = replace(
+            interaction,
+            answers=tuple(
+                replace(
+                    answer,
+                    question=f"{ask.header} — {ask.question}" if ask.header else ask.question,
+                )
+                for answer, ask in zip(interaction.answers, form.question.questions, strict=True)
+            ),
+        )
+        answered = tuple(answer for answer in interaction.answers if answer.answer)
     if binding is None and interaction.is_dm and member_id is not None:
         conversation_id = await ctx.conversation_for(
             interaction.queue_key, conversation_audience(member_id)
@@ -3553,7 +3804,12 @@ async def _handle_answer_submit(
         _arm_followers(
             ctx, FollowedTurn(id=admitted.turn_id, conversation_id=conversation_id), thread
         )
-    if await ctx.admitted_body(answer_key) == body:
+    admitted_body = await ctx.admitted_body(answer_key)
+    if admitted_body == body or (
+        binding is not None
+        and admitted_body is not None
+        and member_message_text(admitted_body) == answered_text
+    ):
         _rewrite_in_background(bot_token, interaction)
     return None
 
@@ -3615,6 +3871,10 @@ def _rewrite_in_background(bot_token: str, submit: AnswerSubmit) -> None:
 async def _run_rewrite(bot_token: str, submit: AnswerSubmit) -> None:
     try:
         await _replace_controls_with_answers(bot_token, submit)
+        if submit.binding is not None and submit.binding.stored_question:
+            await ScopedStore(SLACK_EXTENSION).delete(
+                f"{SLACK_ASK_FORM_PREFIX}{submit.binding.question_turn_id}"
+            )
     except Exception as error:
         _LOG.warning("slack answer rewrite failed for %s: %s", submit.message_ts, error)
 
@@ -3741,6 +4001,27 @@ def _submitted_answers(
         if not block_id.startswith(ASK_BLOCK_ID_PREFIX):
             continue
         label = block.get("label")
+        question_prefix = (
+            f"{ASK_QUESTION_BLOCK_ID_PREFIX}{block_id.removeprefix(ASK_BLOCK_ID_PREFIX)}:"
+        )
+        question_parts = []
+        for section in blocks:
+            section_id = section.get("block_id")
+            text = section.get("text")
+            if (
+                isinstance(section_id, str)
+                and section_id.startswith(question_prefix)
+                and isinstance(text, dict)
+                and isinstance(text.get("text"), str)
+            ):
+                question_parts.append(text["text"])
+        question = (
+            "".join(question_parts)
+            if question_parts
+            else str(label.get("text") or "")
+            if isinstance(label, dict)
+            else ""
+        )
         held = values.get(block_id) if isinstance(values, dict) else None
         answer, authorization_choice = _held_answer(
             next(iter(held.values()), None) if isinstance(held, dict) else None
@@ -3748,7 +4029,7 @@ def _submitted_answers(
         answers.append(
             SubmittedAnswer(
                 block_id=block_id,
-                question=str(label.get("text") or "") if isinstance(label, dict) else "",
+                question=question,
                 answer=answer,
                 authorization_choice=authorization_choice,
             )
@@ -3815,12 +4096,36 @@ async def _replace_controls_with_answers(bot_token: str, submit: AnswerSubmit) -
         block_id = block.get("block_id")
         answer = submitted.get(block_id) if isinstance(block_id, str) else None
         if answer is not None:
-            blocks.append(
-                _context_line(
-                    ASK_SUBMITTED_LINE.format(question=answer.question, answer=answer.answer)
-                    if answer.answer
-                    else ASK_UNANSWERED_LINE.format(question=answer.question)
+            question_index = answer.block_id.removeprefix(ASK_BLOCK_ID_PREFIX)
+            question_prefix = f"{ASK_QUESTION_BLOCK_ID_PREFIX}{question_index}:"
+            question_is_shown = any(
+                isinstance(section.get("block_id"), str)
+                and str(section["block_id"]).startswith(question_prefix)
+                for section in submit.blocks
+            )
+            label = block.get("label")
+            question = (
+                str(label["text"])
+                if (
+                    question_is_shown
+                    or (submit.binding is not None and submit.binding.stored_question)
                 )
+                and isinstance(label, dict)
+                else answer.question
+            )
+            text = (
+                ASK_SUBMITTED_LINE.format(question=question, answer=answer.answer)
+                if answer.answer
+                else ASK_UNANSWERED_LINE.format(question=question)
+            )
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": part}
+                        for part in slack_reply_parts(text, SLACK_CONTEXT_TEXT_LIMIT)
+                    ],
+                }
             )
             continue
         if block_id == submit.submit_block_id:
@@ -3903,6 +4208,12 @@ def _is_connect_action(block: Mapping[str, object]) -> bool:
 async def _rewrite_slack_message(
     bot_token: str, channel: str, ts: str, text: str, blocks: list[dict[str, object]]
 ) -> None:
+    body = json.dumps(
+        {"channel": channel, "ts": ts, "text": text, "blocks": blocks},
+        ensure_ascii=False,
+    ).encode()
+    if len(blocks) > SLACK_MESSAGE_BLOCK_LIMIT or len(body) > MAX_SLACK_BLOCK_MESSAGE_BYTES:
+        raise ValueError("Slack message update exceeds its block or byte limit")
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         await _slack_ok(
             lambda: client.post(
@@ -3911,7 +4222,7 @@ async def _rewrite_slack_message(
                     "Authorization": f"Bearer {bot_token}",
                     "Content-Type": "application/json; charset=utf-8",
                 },
-                content=json.dumps({"channel": channel, "ts": ts, "text": text, "blocks": blocks}),
+                content=body,
             )
         )
 
@@ -4562,10 +4873,6 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
             writeback.conversation_id,
             writeback.agent_id,
         )
-    public_actions = [
-        *(() if targeted else slack_ask_blocks(question) or ()),
-        *(slack_connect_blocks(writeback.terminal.connect_request, writeback.turn_id) or ()),
-    ] or None
     unfurl = not any(artifact.role == "details" for artifact in writeback.artifacts)
     model = writeback.terminal.model or "no-model"
     params = (
@@ -4581,11 +4888,19 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
         f"({writeback.terminal.tokens:,} tokens, {writeback.terminal.cache_percent}% cached) · "
         f"{model}{params}",
     )
+    public_parts, public_actions = slack_public_question_reply(
+        channel,
+        thread,
+        text,
+        metadata,
+        None if targeted else question,
+        slack_connect_blocks(writeback.terminal.connect_request, writeback.turn_id),
+    )
     targets = [
         _SlackReplyTarget(
             channel=channel,
             thread_ts=thread,
-            parts=tuple(slack_reply_parts(text)),
+            parts=public_parts,
             metadata=metadata,
             actions=public_actions,
             scope="",
@@ -4603,13 +4918,24 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
             question_turn_id=writeback.turn_id,
             authorization_id=question.authorization_id,
         )
+        private_parts, private_actions, stored_question = slack_private_question_reply(
+            private_channel,
+            linked,
+            question,
+            binding,
+        )
+        if stored_question is not None:
+            await store.put(
+                f"{SLACK_ASK_FORM_PREFIX}{writeback.turn_id}",
+                stored_question.model_dump(mode="json"),
+            )
         targets.append(
             _SlackReplyTarget(
                 channel=private_channel,
                 thread_ts=None,
-                parts=tuple(slack_reply_parts(linked)),
+                parts=private_parts,
                 metadata=None,
-                actions=slack_ask_blocks(question, binding),
+                actions=private_actions,
                 scope="private:",
                 unfurl=unfurl,
                 hold_connect=False,
