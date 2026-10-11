@@ -1481,6 +1481,34 @@ async def test_the_census_names_what_is_attached_without_holding_its_name(
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_census_recounts_state_every_tick_under_a_current_state_name(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _seeded_workspace(connector="gmail", member_turn_days_ago=0)
+    reader = _census_reader(monkeypatch)
+
+    with ws(workspace_id):
+        await ProductCensus(contributions=()).count()
+    after_one_tick = _census_points(reader)
+    with ws(workspace_id):
+        await ProductCensus(contributions=()).count()
+    after_two_ticks = _census_points(reader)
+
+    assert PRODUCT_STAGE_METRIC == "product_stage_current"
+    assert PRODUCT_ATTACH_METRIC == "product_attach_current"
+    assert {
+        point.attributes["stage"]: point.value
+        for point in after_one_tick[f"ufo.{PRODUCT_STAGE_METRIC}"]
+    }["connector"] == 1
+    assert {
+        point.attributes["stage"]: point.value
+        for point in after_two_ticks[f"ufo.{PRODUCT_STAGE_METRIC}"]
+    }["connector"] == 2
+    assert [point.value for point in after_one_tick[f"ufo.{PRODUCT_ATTACH_METRIC}"]] == [1]
+    assert [point.value for point in after_two_ticks[f"ufo.{PRODUCT_ATTACH_METRIC}"]] == [2]
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_census_counts_a_proved_address_apart_from_its_installation(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

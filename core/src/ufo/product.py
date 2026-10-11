@@ -54,8 +54,8 @@ from ufo.schema.records import INTENT_ADMISSION, MEMBER_ADMISSION
 PRODUCT_CENSUS_JOB = "product_census"
 PRODUCT_CENSUS_SECONDS = 600
 PRODUCT_CENSUS_SCHEDULE = "0 */10 * * * *"
-PRODUCT_STAGE_METRIC = "product_stage_total"
-PRODUCT_ATTACH_METRIC = "product_attach_total"
+PRODUCT_STAGE_METRIC = "product_stage_current"
+PRODUCT_ATTACH_METRIC = "product_attach_current"
 PRODUCT_ACTIVE_MEMBER_2D_7D_METRIC = "product_active_member_2d_7d_total"
 ONBOARDING_STEP_METRIC = "onboarding_step_total"
 ONBOARDING_LATENCY_HISTOGRAM = "onboarding_step_latency_ms"
