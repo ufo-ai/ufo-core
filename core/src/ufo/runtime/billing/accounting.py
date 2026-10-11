@@ -500,7 +500,7 @@ class Ledger:
         move what was booked and charged; its price digest, time and token classes are not
         compared.
 
-        The row is booked at `occurred_at`, which caps, windows and day buckets key on, so it falls
+        A new row is booked at `occurred_at`, which caps, windows and day buckets key on. It falls
         at most `JOB_DAY_SETTLE_SECONDS` before now, on a day the fold has not closed, and at most
         `SERVICE_CLOCK_SKEW_SECONDS` after. A `turn` label naming a turn of this workspace binds the
         row to that turn, so member and agent caps and attribution count it; any other value, a
@@ -528,19 +528,25 @@ class Ledger:
             raise ValueError("A service record's usage classes sum to its amount.")
         if dimension == TOKENS_DIMENSION and usage is None:
             raise ValueError("A tokens record carries its usage classes.")
+        ledger_id = service_ledger_id_for(
+            workspace_id, service, resource_id or str(session_id), dimension, attempt
+        )
         now = datetime.now(UTC)
         if not (
             now - timedelta(seconds=JOB_DAY_SETTLE_SECONDS)
             <= occurred_at
             <= now + timedelta(seconds=SERVICE_CLOCK_SKEW_SECONDS)
         ):
-            raise ValueError(
-                f"A service record occurred at most {JOB_DAY_SETTLE_SECONDS} seconds ago and at "
-                f"most {SERVICE_CLOCK_SKEW_SECONDS} seconds ahead."
-            )
-        ledger_id = service_ledger_id_for(
-            workspace_id, service, resource_id or str(session_id), dimension, attempt
-        )
+            booked_id = (
+                await connection.execute(
+                    sa.select(tables.ledger.c.id).where(tables.ledger.c.id == ledger_id)
+                )
+            ).scalar_one_or_none()
+            if booked_id is None:
+                raise ValueError(
+                    f"A service record occurred at most {JOB_DAY_SETTLE_SECONDS} seconds ago "
+                    f"and at most {SERVICE_CLOCK_SKEW_SECONDS} seconds ahead."
+                )
         turn_id = await self._named_turn(connection, workspace_id, labels)
         classes = Usage() if usage is None else usage
         insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert

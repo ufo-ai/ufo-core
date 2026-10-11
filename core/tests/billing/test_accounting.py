@@ -1,7 +1,7 @@
 import logging
 import re
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -897,6 +897,40 @@ async def test_record_service_usage_writes_once_and_refuses_a_changed_replay(db:
     )
     assert created_at.replace(tzinfo=UTC) == occurred_at
     assert [tuple(charge) for charge in charges] == [(ledger_id, GIB_MICRO_USD)]
+
+
+@pytest.mark.parametrize("database_url", ["sqlite", "postgres"], indirect=True)
+async def test_a_booked_service_record_replays_after_its_time_window(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = Ledger(gates=(SampleGate(GateDeploy(public_base_url=None, home_surface=None)),))
+    occurred_at = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        workspace_id, _turn_id = await _seed_turn(connection)
+        assert await _record(ledger, connection, workspace_id, occurred_at=occurred_at)
+
+    class ReplayClock:
+        @staticmethod
+        def now(tz: tzinfo | None = None) -> datetime:
+            return occurred_at + timedelta(seconds=JOB_DAY_SETTLE_SECONDS + 60)
+
+    monkeypatch.setattr(accounting, "datetime", ReplayClock)
+    async with workspace_tx() as connection:
+        assert not await _record(ledger, connection, workspace_id, occurred_at=occurred_at)
+        assert (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.ledger))
+        ).scalar_one() == 1
+        assert (
+            await connection.execute(sa.select(CHARGE_TABLE.c.delta_micro_usd))
+        ).scalars().all() == [GIB_MICRO_USD]
+    with pytest.raises(TurnUsageConflict, match="changed under its idempotency key"):
+        async with workspace_tx() as connection:
+            await _record(ledger, connection, workspace_id, occurred_at=occurred_at, amount=GIB + 1)
+    with pytest.raises(ValueError, match="occurred at most 900 seconds ago"):
+        async with workspace_tx() as connection:
+            await _record(
+                ledger, connection, workspace_id, occurred_at=occurred_at, attempt="flush-2"
+            )
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
