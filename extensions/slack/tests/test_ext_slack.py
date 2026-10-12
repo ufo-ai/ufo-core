@@ -5130,10 +5130,13 @@ async def test_invalid_blocks_reposts_once(
     await app.state.writeback_poller.drain()
 
     posts = [r for r in recorder if str(r.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL]
-    assert len(posts) == 2
+    assert len(posts) == (3 if question is not None else 2)
     first = json.loads(posts[0].content)
     second = json.loads(posts[1].content)
-    assert first["blocks"][-1]["type"] == "context"
+    assert first["blocks"][0] == {"type": "markdown", "text": "hi **there**"}
+    if question is not None:
+        assert "blocks" not in second
+        second = json.loads(posts[-1].content)
     if question is None and connect_request is None:
         assert "blocks" not in second
         footer = await _debug_footer(workspace_id, "C5:200.0", turn_id)
@@ -5141,7 +5144,10 @@ async def test_invalid_blocks_reposts_once(
     else:
         assert second["blocks"][0] == {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "hi **there**"},
+            "text": {
+                "type": "mrkdwn",
+                "text": slack.ASK_FORM_TEXT if question is not None else "hi **there**",
+            },
         }
         if connect_request is not None:
             assert second["blocks"][-2]["elements"][0]["action_id"] == slack.CONNECT_ACTION_ID
@@ -7185,7 +7191,7 @@ async def test_a_landed_connection_keeps_the_answers_a_member_already_sent(
         speaker_member_id=member_id,
     )
     await app.state.writeback_poller.drain()
-    posted = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[0].content)
+    posted = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[-1].content)
     blocks_as_slack_echoes_them = [
         (
             {**block, "block_id": SUBMIT_ROW_BLOCK_ID}
@@ -7203,6 +7209,7 @@ async def test_a_landed_connection_keeps_the_answers_a_member_already_sent(
             slack.ASK_SUBMIT_ACTION_ID,
             blocks=blocks_as_slack_echoes_them,
             block_id=SUBMIT_ROW_BLOCK_ID,
+            message_ts="999.200",
             state={
                 "values": {
                     "ask:0": {
@@ -7365,9 +7372,10 @@ def _click_body(
     blocks: list[dict[str, object]] | None = None,
     block_id: str = SUBMIT_BLOCK_ID,
     state: dict[str, object] | None = None,
+    message_ts: str = "999.100",
 ) -> bytes:
     message: dict[str, object] = {
-        "ts": "999.100",
+        "ts": message_ts,
         "text": MESSAGE_TEXT,
         "blocks": _form_blocks() if blocks is None else blocks,
     }
@@ -7528,8 +7536,10 @@ async def test_a_dm_past_the_listed_pages_is_posted_to_the_member_id(member_id: 
     )
 
 
+@pytest.mark.parametrize("description_repetitions", [1, 5, 1_000])
+@pytest.mark.parametrize("target_user, dm_listed", [("U1", True), ("U1", False), ("W1", False)])
 async def test_a_targeted_question_is_private_and_answers_its_original_conversation(
-    db: None, tmp_path, monkeypatch
+    db: None, tmp_path, monkeypatch, description_repetitions: int, target_user: str, dm_listed: bool
 ) -> None:
     workspace_id, target_id = await _seed(member_email="target@example.com")
     assert target_id is not None
@@ -7551,7 +7561,7 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
                     "workspace_id": workspace_id,
                     "member_id": target_id,
                     "surface": slack.SURFACE_SLACK,
-                    "external_id": "U1",
+                    "external_id": target_user,
                     "created_at": datetime.now(UTC),
                     "updated_at": datetime.now(UTC),
                 },
@@ -7566,12 +7576,20 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
             ],
         )
     recorder: list[httpx.Request] = []
-    app, client, blob = await _mount(
-        monkeypatch,
-        workspace_id,
-        tmp_path,
-        recorder,
-        users={"U1": "target@example.com", "U8": "peer@example.com"},
+    transport = _mock_transport(
+        recorder, {target_user: "target@example.com", "U8": "peer@example.com"}
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).split("?")[0] == slack.SLACK_CONVERSATIONS_LIST_URL and not dm_listed:
+            recorder.append(request)
+            return httpx.Response(
+                200, json={"ok": True, "channels": [], "response_metadata": {"next_cursor": ""}}
+            )
+        return transport.handle_request(request)
+
+    app, client, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
     )
     authorization_id = uuid4()
     targeted = AskUserInput(
@@ -7584,17 +7602,20 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
                 options=(
                     QuestionOption(
                         label="Allow once",
-                        description="Export salary.csv this time.",
+                        description="Export salary.csv this time." * description_repetitions,
                         authorization_choice="allow",
                     ),
                     QuestionOption(
                         label="Deny",
-                        description="Do not export payroll data.",
+                        description="Do not export payroll data." * description_repetitions,
                         authorization_choice="deny",
                     ),
                     QuestionOption(
                         label="Always allow payroll exports",
-                        description="Export payroll data with this account without asking again.",
+                        description=(
+                            "Export payroll data with this account without asking again."
+                            * description_repetitions
+                        ),
                         authorization_choice="always",
                     ),
                 ),
@@ -7615,8 +7636,9 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
         json.loads(request.content)
         for request in _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
     ]
-    assert len(posts) == 2
-    public, private = posts
+    public, private = posts[0], posts[-1]
+    compact = description_repetitions == 1_000
+    assert (len(posts) > 3) == compact
     assert (public["channel"], public["thread_ts"], public["text"]) == (
         "C5",
         "200.0",
@@ -7631,21 +7653,27 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
         "Deny",
     ):
         assert private_text not in public_wire
-    assert private["channel"] == "D-U1"
-    private_wire = json.dumps(private)
+    assert private["channel"] == (f"D-{target_user}" if dm_listed else target_user)
+    private_wire = (
+        "".join(post["text"] for post in posts[1:])
+        if compact
+        else json.dumps(posts[1:], ensure_ascii=False)
+    )
     assert "The salary export is ready for approval." in private_wire
     assert "Export payroll data with the payroll account?" in private_wire
-    private_options = private["blocks"][2]["element"]["options"]
+    [control] = [block for block in private["blocks"] if block["type"] == "input"]
+    private_options = control["element"]["options"]
     assert [option["value"] for option in private_options] == [
         "allow",
         "deny",
         "always",
     ]
-    assert [option["description"]["text"] for option in private_options] == [
+    for description in (
         "Export salary.csv this time.",
         "Do not export payroll data.",
         "Export payroll data with this account without asking again.",
-    ]
+    ):
+        assert description * description_repetitions in private_wire
     binding = slack._SlackAskBinding.model_validate_json(
         private["blocks"][-1]["elements"][0]["value"]
     )
@@ -7659,7 +7687,14 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
         queue_key="C5:200.0",
         question_turn_id=question_turn_id,
         authorization_id=authorization_id,
+        stored_question=compact,
     )
+    if compact:
+        with ws(workspace_id):
+            stored = await slack.ScopedStore(slack.SLACK_EXTENSION).get(
+                f"{slack.SLACK_ASK_FORM_PREFIX}{question_turn_id}"
+            )
+        assert slack._SlackStoredQuestion.model_validate(stored).question == targeted
     blocks = [
         ({**block, "block_id": SUBMIT_BLOCK_ID} if block["type"] == "actions" else block)
         for block in private["blocks"]
@@ -7673,10 +7708,18 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
     }
 
     wrong = _submit_body(
-        choice, user="U8", channel="D-U1", thread=None, blocks=blocks, binding=binding
+        choice, user="U8", channel=f"D-{target_user}", thread=None, blocks=blocks, binding=binding
     )
     right = _submit_body(
-        choice, user="U1", channel="D-U1", thread=None, blocks=blocks, binding=binding
+        choice,
+        user=target_user,
+        channel=f"D-{target_user}",
+        thread=None,
+        blocks=blocks,
+        binding=binding,
+    )
+    outside_dm = _submit_body(
+        choice, user=target_user, channel="C5", thread=None, blocks=blocks, binding=binding
     )
     async with client:
         ignored = await client.post(INTERACTIVE_PATH, content=wrong, headers=_signed_form(wrong))
@@ -7693,9 +7736,27 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
                 )
             ).scalar_one() == 1
 
+        if compact:
+            refused = await client.post(
+                INTERACTIVE_PATH, content=outside_dm, headers=_signed_form(outside_dm)
+            )
+            assert refused.json() == {"ok": True, "ignored": True}
+
         admitted = await client.post(INTERACTIVE_PATH, content=right, headers=_signed_form(right))
         assert admitted.json() == {"ok": True}
         await asyncio.gather(*slack._REWRITE_TASKS)
+        if compact:
+            with ws(workspace_id):
+                assert (
+                    await slack.ScopedStore(slack.SLACK_EXTENSION).get(
+                        f"{slack.SLACK_ASK_FORM_PREFIX}{question_turn_id}"
+                    )
+                    is None
+                )
+            repeated = await client.post(
+                INTERACTIVE_PATH, content=right, headers=_signed_form(right)
+            )
+            assert repeated.json() == {"ok": True, "ignored": True}
 
     async with workspace_tx() as connection:
         answer = (
@@ -7713,11 +7774,12 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
         ).one()
     assert answer.conversation_id == original_conversation_id
     assert answer.speaker_member_id == target_id
+    assert answer.context["question"] == targeted.questions[0].question
     assert answer.context["authorization_id"] == str(authorization_id)
     assert answer.context["authorization_choice"] == "always"
     assert member_message_text(answer.inbound) == "Always allow payroll exports"
     [rewrite] = _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)
-    assert json.loads(rewrite.content)["channel"] == "D-U1"
+    assert json.loads(rewrite.content)["channel"] == f"D-{target_user}"
 
 
 async def test_dm_answer_submit_claims_the_conversation_for_its_resolved_member(
@@ -8045,8 +8107,13 @@ async def test_a_silent_turn_that_still_owes_an_act_posts_it(
 
     posts = _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
     assert len(posts) == 1
-    posted = json.loads(posts[0].content)
-    assert posted["blocks"][0]["text"].startswith(SILENCE_LINE_BREAK)
+    posted = json.loads(posts[-1].content)
+    first_text = json.loads(posts[0].content)["blocks"][0]["text"]
+    if "question" in act:
+        assert first_text == {"type": "mrkdwn", "text": slack.ASK_FORM_TEXT}
+        assert SILENCE_LINE_BREAK not in json.dumps(posted)
+    else:
+        assert first_text.startswith(SILENCE_LINE_BREAK)
     assert owed in json.dumps(posted, ensure_ascii=False)
     assert [
         element["action_id"]
