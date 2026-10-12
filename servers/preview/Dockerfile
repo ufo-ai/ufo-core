@@ -31,6 +31,7 @@ RUN apt-get update \
         dpkg --compare-versions "$(dpkg-query -W -f='${Version}' "$package")" ge 8.21.0 || exit 1; \
     done \
     && rm -rf /var/lib/apt/lists/*
+RUN ! command -v tiffcrop
 
 FROM runtime-packages AS runtime
 COPY scripts/fetch-pdfium.sh /tmp/fetch-pdfium.sh
