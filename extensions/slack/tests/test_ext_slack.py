@@ -7537,8 +7537,9 @@ async def test_a_dm_past_the_listed_pages_is_posted_to_the_member_id(member_id: 
 
 
 @pytest.mark.parametrize("description_repetitions", [1, 5, 1_000])
+@pytest.mark.parametrize("target_user, dm_listed", [("U1", True), ("U1", False), ("W1", False)])
 async def test_a_targeted_question_is_private_and_answers_its_original_conversation(
-    db: None, tmp_path, monkeypatch, description_repetitions: int
+    db: None, tmp_path, monkeypatch, description_repetitions: int, target_user: str, dm_listed: bool
 ) -> None:
     workspace_id, target_id = await _seed(member_email="target@example.com")
     assert target_id is not None
@@ -7560,7 +7561,7 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
                     "workspace_id": workspace_id,
                     "member_id": target_id,
                     "surface": slack.SURFACE_SLACK,
-                    "external_id": "U1",
+                    "external_id": target_user,
                     "created_at": datetime.now(UTC),
                     "updated_at": datetime.now(UTC),
                 },
@@ -7575,12 +7576,20 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
             ],
         )
     recorder: list[httpx.Request] = []
-    app, client, blob = await _mount(
-        monkeypatch,
-        workspace_id,
-        tmp_path,
-        recorder,
-        users={"U1": "target@example.com", "U8": "peer@example.com"},
+    transport = _mock_transport(
+        recorder, {target_user: "target@example.com", "U8": "peer@example.com"}
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).split("?")[0] == slack.SLACK_CONVERSATIONS_LIST_URL and not dm_listed:
+            recorder.append(request)
+            return httpx.Response(
+                200, json={"ok": True, "channels": [], "response_metadata": {"next_cursor": ""}}
+            )
+        return transport.handle_request(request)
+
+    app, client, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
     )
     authorization_id = uuid4()
     targeted = AskUserInput(
@@ -7644,7 +7653,7 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
         "Deny",
     ):
         assert private_text not in public_wire
-    assert private["channel"] == "D-U1"
+    assert private["channel"] == (f"D-{target_user}" if dm_listed else target_user)
     private_wire = (
         "".join(post["text"] for post in posts[1:])
         if compact
@@ -7699,10 +7708,18 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
     }
 
     wrong = _submit_body(
-        choice, user="U8", channel="D-U1", thread=None, blocks=blocks, binding=binding
+        choice, user="U8", channel=f"D-{target_user}", thread=None, blocks=blocks, binding=binding
     )
     right = _submit_body(
-        choice, user="U1", channel="D-U1", thread=None, blocks=blocks, binding=binding
+        choice,
+        user=target_user,
+        channel=f"D-{target_user}",
+        thread=None,
+        blocks=blocks,
+        binding=binding,
+    )
+    outside_dm = _submit_body(
+        choice, user=target_user, channel="C5", thread=None, blocks=blocks, binding=binding
     )
     async with client:
         ignored = await client.post(INTERACTIVE_PATH, content=wrong, headers=_signed_form(wrong))
@@ -7718,6 +7735,12 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
                     .where(tables.turn.c.workspace_id == workspace_id)
                 )
             ).scalar_one() == 1
+
+        if compact:
+            refused = await client.post(
+                INTERACTIVE_PATH, content=outside_dm, headers=_signed_form(outside_dm)
+            )
+            assert refused.json() == {"ok": True, "ignored": True}
 
         admitted = await client.post(INTERACTIVE_PATH, content=right, headers=_signed_form(right))
         assert admitted.json() == {"ok": True}
@@ -7756,7 +7779,7 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
     assert answer.context["authorization_choice"] == "always"
     assert member_message_text(answer.inbound) == "Always allow payroll exports"
     [rewrite] = _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)
-    assert json.loads(rewrite.content)["channel"] == "D-U1"
+    assert json.loads(rewrite.content)["channel"] == f"D-{target_user}"
 
 
 async def test_dm_answer_submit_claims_the_conversation_for_its_resolved_member(

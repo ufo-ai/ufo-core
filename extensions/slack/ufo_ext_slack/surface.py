@@ -3732,7 +3732,10 @@ async def _handle_answer_submit(
         form = _SlackStoredQuestion.model_validate(stored)
         if (
             form.binding != binding
-            or form.channel != interaction.channel
+            or (
+                form.channel != interaction.channel
+                and not (interaction.is_dm and form.channel == interaction.slack_user_id)
+            )
             or tuple(answer.block_id for answer in interaction.answers)
             != tuple(
                 f"{ASK_BLOCK_ID_PREFIX}{index}" for index in range(len(form.question.questions))
