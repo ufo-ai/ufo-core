@@ -7191,7 +7191,7 @@ async def test_a_landed_connection_keeps_the_answers_a_member_already_sent(
         speaker_member_id=member_id,
     )
     await app.state.writeback_poller.drain()
-    posted = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[0].content)
+    posted = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[-1].content)
     blocks_as_slack_echoes_them = [
         (
             {**block, "block_id": SUBMIT_ROW_BLOCK_ID}
@@ -7209,6 +7209,7 @@ async def test_a_landed_connection_keeps_the_answers_a_member_already_sent(
             slack.ASK_SUBMIT_ACTION_ID,
             blocks=blocks_as_slack_echoes_them,
             block_id=SUBMIT_ROW_BLOCK_ID,
+            message_ts="999.200",
             state={
                 "values": {
                     "ask:0": {
@@ -7371,9 +7372,10 @@ def _click_body(
     blocks: list[dict[str, object]] | None = None,
     block_id: str = SUBMIT_BLOCK_ID,
     state: dict[str, object] | None = None,
+    message_ts: str = "999.100",
 ) -> bytes:
     message: dict[str, object] = {
-        "ts": "999.100",
+        "ts": message_ts,
         "text": MESSAGE_TEXT,
         "blocks": _form_blocks() if blocks is None else blocks,
     }
