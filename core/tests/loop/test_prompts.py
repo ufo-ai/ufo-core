@@ -373,3 +373,11 @@ def test_the_capability_block_states_its_closer_once_for_every_line() -> None:
     assert block.endswith(WORKSPACE_FACTS_CLOSER)
     assert block.count(WORKSPACE_FACTS_CLOSER) == 1
     assert "Slack: installed.\nGitHub: installed.\n</workspace_capabilities>" in block
+
+
+def test_a_finished_turn_reports_no_narrative_of_repaired_difficulty() -> None:
+    prose = " ".join(SHELL.split())
+    assert "When you finish, report the result the same way" in prose
+    assert "(an error, a retry, a workaround) is a narrative of difficulty too" in prose
+    assert "including one that restates or clarifies an earlier reply" in prose
+    assert "unless the member asks what went wrong" in prose
