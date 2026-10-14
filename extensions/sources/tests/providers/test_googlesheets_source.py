@@ -405,6 +405,42 @@ async def test_sheet_values_requests_only_grid_tabs() -> None:
     }
 
 
+async def test_sheet_values_splits_a_batch_whose_url_passes_the_proxy_limit() -> None:
+    titles = [
+        f"Квартальный отчёт по региону {index}" for index in range(googlesheets.VALUES_BATCH_SIZE)
+    ]
+    value_requests: list[httpx.Request] = []
+    metadata = {
+        **SPREADSHEET_META,
+        "sheets": [
+            {"properties": {"sheetId": index, "title": title}} for index, title in enumerate(titles)
+        ],
+    }
+
+    def bounded(request: httpx.Request) -> httpx.Response:
+        if len(str(request.url)) > googlesheets.VALUES_URL_MAX_CHARS:
+            return httpx.Response(400, json={"error": {"message": "unparseable endpoint"}})
+        ranges = request.url.params.get_list("ranges")
+        return httpx.Response(
+            200, json={"valueRanges": [{"range": value, "values": []} for value in ranges]}
+        )
+
+    result = await _fetch(
+        "sheet_values",
+        _handler(value_requests=value_requests, spreadsheet_meta=metadata, values_response=bounded),
+    )
+
+    assert len(value_requests) > 1
+    assert [
+        _tab_of(value)
+        for request in value_requests
+        for value in request.url.params.get_list("ranges")
+    ] == titles
+    assert {page.source_ref for page in result.pages} == {
+        f"sheet_values/s1:{index}:values" for index in range(len(titles))
+    }
+
+
 async def test_sheet_values_fault_carries_googles_enumerated_reason_without_its_message() -> None:
     def refused(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json=NON_GRID_TAB_RANGE)
