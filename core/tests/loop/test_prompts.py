@@ -150,6 +150,15 @@ def test_the_delivery_carries_the_handle_for_the_next_step() -> None:
     assert SUBAGENT_OUTPUT_DISCIPLINE.count("Give the next step its handle") == 1
 
 
+def test_a_repaired_failure_stays_out_of_the_delivery() -> None:
+    prose = " ".join(SHELL.split())
+    assert "Never let the blood show." in prose
+    assert "A failure you hit and already repaired, in this turn or an earlier one," in prose
+    assert "leave out the error, the retry, the fix, and how the work runs now" in prose
+    assert '"How did it go?" and "Huh?" ask for the result, not the repair' in prose
+    assert "stays in as what remains, never as how it happened" in prose
+
+
 def test_shell_answers_first_and_grounds_an_explanation_in_current_content() -> None:
     prose = " ".join(SHELL.split())
     assert "In answer, discuss, and report, the first sentence answers the question" in prose
