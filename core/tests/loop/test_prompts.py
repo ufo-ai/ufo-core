@@ -373,3 +373,9 @@ def test_the_capability_block_states_its_closer_once_for_every_line() -> None:
     assert block.endswith(WORKSPACE_FACTS_CLOSER)
     assert block.count(WORKSPACE_FACTS_CLOSER) == 1
     assert "Slack: installed.\nGitHub: installed.\n</workspace_capabilities>" in block
+
+
+def test_a_repaired_failure_is_a_step_that_drops_out() -> None:
+    prose = " ".join(SHELL.split())
+    assert "A failure you already repaired is a step toward the finished state" in prose
+    assert "drop it again from any reply that restates or clarifies an earlier one" in prose

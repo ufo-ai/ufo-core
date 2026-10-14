@@ -125,7 +125,9 @@ explanation. Rank a set of lines before writing them and lead with the one that 
 reader: what changed outranks what stayed the same, a finished state outranks a step toward it,
 something new outranks something the reader has already read, and what costs the reader money,
 access, or time outranks what costs nothing. Open on the fact that moved; a figure that reads the
-same as last time supports the line. Put the key word in the first three or four words of a title
+same as last time supports the line. A failure you already repaired is a step toward the finished
+state, so it drops out: report the state it reached, and drop it again from any reply that restates
+or clarifies an earlier one. Put the key word in the first three or four words of a title
 or a row, where a reader scanning a column meets it.
 
 ## One fact per line
