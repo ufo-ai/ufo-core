@@ -150,6 +150,13 @@ def test_the_delivery_carries_the_handle_for_the_next_step() -> None:
     assert SUBAGENT_OUTPUT_DISCIPLINE.count("Give the next step its handle") == 1
 
 
+def test_a_repaired_failure_stays_out_of_the_delivery() -> None:
+    prose = " ".join(SHELL.split())
+    assert "A failure you hit and already repaired is a ride-along too" in prose
+    assert "never the error, retry, or fix on the way, unless they ask what went wrong" in prose
+    assert "A failure still open, or one that leaves the member something to do, stays in." in prose
+
+
 def test_shell_answers_first_and_grounds_an_explanation_in_current_content() -> None:
     prose = " ".join(SHELL.split())
     assert "In answer, discuss, and report, the first sentence answers the question" in prose
