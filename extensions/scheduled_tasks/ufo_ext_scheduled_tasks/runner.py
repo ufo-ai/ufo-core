@@ -29,7 +29,8 @@ CLAIM_LEASE_SECONDS = 300
 REPORT_INSTRUCTION = (
     "A run that found nothing new posts nothing. Use share_file to broadcast a result worth "
     "sharing with the workspace. Otherwise follow the delivery register and use Markdown links "
-    "as usual."
+    "as usual. Report where the run landed: an error the run hit and recovered from is not part of "
+    "the result, so leave it out."
 )
 FINAL_FIRE_INSTRUCTION = (
     f"{REPORT_INSTRUCTION}\n\nThis is the final permitted fire. Complete the scheduled task and "
