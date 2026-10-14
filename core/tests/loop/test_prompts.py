@@ -373,3 +373,17 @@ def test_the_capability_block_states_its_closer_once_for_every_line() -> None:
     assert block.endswith(WORKSPACE_FACTS_CLOSER)
     assert block.count(WORKSPACE_FACTS_CLOSER) == 1
     assert "Slack: installed.\nGitHub: installed.\n</workspace_capabilities>" in block
+
+
+def test_a_delivery_carries_the_result_not_the_repaired_path() -> None:
+    prose = " ".join(SHELL.split())
+    assert "Deliver the result the work reached, never the path to it." in prose
+    assert '"18 failed on an expired login, so I re-sent them" hands the member a repair' in prose
+    assert "Name a failure only while it is still open or leaves the member" in prose
+
+
+def test_a_finished_turn_reports_no_narrative_of_repaired_difficulty() -> None:
+    prose = " ".join(SHELL.split())
+    assert "When you finish, report the result the same way" in prose
+    assert "a failure you hit and repaired on the way is a narrative of difficulty too" in prose
+    assert "it never reaches the member unless they ask what went wrong" in prose
