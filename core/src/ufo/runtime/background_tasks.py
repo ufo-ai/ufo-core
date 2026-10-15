@@ -13,10 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ufo.db import owner_tx, workspace_tx
 from ufo.harness.o11y import log, warn
 from ufo.harness.sandbox.session import ExecResult, shell_path
-from ufo.runtime.access.proxy_sessions import ProxySessions
-from ufo.runtime.billing.accounting import TURN_LABEL
-from ufo.runtime.ext.context import AgentArchived, TurnInvoker, conversation_agent
-from ufo.runtime.ext.surface import TERMINAL_TURN_STATUSES
+from ufo.runtime.ext.context import AgentArchived, TurnInvoker, conversation_agent_id
 from ufo.runtime.turns.changes import turn_conversation_changed
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
@@ -104,13 +101,11 @@ class _Followed:
 
 @dataclass(frozen=True)
 class BackgroundTaskSweep:
-    """Probe detached tasks, report terminal results once, and retire their authority: when a
-    terminal turn's last detached task settles, its proxy sessions are revoked."""
+    """Probe detached tasks, report terminal results once, and retire their authority."""
 
     probes: Prober
     invoker_for: Callable[[UUID], TurnInvoker]
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
-    sessions: ProxySessions | None = None
 
     async def run(self) -> None:
         workspace_id = ws_current().workspace_id
@@ -198,10 +193,9 @@ class BackgroundTaskSweep:
         await self._settle(workspace_id, followed)
 
     async def _report(self, workspace_id: UUID, followed: _Followed, headline: str) -> None:
-        found = await conversation_agent(workspace_id, followed.conversation_id)
-        if found is None:
+        agent_id = await conversation_agent_id(workspace_id, followed.conversation_id)
+        if agent_id is None:
             raise RuntimeError(f"conversation {followed.conversation_id} has no agent")
-        agent_id, _ = found
         tail = await self.probes.run(
             followed.sandbox_conversation_id,
             LOG_TAIL.format(
@@ -238,16 +232,14 @@ class BackgroundTaskSweep:
 
     async def _settle(self, workspace_id: UUID, followed: _Followed) -> None:
         async with workspace_tx() as connection:
-            status = (
-                await connection.execute(
-                    sa.select(tables.turn.c.status)
-                    .where(
-                        tables.turn.c.workspace_id == workspace_id,
-                        tables.turn.c.id == followed.turn_id,
-                    )
-                    .with_for_update()
+            await connection.execute(
+                sa.select(tables.turn.c.id)
+                .where(
+                    tables.turn.c.workspace_id == workspace_id,
+                    tables.turn.c.id == followed.turn_id,
                 )
-            ).scalar_one()
+                .with_for_update()
+            )
             deleted = (
                 await connection.execute(
                     sa.delete(tables.detached_task)
@@ -263,12 +255,10 @@ class BackgroundTaskSweep:
             if deleted is None:
                 return
             remaining = (
-                await connection.execute(
-                    sa.select(sa.func.max(tables.detached_task.c.follow_until)).where(
-                        tables.detached_task.c.turn_id == followed.turn_id
-                    )
-                )
-            ).scalar_one()
+                sa.select(sa.func.max(tables.detached_task.c.follow_until))
+                .where(tables.detached_task.c.turn_id == followed.turn_id)
+                .scalar_subquery()
+            )
             await connection.execute(
                 sa.update(tables.turn)
                 .where(
@@ -283,19 +273,3 @@ class BackgroundTaskSweep:
             conversation_id=str(followed.conversation_id),
             task=followed.task,
         )
-        if remaining is None and status in TERMINAL_TURN_STATUSES:
-            await self._revoke(workspace_id, followed.turn_id)
-
-    async def _revoke(self, workspace_id: UUID, turn_id: UUID) -> None:
-        if self.sessions is None:
-            return
-        try:
-            revoked = await self.sessions.revoke_labelled(workspace_id, TURN_LABEL, str(turn_id))
-        except Exception as error:
-            warn(
-                "background_tasks.sessions_revoke_failed",
-                turn_id=str(turn_id),
-                error_class=type(error).__name__,
-            )
-            return
-        log("background_tasks.sessions_revoked", turn_id=str(turn_id), count=revoked)

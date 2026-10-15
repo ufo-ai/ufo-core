@@ -12,6 +12,5 @@ pub mod ops;
 pub mod pr;
 pub mod record;
 pub mod system_skills;
-pub mod trust;
 pub mod ui;
 pub mod wire;
