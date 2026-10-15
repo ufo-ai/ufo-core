@@ -1,0 +1,27 @@
+name: egress
+
+on:
+  push:
+    branches: [main]
+    paths: ["servers/egress/**", ".github/workflows/egress.yml"]
+  pull_request:
+    paths: ["servers/egress/**", ".github/workflows/egress.yml"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: servers/egress
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: servers/egress
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test

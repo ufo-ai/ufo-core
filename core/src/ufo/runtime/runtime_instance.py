@@ -23,7 +23,6 @@ from dbos import error as dbos_error
 
 from ufo.db import owner_tx
 from ufo.harness.o11y import log
-from ufo.runtime.access.turn_sessions import DeploySessions
 from ufo.runtime.turns.cancellation import cancel_one_turn
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
@@ -182,7 +181,6 @@ class CancelReconciler:
     cancels; a failed tick is logged and the loop continues, mirroring the recovery sweep."""
 
     client: DBOSClient
-    sessions: DeploySessions | None
     interval_seconds: float = CANCEL_RECONCILE_INTERVAL_SECONDS
 
     async def run(self) -> None:
@@ -198,7 +196,7 @@ class CancelReconciler:
             orphans = (await connection.execute(self._orphans_query())).all()
         for orphan in orphans:
             with ws(orphan.workspace_id):
-                cancelled = await cancel_one_turn(self.client, self.sessions, orphan.id)
+                cancelled = await cancel_one_turn(self.client, orphan.id)
             if cancelled is not None:
                 log("instance.cancel_reconciled", turn_id=str(orphan.id))
 
@@ -275,7 +273,6 @@ class StrandedTurnReconciler:
     a sweep racing a turn's own commit cannot disturb it."""
 
     client: DBOSClient
-    sessions: DeploySessions | None
     interval_seconds: float = STRANDED_RECONCILE_INTERVAL_SECONDS
     grace_seconds: float = STRANDED_TURN_GRACE_SECONDS
 
@@ -297,7 +294,7 @@ class StrandedTurnReconciler:
             if row.running_attempt in advancing:
                 continue
             with ws(row.workspace_id):
-                cancelled = await cancel_one_turn(self.client, self.sessions, row.id)
+                cancelled = await cancel_one_turn(self.client, row.id)
             if cancelled is not None:
                 log(
                     "instance.stranded_turn_reconciled",

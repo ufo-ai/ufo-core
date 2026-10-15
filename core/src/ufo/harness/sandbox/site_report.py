@@ -34,7 +34,7 @@ from ufo.harness.sandbox.ingress_token import (
     mint_ingress_token,
     verify_ingress_token,
 )
-from ufo.runtime.ext.context import AgentArchived, TurnInvoker, conversation_agent
+from ufo.runtime.ext.context import AgentArchived, TurnInvoker, conversation_agent_id
 from ufo.runtime.workspace import ws
 from ufo.schema.records import TurnRuntimeConfig
 
@@ -139,10 +139,9 @@ class SiteReports:
         except IngressTokenError:
             raise HTTPException(status_code=401, detail="unauthorized") from None
         with ws(claims.workspace_id):
-            found = await conversation_agent(claims.workspace_id, claims.conversation_id)
-            if found is None:
+            agent_id = await conversation_agent_id(claims.workspace_id, claims.conversation_id)
+            if agent_id is None:
                 return Response(status_code=404)
-            agent_id, _ = found
             if not await self._site_exists(claims):
                 return Response(status_code=204)
             bucket = int(now.timestamp()) // REPORT_BUCKET_SECONDS
