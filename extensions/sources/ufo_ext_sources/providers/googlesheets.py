@@ -10,7 +10,9 @@ each page reports as its own cursor the highest `modifiedTime` the run has lande
 stored one. `sheets` explodes each spreadsheet into one record per tab; `sheet_values` reads tab
 grids in bounded `values:batchGet` calls so a synced sheet recalls as its rows, every range naming
 its tab as a quoted A1 sheet reference with each apostrophe doubled — an unquoted title reads as a
-cell reference against the first visible sheet, as a named range, or fails to parse. Only a `GRID`
+cell reference against the first visible sheet, as a named range, or fails to parse. A batch also
+ends before its URL passes `VALUES_URL_MAX_CHARS`, past which the Composio proxy fails to parse
+the endpoint and refuses it, so long or non-ASCII tab titles split into more batches. Only a `GRID`
 tab takes an A1 range: a chart (`OBJECT`) or `DATA_SOURCE` tab in a batch refuses the whole batch
 `400 INVALID_ARGUMENT`, so those tabs are never requested. The batch
 answers one `valueRange` per requested range in the order asked, so each grid lands on the tab at
@@ -102,6 +104,7 @@ DRIVE_PAGE_SIZE = 1000
 PAGE_SIZE = 100
 REFUSED_LIMIT = 50
 VALUES_BATCH_SIZE = 50
+VALUES_URL_MAX_CHARS = 2048
 GRID_SHEET_TYPE = "GRID"
 _METADATA_FALLBACK_STATUS = frozenset({403, 404})
 _SERVICE_ERROR_DOMAIN = "googleapis.com"
@@ -327,17 +330,10 @@ class GoogleSheetsConnector(RestConnector):
             if properties.get("sheetType", GRID_SHEET_TYPE) != GRID_SHEET_TYPE:
                 continue
             tabs.append((title, sheet_id))
-        for start in range(0, len(tabs), VALUES_BATCH_SIZE):
-            chunk = tabs[start : start + VALUES_BATCH_SIZE]
+        batch_url = f"{SHEETS_API_URL}/spreadsheets/{spreadsheet_id}/values:batchGet"
+        for chunk in _value_batches(batch_url, tabs):
             try:
-                data = await self._get(
-                    client,
-                    f"{SHEETS_API_URL}/spreadsheets/{spreadsheet_id}/values:batchGet",
-                    params={
-                        "ranges": [_quoted_sheet_range(title) for title, _ in chunk],
-                        "majorDimension": "ROWS",
-                    },
-                )
+                data = await self._get(client, batch_url, params=_batch_params(chunk))
             except httpx.HTTPStatusError as error:
                 detail = google.error_detail(error)
                 if error.response.status_code == 400:
@@ -488,6 +484,27 @@ def _sheet_value_record(
         "created_at": spreadsheet.get("created_at"),
         "updated_at": spreadsheet.get("updated_at"),
     }
+
+
+def _batch_params(chunk: list[tuple[str, Any]]) -> dict[str, Any]:
+    return {"ranges": [_quoted_sheet_range(title) for title, _ in chunk], "majorDimension": "ROWS"}
+
+
+def _value_batches(batch_url: str, tabs: list[tuple[str, Any]]) -> list[list[tuple[str, Any]]]:
+    batches: list[list[tuple[str, Any]]] = []
+    chunk: list[tuple[str, Any]] = []
+    for tab in tabs:
+        grown = [*chunk, tab]
+        if chunk and (
+            len(grown) > VALUES_BATCH_SIZE
+            or len(str(httpx.URL(batch_url, params=_batch_params(grown)))) > VALUES_URL_MAX_CHARS
+        ):
+            batches.append(chunk)
+            grown = [tab]
+        chunk = grown
+    if chunk:
+        batches.append(chunk)
+    return batches
 
 
 def _quoted_sheet_range(title: str) -> str:
