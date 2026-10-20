@@ -49,20 +49,28 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -t ufo-preview-ci .
       - run: |
+          docker run --rm --network none --entrypoint python3 ufo-preview-ci -c '
+          import ctypes
+          from pathlib import Path
+          assert not list(Path("/usr").rglob("libcjson_utils.so*"))
+          ctypes.CDLL("libcjson.so.1")
+          ctypes.CDLL("librist.so.4")
+          '
+      - run: |
           docker run --rm -d --name preview-ci -p 18930:8930 \
             --memory 512m --memory-swap 512m --cpus 1 \
             -e UFO_PREVIEW_LISTEN=0.0.0.0:8930 -e UFO_PREVIEW_TOKEN=ci \
             -e UFO_PREVIEW_CONCURRENCY=4 ufo-preview-ci
           for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:18930/_health && break; sleep 1; done
           pids=
-          for kind in docx xlsx pptx csv; do
+          for kind in docx xlsx pptx csv pdf mp4; do
             curl -fsS -o "/tmp/smoke-$kind.png" -H 'Authorization: Bearer ci' \
               -F "request={\"kind\":\"$kind\",\"max_width\":800,\"max_height\":800,\"sink\":{\"inline\":true}}" \
               -F "file=@tests/fixtures/fixture.$kind" http://127.0.0.1:18930/render &
             pids="$pids $!"
           done
           for pid in $pids; do wait "$pid"; done
-          for kind in docx xlsx pptx csv; do file "/tmp/smoke-$kind.png" | grep -q 'PNG image data'; done
+          for kind in docx xlsx pptx csv pdf mp4; do file "/tmp/smoke-$kind.png" | grep -q 'PNG image data'; done
           docker exec preview-ci awk \
             '$1 == "oom" || $1 == "oom_kill" { if ($2 != 0) exit 1 }' \
             /sys/fs/cgroup/memory.events
