@@ -45,6 +45,7 @@ RUN test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-
     && dpkg -i /tmp/libxml2/libxml2_*.deb \
     && mkdir -p /usr/local/share/ufo-preview \
     && cp /tmp/libxml2/libxml2-provenance.json /usr/local/share/ufo-preview/ \
+    && cp /tmp/libxml2/libxml2.sha256 /usr/local/share/ufo-preview/ \
     && rm -rf /tmp/libxml2
 
 FROM runtime-packages AS runtime
@@ -61,7 +62,7 @@ COPY scripts/capture-site.py /usr/local/libexec/ufo-site-preview.py
 RUN rm /usr/lib/*-linux-gnu/libcjson_utils.so.* \
     && test -z "$(find /usr /opt -name 'libcjson_utils.so*' -print -quit)" \
     && test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo1' \
-    && test -z "$(dpkg -V libxml2)" \
+    && sha256sum -c /usr/local/share/ufo-preview/libxml2.sha256 \
     && test -z "$(find /usr/lib /usr/local/lib \( -name 'libxml2.py' -o -name 'libxml2mod*' \) -print -quit)" \
     && ldconfig
 USER nobody

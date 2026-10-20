@@ -15,6 +15,7 @@ while read -r file; do
 done < "$security/series"
 sed -i '1s/deb13u3)/deb13u3+ufo1)/' debian/changelog
 dpkg-buildpackage --build=any -Pnopython -us -uc -j2
+make -C builddir/main -j2 check
 for name in dict valid xpointer io xinclude; do
     cc -O2 -ffunction-sections -fdata-sections -Ibuilddir/main -Ibuilddir/main/include -I. -Iinclude \
         "$security/test-$name.c" builddir/main/.libs/libxml2.a \
@@ -29,4 +30,8 @@ nm -D --defined-only /usr/lib/"$(dpkg-architecture -qDEB_HOST_MULTIARCH)"/libxml
 nm -D --defined-only "$library" | awk '{print $3}' | sort > /tmp/libxml2-after.symbols
 diff -u /tmp/libxml2-before.symbols /tmp/libxml2-after.symbols
 cp ../libxml2_*_*.deb /out/
+mkdir /tmp/libxml2-package
+dpkg-deb --extract /out/libxml2_*.deb /tmp/libxml2-package
+(cd /tmp/libxml2-package && sha256sum usr/lib/"$(dpkg-architecture -qDEB_HOST_MULTIARCH)"/libxml2.so.2.9.14) \
+    | sed 's@  usr/@  /usr/@' > /out/libxml2.sha256
 cp "$security/provenance.json" /out/libxml2-provenance.json
