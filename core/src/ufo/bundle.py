@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from zipfile import ZipFile
 
+from ufo.gconv import DISABLE_COMMAND
 from ufo.host.ext.loader import (
     FIRST_PARTY_ENV,
     ExtensionPin,
@@ -159,6 +160,7 @@ class Bundle:
                 "\"$(dpkg-query -W -f='${Version}' libpcre2-8-0)\" "
                 f"ge {PCRE2_MINIMUM_VERSION} "
                 "&& rm -rf /var/lib/apt/lists/*",
+                f"RUN {DISABLE_COMMAND}",
                 "WORKDIR /app",
                 f"ENV UFO_CONFIG=/app/{BUNDLE_CONFIG_NAME} "
                 f"UFO_LOCKFILE=/app/{BUNDLE_LOCKFILE_NAME} "
