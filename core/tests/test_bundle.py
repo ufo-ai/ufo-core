@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from ufo.bundle import BUNDLE_CONSTRAINTS_NAME, BUNDLE_WHEELS_DIR, Bundle, wheel_name
+from ufo.gconv import DISABLE_COMMAND
 
 ACME_WHEEL = "acme-0.1.0-py3-none-any.whl"
 
@@ -29,6 +30,10 @@ def test_bundle_installs_every_built_wheel_at_the_locked_versions() -> None:
     assert f"{BUNDLE_WHEELS_DIR}/{wheel_name()}" in install
     assert f"{BUNDLE_WHEELS_DIR}/{ACME_WHEEL}" in install
     assert install.endswith(f"&& rm -r {BUNDLE_WHEELS_DIR}")
+
+
+def test_bundle_enforces_converter_policy() -> None:
+    assert f"RUN {DISABLE_COMMAND}\n" in _dockerfile()
 
 
 def test_bundle_names_the_distributions_the_loader_trusts(monkeypatch: pytest.MonkeyPatch) -> None:
