@@ -15,6 +15,7 @@ any machine."""
 
 from dataclasses import dataclass
 from pathlib import Path
+from shutil import copytree
 from zipfile import ZipFile
 
 from ufo.host.ext.loader import (
@@ -38,6 +39,8 @@ BUNDLE_DOCKERFILE_NAME = "Dockerfile"
 BUNDLE_CLIENT_BINARY_NAME = "ufo-sandbox-client"
 BUNDLE_CLIENT_INSTALL_PATH = f"/usr/local/bin/{BUNDLE_CLIENT_BINARY_NAME}"
 BUNDLE_WHEELS_DIR = "/tmp/wheels"
+ZLIB_ASSETS = Path(__file__).parent / "runtime/security/zlib"
+BUNDLE_ZLIB_DIR = "zlib"
 
 
 def wheel_name() -> str:
@@ -72,6 +75,7 @@ class Bundle:
     def build(self) -> BundleResult:
         pins = self._pins()
         self.out.mkdir(parents=True, exist_ok=True)
+        copytree(ZLIB_ASSETS, self.out / BUNDLE_ZLIB_DIR, dirs_exist_ok=True)
         config = self.out / BUNDLE_CONFIG_NAME
         config.write_text(self.config_path.read_text())
         lockfile = self.out / BUNDLE_LOCKFILE_NAME
@@ -152,13 +156,21 @@ class Bundle:
         first_party = ",".join(sorted(first_party_distributions()))
         return "\n".join(
             (
-                f"FROM {DOCKERFILE_BASE}",
+                (ZLIB_ASSETS / "Dockerfile")
+                .read_text()
+                .split("\nFROM scratch AS packages")[0]
+                .replace("COPY . /security", f"COPY {BUNDLE_ZLIB_DIR} /security"),
+                f"FROM {DOCKERFILE_BASE} AS runtime-packages",
                 "RUN apt-get update "
                 "&& apt-get install -y --no-install-recommends libpcre2-8-0 "
                 "&& dpkg --compare-versions "
                 "\"$(dpkg-query -W -f='${Version}' libpcre2-8-0)\" "
                 f"ge {PCRE2_MINIMUM_VERSION} "
                 "&& rm -rf /var/lib/apt/lists/*",
+                "COPY --from=build /out /tmp/zlib-packages",
+                "RUN sh /tmp/zlib-packages/install.sh /tmp/zlib-packages "
+                "&& rm -r /tmp/zlib-packages",
+                "FROM runtime-packages AS runtime",
                 "WORKDIR /app",
                 f"ENV UFO_CONFIG=/app/{BUNDLE_CONFIG_NAME} "
                 f"UFO_LOCKFILE=/app/{BUNDLE_LOCKFILE_NAME} "

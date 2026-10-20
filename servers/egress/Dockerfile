@@ -25,11 +25,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked \
     && cp target/release/ufo-egress /usr/local/bin/ufo-egress
 
+FROM debian:trixie-slim AS zlib-build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential debhelper autoconf dpkg-dev curl ca-certificates binutils \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=zlib-security / /security
+RUN sh /security/build.sh
+
 FROM debian:stable-slim AS runtime-packages
 RUN apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=zlib-build /out/ /tmp/zlib-packages/
+RUN sh /tmp/zlib-packages/install.sh /tmp/zlib-packages && rm -r /tmp/zlib-packages
 
 FROM runtime-packages AS runtime
 COPY --from=build /usr/local/bin/ufo-egress /usr/local/bin/ufo-egress

@@ -17,6 +17,14 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
 
+FROM debian:trixie-slim AS zlib-build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential debhelper autoconf dpkg-dev curl ca-certificates binutils \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=zlib-security / /security
+RUN sh /security/build.sh
+
 FROM debian:trixie-slim AS runtime-packages
 RUN apt-get update \
     && apt-get upgrade -y \
@@ -29,6 +37,9 @@ RUN apt-get update \
         dpkg --compare-versions "$(dpkg-query -W -f='${Version}' "$package")" ge 8.21.0 || exit 1; \
     done \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=zlib-build /out/ /tmp/zlib-packages/
+RUN sh /tmp/zlib-packages/install.sh /tmp/zlib-packages && rm -r /tmp/zlib-packages
 
 FROM runtime-packages AS runtime
 COPY --from=build /build/target/release/ufo-cache /usr/local/bin/ufo-cache

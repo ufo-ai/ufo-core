@@ -3,9 +3,9 @@ name: preview
 on:
   push:
     branches: [main]
-    paths: ["servers/preview/**", ".github/workflows/preview.yml"]
+    paths: ["servers/preview/**", "core/src/ufo/runtime/security/zlib/**", ".github/workflows/preview.yml"]
   pull_request:
-    paths: ["servers/preview/**", ".github/workflows/preview.yml"]
+    paths: ["servers/preview/**", "core/src/ufo/runtime/security/zlib/**", ".github/workflows/preview.yml"]
 
 jobs:
   check:
@@ -34,7 +34,7 @@ jobs:
         working-directory: servers/preview
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -f testbed.Dockerfile -t ufo-preview-testbed .
+      - run: docker build --build-context zlib-security=../../core/src/ufo/runtime/security/zlib -f testbed.Dockerfile -t ufo-preview-testbed .
       - run: |
           docker run --rm --init -v "$PWD:/crate" -w /crate ufo-preview-testbed \
             cargo test -- --include-ignored --test-threads=4
@@ -47,14 +47,17 @@ jobs:
         working-directory: servers/preview
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t ufo-preview-ci .
+      - run: docker build --build-context zlib-security=../../core/src/ufo/runtime/security/zlib -t ufo-preview-ci .
       - run: |
           docker run --rm --network none --entrypoint python3 ufo-preview-ci -c '
           import ctypes
+          import subprocess
           from pathlib import Path
           assert not list(Path("/usr").rglob("libcjson_utils.so*"))
           ctypes.CDLL("libcjson.so.1")
           ctypes.CDLL("librist.so.4")
+          assert subprocess.check_output(["dpkg-query", "-W", "-f=${Version}", "zlib1g"], text=True) == "1:1.3.dfsg+really1.3.1-1+ufo1"
+          assert Path("/usr/local/share/ufo-zlib/provenance.json").is_file()
           '
       - run: |
           docker run --rm -d --name preview-ci -p 18930:8930 \

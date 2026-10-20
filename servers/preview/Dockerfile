@@ -16,6 +16,14 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
 
+FROM debian:trixie-slim AS zlib-build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential debhelper autoconf dpkg-dev curl ca-certificates binutils \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=zlib-security / /security
+RUN sh /security/build.sh
+
 FROM debian:trixie-slim AS runtime-packages
 RUN apt-get update \
     && apt-get upgrade -y \
@@ -32,6 +40,9 @@ RUN apt-get update \
     done \
     && rm -rf /var/lib/apt/lists/*
 RUN ! command -v tiffcrop
+
+COPY --from=zlib-build /out/ /tmp/zlib-packages/
+RUN sh /tmp/zlib-packages/install.sh /tmp/zlib-packages && rm -r /tmp/zlib-packages
 
 FROM runtime-packages AS runtime
 COPY scripts/fetch-pdfium.sh /tmp/fetch-pdfium.sh

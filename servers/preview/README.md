@@ -124,7 +124,7 @@ LibreOffice, the fonts, `ffmpeg`, and the library, so the same command is reprod
 installing document tooling on your machine:
 
 ```bash
-docker build -f testbed.Dockerfile -t ufo-preview-testbed .
+docker build --build-context zlib-security=../../core/src/ufo/runtime/security/zlib -f testbed.Dockerfile -t ufo-preview-testbed .
 docker run --rm --init -v "$PWD:/crate" -w /crate ufo-preview-testbed \
   cargo test -- --include-ignored --test-threads=4
 ```
