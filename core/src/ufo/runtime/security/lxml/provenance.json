@@ -7,5 +7,12 @@
   "zlib": "1.3.2",
   "upstreamFix": "https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148",
   "patchForm": "The exact state-reset change uses zero-context hunks for lxml's dependency patch parser.",
-  "scope": "The source wheel keeps static dependencies and applies the official zlib error-state fix to both etree and objectify. The system zlib package is a separate fix."
+  "scope": "The source wheel keeps static dependencies and applies the official zlib error-state fix to both etree and objectify. The system zlib package is a separate fix.",
+  "libxml2Fixes": {
+    "CVE-2026-86138": "https://github.com/GNOME/libxml2/commit/a4cba4b5b5a8c42e155ed42d2d2a44955465a2e4",
+    "CVE-2026-86140": "https://github.com/GNOME/libxml2/commit/d1686f91dbda141a752200419d35639fd6b38340",
+    "CVE-2026-86142": "https://github.com/GNOME/libxml2/commit/6b3a736c0edc74ceec3d82f5252499d7911b3a58",
+    "CVE-2026-86143": "https://github.com/GNOME/libxml2/commit/90f293ba74d28b1d570920382e707586f68ebf35",
+    "CVE-2026-86144": "https://github.com/GNOME/libxml2/commit/b63cd517afecb76582dd9488c55e54ceaf50de61"
+  }
 }

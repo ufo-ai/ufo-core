@@ -1,0 +1,109 @@
+--- a/dict.c
++++ b/dict.c
+@@ -231,4 +231,15 @@
+-        if (size == 0) size = 1000;
+-	else size *= 4; /* exponential growth */
+-        if (size < 4 * (namelen + plen + 1))
+-	    size = 4 * (namelen + plen + 1); /* just in case ! */
++        if (size == 0) {
++            size = 1000;
++        } else {
++            if (size < (SIZE_MAX - sizeof(xmlDictStrings)) / 4)
++                size *= 4; /* exponential growth */
++            else
++                size = SIZE_MAX - sizeof(xmlDictStrings);
++        }
++        if (size / 4 < namelen + plen + 1) {
++            if ((size_t) namelen + plen + 1 <
++                    (SIZE_MAX - sizeof(xmlDictStrings)) / 4)
++                size = 4 * ((size_t) namelen + plen + 1); /* just in case ! */
++            else
++                return(NULL);
++        }
+
+--- a/valid.c
++++ b/valid.c
+@@ -4985,1 +4985,9 @@
+-    if (glob) strcat(buf, "(");
++    len = strlen(buf);
++    if (glob) {
++        if (size - len < 50) {
++            if ((size - len > 4) && (buf[len - 1] != '.'))
++                strcat(buf, " ...");
++            return;
++        }
++        strcat(buf, "(");
++    }
+@@ -5049,1 +5057,5 @@
+-    if (glob) strcat(buf, ")");
++    if (glob) {
++        len = strlen(buf);
++        if (size - len > 1)
++            strcat(buf, ")");
++    }
+
+--- a/xpointer.c
++++ b/xpointer.c
+@@ -268,1 +268,8 @@
+-    len = xmlStrlen(ctxt->cur);
++    len = xmlStrlen(ctxt->cur);
++    /* Overflow in xmlStrlen */
++    if (len == 0 && ctxt->cur != NULL && *ctxt->cur != 0) {
++        xmlXPathPErrMemory(ctxt);
++        xmlFree(name);
++        return;
++    }
++
+
+--- a/xmlIO.c
++++ b/xmlIO.c
+@@ -2442,1 +2442,6 @@
+-            ret = out->writecallback(out->context,
++            if (nbchars >= INT_MAX) {
++                out->error = XML_ERR_INTERNAL_ERROR;
++                return(-1);
++            }
++
++            ret = out->writecallback(out->context,
+@@ -2650,3 +2655,8 @@
+-	ret = out->writecallback(out->context,
+-                                 (const char *)xmlBufContent(out->conv),
+-                                 xmlBufUse(out->conv));
++        size_t bufsize = xmlBufUse(out->conv);
++        if (bufsize >= INT_MAX) {
++            out->error = XML_ERR_INTERNAL_ERROR;
++            return(-1);
++        }
++	ret = out->writecallback(out->context,
++                                 (const char *)xmlBufContent(out->conv),
++                                 bufsize);
+@@ -2656,3 +2666,8 @@
+-	ret = out->writecallback(out->context,
+-                                 (const char *)xmlBufContent(out->buffer),
+-                                 xmlBufUse(out->buffer));
++        size_t bufsize = xmlBufUse(out->buffer);
++        if (bufsize >= INT_MAX) {
++            out->error = XML_ERR_INTERNAL_ERROR;
++            return(-1);
++        }
++	ret = out->writecallback(out->context,
++                                 (const char *)xmlBufContent(out->buffer),
++                                 bufsize);
+
+--- a/xinclude.c
++++ b/xinclude.c
+@@ -1435,1 +1435,3 @@
+-    inputStream = xmlLoadResource(pctxt, (const char*) url, NULL,
++    xmlCtxtUseOptions(pctxt, ctxt->parseFlags);
++
++    inputStream = xmlLoadResource(pctxt, (const char*) url, NULL,
+@@ -1445,1 +1447,2 @@
+-                 (pctxt->errNo != XML_IO_UNKNOWN))
++                 (pctxt->errNo != XML_IO_UNKNOWN) &&
++                 (pctxt->errNo != XML_IO_NETWORK_ATTEMPT))
+@@ -2179,1 +2182,1 @@
+-    return(xmlXIncludeProcessFlags(doc, 0));
++    return(xmlXIncludeProcessFlags(doc, doc ? doc->parseFlags : 0));
+@@ -2223,1 +2226,1 @@
+-    return(xmlXIncludeProcessTreeFlags(tree, 0));
++    return(xmlXIncludeProcessTreeFlags(tree, (tree && tree->doc) ? tree->doc->parseFlags : 0));

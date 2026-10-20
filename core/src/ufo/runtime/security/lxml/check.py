@@ -36,6 +36,9 @@ elif Path("/out").exists():
 
 tree = etree.ElementTree(etree.XML(b"<root><item>one</item></root>"))
 assert tree.xpath("string(/root/item)") == "one"
+assert str(objectify.fromstring(b"<root><item>one</item></root>").item) == "one"
+dtd = etree.DTD(io.StringIO("<!ELEMENT root (item)><!ELEMENT item (#PCDATA)>"))
+assert dtd.validate(tree)
 style = etree.XML(
     b'<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">'
     b'<xsl:template match="/"><out><xsl:value-of select="root/item"/></out>'
