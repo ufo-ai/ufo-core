@@ -8,15 +8,19 @@ three streams are incremental on the file's Drive `modifiedTime` — the Drive q
 server-side at or past the stored value, each record carries that time as a flat `updated_at`, and
 each page reports as its own cursor the highest `modifiedTime` the run has landed, never below the
 stored one. `sheets` explodes each spreadsheet into one record per tab; `sheet_values` reads tab
-grids in bounded `values:batchGet` calls so a synced sheet recalls as its rows, every range naming
+grids in `values:batchGet` calls so a synced sheet recalls as its rows, every range naming
 its tab as a quoted A1 sheet reference with each apostrophe doubled — an unquoted title reads as a
-cell reference against the first visible sheet, as a named range, or fails to parse. Only a `GRID`
+cell reference against the first visible sheet, as a named range, or fails to parse. A batch holds
+at most fifty ranges and a URL under the 2048-character ceiling common to URL parsers: fifty long or
+non-ASCII titles percent-encode past it, and Composio's proxy-execute refuses such an endpoint as
+`host "<invalid>"` before Google sees it. Only a `GRID`
 tab takes an A1 range: a chart (`OBJECT`) or `DATA_SOURCE` tab in a batch refuses the whole batch
 `400 INVALID_ARGUMENT`, so those tabs are never requested. The batch
 answers one `valueRange` per requested range in the order asked, so each grid lands on the tab at
 its position; the echoed `range` is the resolved A1 bounds of what the request named, not the name,
 so it identifies nothing and a count other than the one asked for is the whole fault. A batch
-refusal naming one file falls back to individual tab reads to isolate the refused tab. Both derived
+refusal naming one file, or a `400` from Google or the proxy, falls back to individual tab reads to
+isolate the refused tab; a tab whose own read answers the same is marked refused. Both derived
 streams stamp their parent file's times onto every record, and a page reports its cursor even where
 a file lands no derived record at all. The watermark is the file's, so a change Drive does not stamp
 on `modifiedTime` leaves that file's tabs as they last synced.
@@ -84,6 +88,7 @@ from urllib.parse import quote
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from ufo.sdk.o11y import warn
 from ufo.sdk.sources import (
     RestConnector,
     Run,
@@ -102,6 +107,8 @@ DRIVE_PAGE_SIZE = 1000
 PAGE_SIZE = 100
 REFUSED_LIMIT = 50
 VALUES_BATCH_SIZE = 50
+VALUES_URL_MAX_CHARS = 2000
+INVALID_RANGE_STATUS = 400
 GRID_SHEET_TYPE = "GRID"
 _METADATA_FALLBACK_STATUS = frozenset({403, 404})
 _SERVICE_ERROR_DOMAIN = "googleapis.com"
@@ -327,33 +334,19 @@ class GoogleSheetsConnector(RestConnector):
             if properties.get("sheetType", GRID_SHEET_TYPE) != GRID_SHEET_TYPE:
                 continue
             tabs.append((title, sheet_id))
-        for start in range(0, len(tabs), VALUES_BATCH_SIZE):
-            chunk = tabs[start : start + VALUES_BATCH_SIZE]
+        batch_url = f"{SHEETS_API_URL}/spreadsheets/{spreadsheet_id}/values:batchGet"
+        for chunk in _value_batches(batch_url, tabs):
             try:
                 data = await self._get(
                     client,
-                    f"{SHEETS_API_URL}/spreadsheets/{spreadsheet_id}/values:batchGet",
+                    batch_url,
                     params={
                         "ranges": [_quoted_sheet_range(title) for title, _ in chunk],
                         "majorDimension": "ROWS",
                     },
                 )
             except httpx.HTTPStatusError as error:
-                detail = google.error_detail(error)
-                if error.response.status_code == 400:
-                    reasons = "; ".join(
-                        dict.fromkeys(
-                            item["reason"]
-                            for item in list_or_empty(detail.get("errors"))
-                            + list_or_empty(detail.get("details"))
-                            if isinstance(item.get("reason"), str) and item["reason"]
-                        )
-                    )
-                    raise StreamFault(
-                        f"googlesheets: values:batchGet on spreadsheet {spreadsheet_id} refused "
-                        f"(400 {_str(detail.get('status'))})" + (f": {reasons}" if reasons else "")
-                    ) from error
-                if not _is_per_file_refusal(error.response.status_code, detail):
+                if not _is_tab_refusal(error):
                     raise
                 for title, sheet_id in chunk:
                     grid = (
@@ -365,10 +358,16 @@ class GoogleSheetsConnector(RestConnector):
                             client, grid, params={"majorDimension": "ROWS"}
                         )
                     except httpx.HTTPStatusError as tab_error:
-                        if not _is_per_file_refusal(
-                            tab_error.response.status_code, google.error_detail(tab_error)
-                        ):
+                        if not _is_tab_refusal(tab_error):
                             raise
+                        warn(
+                            "source_sync.tab_refused",
+                            connector=self.name,
+                            stream="sheet_values",
+                            spreadsheet_id=spreadsheet_id,
+                            sheet_id=sheet_id,
+                            http_status=tab_error.response.status_code,
+                        )
                         tab_refused = True
                         continue
                     records.append(_sheet_value_record(spreadsheet, title, sheet_id, value_range))
@@ -442,6 +441,13 @@ def _is_per_file_refusal(status: int, detail: dict[str, Any]) -> bool:
     )
 
 
+def _is_tab_refusal(error: httpx.HTTPStatusError) -> bool:
+    status = error.response.status_code
+    return status == INVALID_RANGE_STATUS or _is_per_file_refusal(
+        status, google.error_detail(error)
+    )
+
+
 def _is_grant_refusal(detail: dict[str, Any]) -> bool:
     if any(item.get("reason") in _GRANT_REASONS for item in list_or_empty(detail.get("errors"))):
         return True
@@ -488,6 +494,25 @@ def _sheet_value_record(
         "created_at": spreadsheet.get("created_at"),
         "updated_at": spreadsheet.get("updated_at"),
     }
+
+
+def _value_batches(batch_url: str, tabs: list[tuple[str, Any]]) -> list[list[tuple[str, Any]]]:
+    budget = VALUES_URL_MAX_CHARS - len(
+        str(httpx.URL(batch_url, params={"majorDimension": "ROWS"}))
+    )
+    batches: list[list[tuple[str, Any]]] = []
+    batch: list[tuple[str, Any]] = []
+    used = 0
+    for tab in tabs:
+        cost = len(f"&{httpx.QueryParams({'ranges': _quoted_sheet_range(tab[0])})}")
+        if batch and (len(batch) >= VALUES_BATCH_SIZE or used + cost > budget):
+            batches.append(batch)
+            batch, used = [], 0
+        batch.append(tab)
+        used += cost
+    if batch:
+        batches.append(batch)
+    return batches
 
 
 def _quoted_sheet_range(title: str) -> str:

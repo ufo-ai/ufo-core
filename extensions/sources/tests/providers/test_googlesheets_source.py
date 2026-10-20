@@ -21,10 +21,12 @@ import logging
 import re
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from ufo_ext_composio.proxy import ComposioProxyTransport
 from ufo_ext_sources.providers import googlesheets
 from ufo_ext_sources.providers.googlesheets import (
     GoogleSheetsConnector,
@@ -405,17 +407,22 @@ async def test_sheet_values_requests_only_grid_tabs() -> None:
     }
 
 
-async def test_sheet_values_fault_carries_googles_enumerated_reason_without_its_message() -> None:
-    def refused(_request: httpx.Request) -> httpx.Response:
+async def test_a_400_batch_refusal_reads_each_tab_and_marks_the_refused_one() -> None:
+    def refused(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json=NON_GRID_TAB_RANGE)
 
-    with pytest.raises(StreamFault) as raised:
-        await _fetch("sheet_values", _handler(values_response=refused))
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v4/spreadsheets/s1/values/'Summary'":
+            return httpx.Response(400, json=NON_GRID_TAB_RANGE)
+        if request.url.path == "/v4/spreadsheets/s1/values/'Detail'":
+            return httpx.Response(200, json={"range": "Detail", "values": [["Region", "West"]]})
+        return _handler(values_response=refused)(request)
 
-    assert raised.value.reason == (
-        "googlesheets: values:batchGet on spreadsheet s1 refused (400 INVALID_ARGUMENT): badRequest"
-    )
-    assert "Revenue chart" not in raised.value.reason
+    result = await _fetch("sheet_values", handle)
+
+    assert [page.source_ref for page in result.pages] == ["sheet_values/s1:1:values"]
+    assert result.next_cursor is not None
+    assert json.loads(result.next_cursor)["refused"] == ["s1"]
 
 
 AMBIGUOUS_TABS = ("Summary", "Q1", "ROI Annual Billing - Premium", "Owner's View")
@@ -1695,3 +1702,140 @@ async def test_a_derived_quota_yields_a_cursor_the_next_run_lands_the_edit_from(
         stream, "s0"
     ) | _derived_refs(stream, "s1")
     assert resumed.next_cursor == EDITED_TIME
+
+
+COMPOSIO_API = "https://composio.test/api/v3.1"
+COMPOSIO_URL_PARSE_LIMIT = 2048
+COMPOSIO_UNPARSEABLE = {
+    "error": {
+        "message": 'Proxy endpoint host "<invalid>" is on an allowed origin but its scheme is '
+        'unsafe relative to the toolkit\'s base URL "sheets.googleapis.com"'
+    }
+}
+WORKBOOK_TABS = tuple(
+    f"2026-W{week:02d} Pipeline \u2013 Ünïted Kingdom / Ireland (Q2 '26) #{week} ✓"
+    for week in range(1, 51)
+)
+UNPARSEABLE_TAB = "Ünparseable"
+
+
+def _overruns_the_parse_limit(endpoint: str) -> bool:
+    return len(endpoint) > COMPOSIO_URL_PARSE_LIMIT
+
+
+async def _fetch_through_composio(
+    provider: Callable[[httpx.Request], httpx.Response],
+    endpoints: list[str],
+    refuses: Callable[[str], bool] = _overruns_the_parse_limit,
+):
+    def composio(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        endpoints.append(payload["endpoint"])
+        if refuses(payload["endpoint"]):
+            return httpx.Response(400, json=COMPOSIO_UNPARSEABLE)
+        answer = provider(httpx.Request(payload["method"], payload["endpoint"]))
+        return httpx.Response(
+            200,
+            json={"data": {"data": answer.json(), "status": answer.status_code, "headers": {}}},
+        )
+
+    class _Proxy:
+        async def credential(self, workspace_id: UUID, provider_name: str) -> Credential:
+            return Credential(
+                transport=ComposioProxyTransport(
+                    api_base=COMPOSIO_API,
+                    api_key="test",
+                    connected_account_id="ca_sheets",
+                    inner=httpx.MockTransport(composio),
+                )
+            )
+
+    return await ConnectorBackend(connector=GoogleSheetsConnector()).fetch(
+        ConnectorSourceConfig(stream="sheet_values"),
+        None,
+        SourceAuth(workspace_id=uuid4(), auth_proxy=_Proxy()),
+    )
+
+
+def _echoed_ranges(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "valueRanges": [
+                {"range": value, "values": [[f"row of {_tab_of(value)}"]]}
+                for value in request.url.params.get_list("ranges")
+            ]
+        },
+    )
+
+
+def _workbook_handler(titles: tuple[str, ...]) -> Callable[[httpx.Request], httpx.Response]:
+    metadata = {
+        **SPREADSHEET_META,
+        "sheets": [
+            {"properties": {"sheetId": index, "title": title}} for index, title in enumerate(titles)
+        ],
+    }
+    batch = _handler(spreadsheet_meta=metadata, values_response=_echoed_ranges)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        prefix = "/v4/spreadsheets/s1/values/"
+        if request.url.path.startswith(prefix):
+            tab = _tab_of(request.url.path.removeprefix(prefix))
+            return httpx.Response(200, json={"range": tab, "values": [[f"row of {tab}"]]})
+        return batch(request)
+
+    return handle
+
+
+def test_fifty_long_tab_titles_in_one_batch_overrun_the_url_parse_limit() -> None:
+    url = httpx.URL(
+        f"{googlesheets.SHEETS_API_URL}/spreadsheets/s1/values:batchGet",
+        params={
+            "ranges": [googlesheets._quoted_sheet_range(title) for title in WORKBOOK_TABS],
+            "majorDimension": "ROWS",
+        },
+    )
+
+    assert len(str(url)) > COMPOSIO_URL_PARSE_LIMIT
+
+
+async def test_a_wide_workbook_reads_in_batches_composio_can_parse() -> None:
+    endpoints: list[str] = []
+
+    result = await _fetch_through_composio(_workbook_handler(WORKBOOK_TABS), endpoints)
+
+    batches = [endpoint for endpoint in endpoints if "/values:batchGet" in endpoint]
+    assert len(batches) > 1
+    assert all(len(endpoint) <= googlesheets.VALUES_URL_MAX_CHARS for endpoint in batches)
+    assert {page.source_ref for page in result.pages} == {
+        f"sheet_values/s1:{index}:values" for index in range(len(WORKBOOK_TABS))
+    }
+    assert "row of 2026-W50 Pipeline" in result.pages[-1].body
+    assert result.next_cursor == SPREADSHEET_FILE["modifiedTime"]
+
+
+async def test_a_tab_composio_refuses_is_marked_refused_and_the_rest_land(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    endpoints: list[str] = []
+    encoded = quote(UNPARSEABLE_TAB)
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        result = await _fetch_through_composio(
+            _workbook_handler(("Summary", UNPARSEABLE_TAB, "Detail")),
+            endpoints,
+            refuses=lambda endpoint: encoded in endpoint,
+        )
+
+    assert {page.source_ref for page in result.pages} == {
+        "sheet_values/s1:0:values",
+        "sheet_values/s1:2:values",
+    }
+    assert result.next_cursor is not None
+    assert json.loads(result.next_cursor) == {
+        "watermark": SPREADSHEET_FILE["modifiedTime"],
+        "refused": ["s1"],
+    }
+    assert sum("/values:batchGet" in endpoint for endpoint in endpoints) == 1
+    assert "source_sync.tab_refused" in {record.getMessage() for record in caplog.records}
