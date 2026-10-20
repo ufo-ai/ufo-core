@@ -44,5 +44,8 @@ ENV UFO_PREVIEW_SOFFICE_PROFILE=/usr/local/share/ufo-preview/soffice-profile
 COPY --from=build /build/target/release/ufo-preview /usr/local/bin/ufo-preview
 COPY --from=build /build/target/release/preview-worker /usr/local/bin/preview-worker
 COPY scripts/capture-site.py /usr/local/libexec/ufo-site-preview.py
+RUN rm /usr/lib/*-linux-gnu/libcjson_utils.so.* \
+    && test -z "$(find /usr /opt -name 'libcjson_utils.so*' -print -quit)" \
+    && ldconfig
 USER nobody
 ENTRYPOINT ["tini", "--", "ufo-preview"]
