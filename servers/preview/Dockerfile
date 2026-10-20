@@ -41,7 +41,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN ! command -v tiffcrop
 COPY --from=libxml2-build /out/ /tmp/libxml2/
-RUN dpkg -i /tmp/libxml2/libxml2_*.deb \
+RUN test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3' \
+    && dpkg -i /tmp/libxml2/libxml2_*.deb \
     && mkdir -p /usr/local/share/ufo-preview \
     && cp /tmp/libxml2/libxml2-provenance.json /usr/local/share/ufo-preview/ \
     && rm -rf /tmp/libxml2

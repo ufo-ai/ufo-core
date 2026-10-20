@@ -13,7 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg chromium python3 curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=libxml2-build /out/ /tmp/libxml2/
-RUN dpkg -i /tmp/libxml2/libxml2_*.deb && rm -rf /tmp/libxml2
+RUN test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3' \
+    && dpkg -i /tmp/libxml2/libxml2_*.deb && rm -rf /tmp/libxml2
 COPY scripts/fetch-pdfium.sh /tmp/fetch-pdfium.sh
 RUN sh /tmp/fetch-pdfium.sh /usr/local/lib/pdfium && rm /tmp/fetch-pdfium.sh
 ENV UFO_PREVIEW_PDFIUM_LIB=/usr/local/lib/pdfium/libpdfium.so

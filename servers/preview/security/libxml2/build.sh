@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 security=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3'
 mkdir -p /build/libxml2-source /out
 cd /build/libxml2-source
 while read -r checksum file; do
