@@ -9,6 +9,10 @@ while read -r checksum file; do
 done < "$security/SHA256SUMS"
 sha256sum -c "$security/SHA256SUMS"
 dpkg-source --no-check -x libxml2_2.12.7+dfsg+really2.9.14-2.1+deb13u3.dsc source
+curl -fLsS --retry 3 https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.14.tar.xz -o tests.tar.xz
+printf '%s\n' '60d74a257d1ccec0475e749cba2f21559e48139efba6ff28224357c7c798dfee  tests.tar.xz' | sha256sum -c -
+tar --skip-old-files -xf tests.tar.xz --strip-components=1 -C source \
+    libxml2-2.9.14/test libxml2-2.9.14/result
 cd source
 while read -r file; do
     patch --batch --fuzz=0 -p1 -i "$security/$file"

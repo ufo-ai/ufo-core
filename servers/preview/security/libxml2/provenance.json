@@ -2,6 +2,11 @@
   "source": "https://deb.debian.org/debian/pool/main/libx/libxml2/",
   "version": "2.12.7+dfsg+really2.9.14-2.1+deb13u3",
   "packageVersion": "2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo1",
+  "testCorpus": {
+    "url": "https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.14.tar.xz",
+    "sha256": "60d74a257d1ccec0475e749cba2f21559e48139efba6ff28224357c7c798dfee",
+    "paths": ["test", "result"]
+  },
   "patches": {
     "CVE-2026-86138": "https://github.com/GNOME/libxml2/commit/a4cba4b5b5a8c42e155ed42d2d2a44955465a2e4",
     "CVE-2026-86140": "https://github.com/GNOME/libxml2/commit/d1686f91dbda141a752200419d35639fd6b38340",
