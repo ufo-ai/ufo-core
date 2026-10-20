@@ -1,0 +1,11 @@
+{
+  "cve": "CVE-2026-85091",
+  "lxml": "6.1.2",
+  "libxml2": "2.14.6",
+  "libxslt": "1.1.43",
+  "libiconv": "1.18",
+  "zlib": "1.3.2",
+  "upstreamFix": "https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148",
+  "patchForm": "The exact state-reset change uses zero-context hunks for lxml's dependency patch parser.",
+  "scope": "The source wheel keeps static dependencies and applies the official zlib error-state fix to both etree and objectify. The system zlib package is a separate fix."
+}

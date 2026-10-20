@@ -42,6 +42,8 @@ BUNDLE_CLIENT_INSTALL_PATH = f"/usr/local/bin/{BUNDLE_CLIENT_BINARY_NAME}"
 BUNDLE_WHEELS_DIR = "/tmp/wheels"
 ZLIB_ASSETS = Path(__file__).parent / "runtime/security/zlib"
 BUNDLE_ZLIB_DIR = "zlib"
+LXML_ASSETS = Path(__file__).parent / "runtime/security/lxml"
+BUNDLE_LXML_DIR = "lxml"
 
 
 def wheel_name() -> str:
@@ -77,6 +79,7 @@ class Bundle:
         pins = self._pins()
         self.out.mkdir(parents=True, exist_ok=True)
         copytree(ZLIB_ASSETS, self.out / BUNDLE_ZLIB_DIR, dirs_exist_ok=True)
+        copytree(LXML_ASSETS, self.out / BUNDLE_LXML_DIR, dirs_exist_ok=True)
         config = self.out / BUNDLE_CONFIG_NAME
         config.write_text(self.config_path.read_text())
         lockfile = self.out / BUNDLE_LOCKFILE_NAME
@@ -161,6 +164,10 @@ class Bundle:
                 .read_text()
                 .split("\nFROM scratch AS packages")[0]
                 .replace("COPY . /security", f"COPY {BUNDLE_ZLIB_DIR} /security"),
+                (LXML_ASSETS / "Dockerfile")
+                .read_text()
+                .split("\nFROM scratch AS lxml-wheel")[0]
+                .replace("COPY . /lxml-security", f"COPY {BUNDLE_LXML_DIR} /lxml-security"),
                 f"FROM {DOCKERFILE_BASE} AS runtime-packages",
                 "RUN apt-get update "
                 "&& apt-get install -y --no-install-recommends libpcre2-8-0 "
@@ -178,8 +185,11 @@ class Bundle:
                 f"UFO_LOCKFILE=/app/{BUNDLE_LOCKFILE_NAME} "
                 f"{FIRST_PARTY_ENV}={first_party}",
                 f"COPY {wheels} {BUNDLE_CONSTRAINTS_NAME} {BUNDLE_WHEELS_DIR}/",
+                f"COPY --from=lxml-build /out/*.whl {BUNDLE_WHEELS_DIR}/",
+                "COPY --from=lxml-build /out/provenance.json /out/module-sha256.json "
+                "/usr/local/share/ufo-lxml-zlib/",
                 f"RUN pip install --no-cache-dir -c {BUNDLE_WHEELS_DIR}/{BUNDLE_CONSTRAINTS_NAME} "
-                f"{installed} && rm -r {BUNDLE_WHEELS_DIR}",
+                f"{installed} {BUNDLE_WHEELS_DIR}/lxml-*.whl && rm -r {BUNDLE_WHEELS_DIR}",
                 f"COPY {BUNDLE_CONFIG_NAME} {BUNDLE_LOCKFILE_NAME} /app/",
                 f"COPY --chmod=0555 {BUNDLE_CLIENT_BINARY_NAME} {BUNDLE_CLIENT_INSTALL_PATH}",
                 f"ENV UFO_CLIENT_BINARY={BUNDLE_CLIENT_INSTALL_PATH}",
