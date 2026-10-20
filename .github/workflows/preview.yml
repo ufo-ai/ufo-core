@@ -67,14 +67,19 @@ jobs:
           '
       - run: |
           docker run --rm --network none --memory 1g --entrypoint python3 ufo-preview-ci -c '
+          import os
           import subprocess
+          import tempfile
           from pathlib import Path
-          subprocess.run([
-              "chromium", "--headless", "--no-sandbox", "--disable-dev-shm-usage",
-              "--disable-gpu", "--no-first-run", "--screenshot=/tmp/chromium.png",
-              "--window-size=800,600", "data:text/html,<html><body><h1>Preview</h1><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\"><rect width=\"100\" height=\"100\" fill=\"green\"/></svg></body></html>"
-          ], check=True, timeout=30, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-          assert Path("/tmp/chromium.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+          with tempfile.TemporaryDirectory() as home:
+              shot = Path(home) / "chromium.png"
+              subprocess.run([
+                  "chromium", "--headless", "--no-sandbox", "--disable-dev-shm-usage",
+                  "--disable-gpu", "--no-first-run", f"--screenshot={shot}",
+                  f"--user-data-dir={home}/profile", "--window-size=800,600",
+                  "data:text/html,<html><body><h1>Preview</h1><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\"><rect width=\"100\" height=\"100\" fill=\"green\"/></svg></body></html>"
+              ], check=True, timeout=30, env={**os.environ, "HOME": home})
+              assert shot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
           '
       - run: |
           docker run --rm -d --name preview-ci -p 18930:8930 \
