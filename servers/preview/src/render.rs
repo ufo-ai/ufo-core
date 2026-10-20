@@ -474,8 +474,9 @@ async fn png_size(path: &Path) -> Result<(u32, u32), Refusal> {
 
 fn zip_bundle(dir: &Path, count: u32, manifest: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o644);
     zip.start_file("manifest.json", options)?;
     std::io::Write::write_all(&mut zip, manifest)?;
     for i in 1..=count {
@@ -488,8 +489,9 @@ fn zip_bundle(dir: &Path, count: u32, manifest: &[u8]) -> std::io::Result<Vec<u8
 
 fn zip_pages(dir: &Path, count: u32) -> std::io::Result<Vec<u8>> {
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o644);
     for i in 1..=count {
         let name = format!("page-{i:02}.png");
         zip.start_file(&name, options)?;
@@ -502,6 +504,53 @@ fn zip_pages(dir: &Path, count: u32) -> std::io::Result<Vec<u8>> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn zip_outputs_preserve_only_the_requested_pages_and_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let pages = [b"first page".as_slice(), b"second page".as_slice()];
+        for (i, bytes) in pages.iter().enumerate() {
+            std::fs::write(dir.path().join(format!("page-{:02}.png", i + 1)), bytes).unwrap();
+        }
+        let manifest = br#"{"kind":"pdf","page_count":2}"#;
+        for include_manifest in [false, true] {
+            let bytes = if include_manifest {
+                zip_bundle(dir.path(), 2, manifest).unwrap()
+            } else {
+                zip_pages(dir.path(), 2).unwrap()
+            };
+            let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+            let names = archive.file_names().collect::<Result<Vec<_>, _>>().unwrap();
+            let expected = if include_manifest {
+                vec!["manifest.json", "page-01.png", "page-02.png"]
+            } else {
+                vec!["page-01.png", "page-02.png"]
+            };
+            assert_eq!(names, expected);
+            for (i, name) in expected.iter().enumerate() {
+                let mut entry = archive.by_name(name).unwrap();
+                assert_eq!(entry.compression(), zip::CompressionMethod::Stored);
+                assert_eq!(entry.unix_mode().unwrap() & 0o7777, 0o644);
+                assert!(!entry.is_symlink());
+                let mut body = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut body).unwrap();
+                let expected_body = if include_manifest && i == 0 {
+                    manifest.as_slice()
+                } else {
+                    pages[i - usize::from(include_manifest)]
+                };
+                assert_eq!(body, expected_body);
+            }
+        }
+    }
+
+    #[test]
+    fn zip_outputs_fail_when_a_requested_page_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        for result in [zip_bundle(dir.path(), 1, b"{}"), zip_pages(dir.path(), 1)] {
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        }
+    }
 
     fn test_config() -> Arc<Config> {
         let mut m = HashMap::new();
