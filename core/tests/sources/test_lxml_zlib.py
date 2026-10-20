@@ -26,9 +26,10 @@ def test_lxml_build_keeps_versions_and_checks_both_embedded_libraries() -> None:
     assert "sha256sum -c" in build
     assert "--fuzz=0" in build
     assert 'test "$before" = 42' in build
-    assert "for module in etree objectify" in build
-    assert "for name in dict valid xpointer io xinclude" in build
-    assert 'timeout 60 "/checks/test-$name"' in build
+    checks = (ASSETS / "check.sh").read_text()
+    assert "for module in etree objectify" in checks
+    assert "for name in dict valid xpointer io xinclude" in checks
+    assert 'timeout 60 "/checks/test-$name"' in checks
     assert "WITHOUT_ZLIB" not in build
     check = (ASSETS / "check.py").read_text()
     assert "etree.XMLParser(decompress=True)" in check

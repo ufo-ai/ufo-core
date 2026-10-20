@@ -16,6 +16,7 @@ int main(void) {
     xmlOutputBufferPtr output = xmlOutputBufferCreateIO(write_output, NULL, NULL, NULL);
     assert(output != NULL && output->buffer != NULL);
     output->buffer->use = (size_t) INT_MAX + 1;
+    UPDATE_COMPAT(output->buffer)
     assert(xmlOutputBufferFlush(output) == -1);
     assert(output->error == XML_ERR_INTERNAL_ERROR);
     assert(calls == 0);

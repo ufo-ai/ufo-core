@@ -167,7 +167,7 @@ class Bundle:
                 (LXML_ASSETS / "Dockerfile")
                 .read_text()
                 .split("\nFROM scratch AS lxml-wheel")[0]
-                .replace("COPY . /lxml-security", f"COPY {BUNDLE_LXML_DIR} /lxml-security"),
+                .replace("COPY ", f"COPY {BUNDLE_LXML_DIR}/"),
                 f"FROM {DOCKERFILE_BASE} AS runtime-packages",
                 "RUN apt-get update "
                 "&& apt-get install -y --no-install-recommends libpcre2-8-0 "

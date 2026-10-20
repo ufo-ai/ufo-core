@@ -56,7 +56,7 @@ def test_bundle_installs_the_checked_zlib_package_before_wheels() -> None:
 
 def test_bundle_installs_the_checked_lxml_wheel_as_a_direct_requirement() -> None:
     dockerfile = _dockerfile()
-    assert "COPY lxml /lxml-security" in dockerfile
+    assert "COPY lxml/build.sh /lxml-security/build.sh" in dockerfile
     assert "RUN sh /lxml-security/build.sh" in dockerfile
     assert f"COPY --from=lxml-build /out/*.whl {BUNDLE_WHEELS_DIR}/" in dockerfile
     assert f"{BUNDLE_WHEELS_DIR}/lxml-*.whl" in dockerfile
