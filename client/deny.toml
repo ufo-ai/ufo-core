@@ -1,0 +1,4 @@
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2026-0381", allow = ["ureq@=2.12.1"], expiry = "P30D", reason = "ureq 2.12.1 uses webpki-roots 0.26.11, which only re-exports webpki-roots 1.0.10. Vulnerable root data through that wrapper remains denied." },
+]
