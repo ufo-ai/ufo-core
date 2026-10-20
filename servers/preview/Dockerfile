@@ -24,6 +24,14 @@ RUN apt-get update \
 COPY --from=zlib-security / /security
 RUN sh /security/build.sh
 
+FROM debian:trixie-slim AS libxml2-build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential debhelper liblzma-dev pkg-config rename zlib1g-dev \
+        libxml2 curl ca-certificates patch xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+COPY security/libxml2 /security/libxml2
+RUN sh /security/libxml2/build.sh
+
 FROM debian:trixie-slim AS runtime-packages
 RUN apt-get update \
     && apt-get upgrade -y \
@@ -40,6 +48,15 @@ RUN apt-get update \
     done \
     && rm -rf /var/lib/apt/lists/*
 RUN ! command -v tiffcrop
+COPY --from=zlib-build /out/ /tmp/zlib-packages/
+RUN sh /tmp/zlib-packages/install.sh /tmp/zlib-packages && rm -r /tmp/zlib-packages
+COPY --from=libxml2-build /out/ /tmp/libxml2/
+RUN test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3' \
+    && dpkg -i /tmp/libxml2/libxml2_*.deb \
+    && mkdir -p /usr/local/share/ufo-preview \
+    && cp /tmp/libxml2/libxml2-provenance.json /usr/local/share/ufo-preview/ \
+    && cp /tmp/libxml2/libxml2.sha256 /usr/local/share/ufo-preview/ \
+    && rm -rf /tmp/libxml2
 RUN set -eu; \
     find /usr/lib -type f \( -name EUC-JISX0213.so -o -name SHIFT_JISX0213.so \) -delete; \
     find /usr/lib -type f \( -name gconv-modules -o -name gconv-modules-extra.conf \) -exec sed -i '/EUC-JISX0213\|SHIFT_JISX0213/d' {} +; \
@@ -52,9 +69,6 @@ RUN set -eu; \
     test "$(printf '\244\242' | iconv -f EUC-JP -t UTF-8)" = "$(printf '\343\201\202')"; \
     test "$(printf x | iconv -f ISO-2022-JP-3 -t UTF-8)" = x; \
     test "$(printf x | iconv -f UTF-8 -t UTF-8)" = x
-
-COPY --from=zlib-build /out/ /tmp/zlib-packages/
-RUN sh /tmp/zlib-packages/install.sh /tmp/zlib-packages && rm -r /tmp/zlib-packages
 
 FROM runtime-packages AS runtime
 COPY scripts/fetch-pdfium.sh /tmp/fetch-pdfium.sh
@@ -69,6 +83,9 @@ COPY --from=build /build/target/release/preview-worker /usr/local/bin/preview-wo
 COPY scripts/capture-site.py /usr/local/libexec/ufo-site-preview.py
 RUN rm /usr/lib/*-linux-gnu/libcjson_utils.so.* \
     && test -z "$(find /usr /opt -name 'libcjson_utils.so*' -print -quit)" \
+    && test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo1' \
+    && sha256sum -c /usr/local/share/ufo-preview/libxml2.sha256 \
+    && test -z "$(find /usr/lib /usr/local/lib \( -name 'libxml2.py' -o -name 'libxml2mod*' \) -print -quit)" \
     && ldconfig
 USER nobody
 ENTRYPOINT ["tini", "--", "ufo-preview"]
