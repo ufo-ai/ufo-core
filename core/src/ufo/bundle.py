@@ -18,6 +18,7 @@ from pathlib import Path
 from shutil import copytree
 from zipfile import ZipFile
 
+from ufo.gconv import DISABLE_COMMAND
 from ufo.host.ext.loader import (
     FIRST_PARTY_ENV,
     ExtensionPin,
@@ -170,6 +171,7 @@ class Bundle:
                 "COPY --from=build /out /tmp/zlib-packages",
                 "RUN sh /tmp/zlib-packages/install.sh /tmp/zlib-packages "
                 "&& rm -r /tmp/zlib-packages",
+                f"RUN {DISABLE_COMMAND}",
                 "FROM runtime-packages AS runtime",
                 "WORKDIR /app",
                 f"ENV UFO_CONFIG=/app/{BUNDLE_CONFIG_NAME} "
