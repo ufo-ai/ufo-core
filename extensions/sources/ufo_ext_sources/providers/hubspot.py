@@ -58,6 +58,7 @@ from ufo_ext_sources.watermark import text_checkpoint
 PAGE_LIMIT = 100
 SEARCH_RESULT_WINDOW = 10_000
 _WINDOW_REPORTED = "reported"
+_SKIP_DETAIL_MAX_CHARS = 200
 _FORMS_SUBMISSIONS_LIMIT = 50
 _ANALYTICS_REPORT_LIMIT = 350
 _ANALYTICS_REPORT_START = "20000101"
@@ -955,6 +956,21 @@ class HubSpotConnector(RestConnector):
             f"({message or 'see upstream response'})"
         )
 
+    @staticmethod
+    def _site_search_refusal_reason(exc: httpx.HTTPStatusError) -> str:
+        """Site search answers a query it will not serve with a `400` naming why in `message` and
+        `category`; the provider fault drops bodies, so the skip reason is where that text lands."""
+        try:
+            body = exc.response.json()
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        message = str(body.get("message") or "see upstream response")[:_SKIP_DETAIL_MAX_CHARS]
+        category = str(body.get("category") or "")[:_SKIP_DETAIL_MAX_CHARS]
+        detail = f"{message} [{category}]" if category else message
+        return f"HubSpot site search refused stream 'knowledge_articles' (400: {detail})"
+
     async def _paginate_archived_ids(
         self,
         client: httpx.AsyncClient,
@@ -1425,9 +1441,11 @@ class HubSpotConnector(RestConnector):
                     params={"type": content_type, "limit": limit, "offset": offset},
                 )
             except httpx.HTTPStatusError as e:
-                if not self._is_result_window_refusal(e):
-                    raise
-                break
+                if self._is_result_window_refusal(e):
+                    break
+                if e.response.status_code == 400:
+                    raise StreamSkipped(self._site_search_refusal_reason(e)) from e
+                raise
             page = [row for row in data.get("results", []) or [] if isinstance(row, dict)]
             next_offset = offset + len(page)
             total = data.get("total")

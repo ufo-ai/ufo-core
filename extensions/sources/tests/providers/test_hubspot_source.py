@@ -822,3 +822,60 @@ async def test_site_search_ends_the_run_when_hubspot_refuses_the_window(
     again, _ = await _drive_site_search(handler, cursor)
 
     assert again == refs
+
+
+async def test_site_search_skips_the_stream_on_a_400_that_is_not_the_window() -> None:
+    """A site-search 400 other than the window refusal skips the stream, and the skip reason carries
+    HubSpot's bounded `message` and `category`, which the failure record never logs."""
+    message = "Invalid search query " + "x" * 1_000
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "status": "error",
+                "message": message,
+                "correlationId": "c0ffee",
+                "category": "VALIDATION_ERROR",
+            },
+        )
+
+    with pytest.raises(StreamSkipped) as skipped:
+        await _fetch("knowledge_articles", handle)
+
+    reason = skipped.value.reason
+    assert "knowledge_articles" in reason
+    assert "Invalid search query" in reason
+    assert "[VALIDATION_ERROR]" in reason
+    assert message not in reason
+    assert len(reason) < 500
+
+
+async def test_site_search_skip_reason_survives_a_body_without_json() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="Bad Request")
+
+    with pytest.raises(StreamSkipped) as skipped:
+        await _fetch("knowledge_articles", handle)
+
+    assert "see upstream response" in skipped.value.reason
+
+
+async def test_site_search_server_errors_still_fail_the_run() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"status": "error", "message": "boom"})
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _fetch("knowledge_articles", handle)
+
+
+async def test_crm_search_400_still_fails_the_run() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/crm/v3/properties/companies":
+            return httpx.Response(200, json={"results": [{"name": "hs_lastmodifieddate"}]})
+        return httpx.Response(
+            400, json={"status": "error", "message": "bad filter", "category": "VALIDATION_ERROR"}
+        )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _fetch("companies", handle)
