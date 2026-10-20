@@ -1,7 +1,7 @@
 {
   "source": "https://deb.debian.org/debian/pool/main/libx/libxml2/",
   "version": "2.12.7+dfsg+really2.9.14-2.1+deb13u3",
-  "packageVersion": "2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo2",
+  "packageVersion": "2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo3",
   "testCorpus": {
     "url": "https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.14.tar.xz",
     "sha256": "60d74a257d1ccec0475e749cba2f21559e48139efba6ff28224357c7c798dfee",

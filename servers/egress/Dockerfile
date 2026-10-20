@@ -25,11 +25,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked \
     && cp target/release/ufo-egress /usr/local/bin/ufo-egress
 
+FROM debian:trixie-slim AS zlib-build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential debhelper autoconf dpkg-dev curl ca-certificates binutils \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=zlib-security / /security
+RUN sh /security/build.sh
+
 FROM debian:stable-slim AS runtime-packages
 RUN apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=zlib-build /out/ /tmp/zlib-packages/
+RUN sh /tmp/zlib-packages/install.sh /tmp/zlib-packages && rm -r /tmp/zlib-packages
 
 RUN set -eu; \
     find /usr/lib -type f \( -name EUC-JISX0213.so -o -name SHIFT_JISX0213.so \) -delete; \
@@ -43,6 +54,7 @@ RUN set -eu; \
     test "$(printf '\244\242' | iconv -f EUC-JP -t UTF-8)" = "$(printf '\343\201\202')"; \
     test "$(printf x | iconv -f ISO-2022-JP-3 -t UTF-8)" = x; \
     test "$(printf x | iconv -f UTF-8 -t UTF-8)" = x
+
 FROM runtime-packages AS runtime
 COPY --from=build /usr/local/bin/ufo-egress /usr/local/bin/ufo-egress
 ENTRYPOINT ["ufo-egress"]

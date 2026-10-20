@@ -17,7 +17,7 @@ cd source
 while read -r file; do
     patch --batch --fuzz=0 -p1 -i "$security/$file"
 done < "$security/series"
-sed -i '1s/deb13u3)/deb13u3+ufo2)/' debian/changelog
+sed -i '1s/deb13u3)/deb13u3+ufo3)/' debian/changelog
 dpkg-buildpackage --build=any -Pnopython -us -uc -j2
 make -C builddir/main -j2 check
 for name in dict valid xpointer io xinclude catalog regexp; do
