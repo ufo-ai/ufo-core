@@ -22,6 +22,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: servers/preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+      - run: cargo audit --deny unsound
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
