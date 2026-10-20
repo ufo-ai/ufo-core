@@ -5,6 +5,9 @@ on:
   workflow_dispatch:
 
 jobs:
+  security:
+    uses: ./.github/workflows/client-advisories.yml
+
   version:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -41,7 +44,7 @@ jobs:
         with:
           workspaces: client
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-targets -- -D warnings
 
   # Benches are excluded: a `harness = false` target takes no libtest arguments, so `--all-targets`
   # would hand divan's runner flags it rejects.
@@ -60,7 +63,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --profile ci
+      - run: cargo nextest run --locked --profile ci
       # `annotate_only` keeps the report off the Checks API, which a called workflow cannot reach without
       # its caller widening the token; `require_tests` fails an empty report rather than looking like a pass.
       - uses: mikepenz/action-junit-report@v6
@@ -81,7 +84,7 @@ jobs:
       - name: The tests pass with a default gateway compiled in
         env:
           UFO_GATEWAY_URL_DEFAULT: http://127.0.0.1:9
-        run: cargo nextest run
+        run: cargo nextest run --locked
 
   # Without a CodSpeed token that is the whole gate — a bench that stopped compiling fails here —
   # because wall-clock numbers off a shared runner carry no signal.
@@ -117,7 +120,7 @@ jobs:
           working-directory: client
 
   build:
-    needs: check
+    needs: [check, security]
     strategy:
       matrix:
         include:
@@ -150,7 +153,7 @@ jobs:
           key: ${{ matrix.target }}
       - if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --release --target ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: ufo-${{ matrix.target }}

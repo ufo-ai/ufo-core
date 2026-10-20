@@ -323,8 +323,16 @@ fn document_result_from_bundle(
     let expected = std::iter::once("manifest.json")
         .chain(manifest.pages.iter().map(|page| page.file.as_str()))
         .collect::<HashSet<_>>();
-    let actual = archive.file_names().collect::<Vec<_>>();
-    if actual.len() != expected.len() || actual.iter().copied().collect::<HashSet<_>>() != expected
+    let actual = archive
+        .file_names()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| failed(format!("document render bundle entries: {error}")))?;
+    if actual.len() != expected.len()
+        || actual
+            .iter()
+            .map(|name| name.as_ref())
+            .collect::<HashSet<_>>()
+            != expected
     {
         return Err(failed("document render returned unexpected bundle entries"));
     }
@@ -630,6 +638,27 @@ mod tests {
         let error =
             document_result_from_bundle("/workspace/paper.pdf", "pdf", 2, 1, &bundle).unwrap_err();
         assert!(matches!(error, OpError::Failed(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_document_bundle_refuses_an_invalid_utf8_entry_name() {
+        const CENTRAL_DIRECTORY_FLAGS_HIGH: usize = 9;
+        const CENTRAL_DIRECTORY_NAME: usize = 46;
+        const UTF8_FLAG_HIGH: u8 = 1 << 3;
+        let mut bundle = document_bundle("pdf", 2, 1, "page-01.png");
+        let header = bundle
+            .windows(4)
+            .rposition(|bytes| bytes == b"PK\x01\x02")
+            .unwrap();
+        bundle[header + CENTRAL_DIRECTORY_FLAGS_HIGH] |= UTF8_FLAG_HIGH;
+        bundle[header + CENTRAL_DIRECTORY_NAME] = 0xff;
+        let error =
+            document_result_from_bundle("/workspace/paper.pdf", "pdf", 2, 1, &bundle).unwrap_err();
+        assert!(
+            matches!(&error, OpError::Failed(message) if message == "document render returned unexpected bundle entries"),
+            "{error:?}"
+        );
     }
 
     #[test]
