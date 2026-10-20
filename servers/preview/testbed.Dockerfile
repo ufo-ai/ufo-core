@@ -14,7 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=libxml2-build /out/ /tmp/libxml2/
 RUN test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3' \
-    && dpkg -i /tmp/libxml2/libxml2_*.deb && rm -rf /tmp/libxml2
+    && dpkg -i /tmp/libxml2/libxml2_*.deb \
+    && test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo2' \
+    && rm -rf /tmp/libxml2
 COPY scripts/fetch-pdfium.sh /tmp/fetch-pdfium.sh
 RUN set -eu; \
     find /usr/lib -type f \( -name EUC-JISX0213.so -o -name SHIFT_JISX0213.so \) -delete; \
