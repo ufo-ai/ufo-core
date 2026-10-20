@@ -51,10 +51,30 @@ jobs:
       - run: |
           docker run --rm --network none --entrypoint python3 ufo-preview-ci -c '
           import ctypes
+          import importlib.util
+          import json
+          import subprocess
           from pathlib import Path
           assert not list(Path("/usr").rglob("libcjson_utils.so*"))
           ctypes.CDLL("libcjson.so.1")
           ctypes.CDLL("librist.so.4")
+          ctypes.CDLL("libxml2.so.2").xmlCheckVersion(20914)
+          assert importlib.util.find_spec("libxml2") is None
+          provenance = json.loads(Path("/usr/local/share/ufo-preview/libxml2-provenance.json").read_text())
+          assert provenance["packageVersion"] == subprocess.check_output(
+              ["dpkg-query", "-W", "-f=${Version}", "libxml2"], text=True
+          )
+          '
+      - run: |
+          docker run --rm --network none --memory 1g --entrypoint python3 ufo-preview-ci -c '
+          import subprocess
+          from pathlib import Path
+          subprocess.run([
+              "chromium", "--headless", "--no-sandbox", "--disable-dev-shm-usage",
+              "--disable-gpu", "--no-first-run", "--screenshot=/tmp/chromium.png",
+              "--window-size=800,600", "data:text/html,<html><body><h1>Preview</h1><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\"><rect width=\"100\" height=\"100\" fill=\"green\"/></svg></body></html>"
+          ], check=True, timeout=30, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+          assert Path("/tmp/chromium.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
           '
       - run: |
           docker run --rm -d --name preview-ci -p 18930:8930 \

@@ -1,0 +1,17 @@
+{
+  "source": "https://deb.debian.org/debian/pool/main/libx/libxml2/",
+  "version": "2.12.7+dfsg+really2.9.14-2.1+deb13u3",
+  "packageVersion": "2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo1",
+  "patches": {
+    "CVE-2026-86138": "https://github.com/GNOME/libxml2/commit/a4cba4b5b5a8c42e155ed42d2d2a44955465a2e4",
+    "CVE-2026-86140": "https://github.com/GNOME/libxml2/commit/d1686f91dbda141a752200419d35639fd6b38340",
+    "CVE-2026-86142": "https://github.com/GNOME/libxml2/commit/6b3a736c0edc74ceec3d82f5252499d7911b3a58",
+    "CVE-2026-86143": "https://github.com/GNOME/libxml2/commit/90f293ba74d28b1d570920382e707586f68ebf35",
+    "CVE-2026-86144": "https://github.com/GNOME/libxml2/commit/b63cd517afecb76582dd9488c55e54ceaf50de61"
+  },
+  "adaptations": {
+    "CVE-2026-86142": "Use the older xmlXPtrErrMemory error API.",
+    "CVE-2026-86143": "Keep size_t until checks in the older Write, WriteEscape, and Flush implementations.",
+    "CVE-2026-86144": "Pass options to the older xmlLoadExternalEntity parser context; retain the older error API."
+  }
+}
