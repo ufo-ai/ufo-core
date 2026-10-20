@@ -1,0 +1,7 @@
+{
+  "source": "https://deb.debian.org/debian/pool/main/f/freetype/",
+  "version": "2.13.3+dfsg-1+deb13u1",
+  "packageVersion": "2.13.3+dfsg-1+deb13u1+ufo1",
+  "patch": "https://gitlab.freedesktop.org/freetype/freetype/-/commit/f3ca71c9900fe860849b3163a6e2c1e765b291d9",
+  "cve": "CVE-2026-95512"
+}
