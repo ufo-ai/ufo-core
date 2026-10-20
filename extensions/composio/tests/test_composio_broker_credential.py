@@ -123,6 +123,46 @@ async def test_composio_broker_transport_raises_its_own_failure_as_a_proxy_error
     assert str(raised.value) == reason
 
 
+UNPARSEABLE_ENDPOINT = (
+    'Proxy endpoint host "<invalid>" is on an allowed origin but its scheme is unsafe relative to '
+    'the toolkit\'s base URL "app.asana.com"'
+)
+
+
+async def test_composio_broker_transport_hands_its_own_refusal_through_as_a_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = uuid4()
+    owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and "/connected_accounts/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "id": ACCOUNT,
+                    "user_id": owner,
+                    "status": "ACTIVE",
+                    "toolkit": {"slug": "asana"},
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith(
+            composio_proxy.PROXY_EXECUTE_PATH
+        ):
+            return httpx.Response(400, json={"error": {"message": UNPARSEABLE_ENDPOINT}})
+        return httpx.Response(404, json={})
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+
+    credential = await ComposioBroker().credential(workspace_id, "asana", ACCOUNT)
+    async with httpx.AsyncClient(base_url=ASANA_BASE, transport=credential.transport) as http:
+        response = await http.get("/workspaces")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": {"message": UNPARSEABLE_ENDPOINT}}
+
+
 SHEETS_ACCOUNT = "ca_googlesheets_1"
 SHEETS_BASE = "https://sheets.googleapis.com/v4"
 SHEET_RANGES = ["'Summary'", "'Q1 2026'", "'Owner''s View'"]

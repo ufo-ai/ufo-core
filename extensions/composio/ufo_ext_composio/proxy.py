@@ -19,6 +19,7 @@ from ufo_ext_composio import client as composio
 
 PROXY_EXECUTE_PATH = "/tools/execute/proxy"
 PROXY_FAULT_MAX_CHARS = 300
+COMPOSIO_REFUSAL_STATUS = 400
 BINARY_REDIRECT_STATUS = 302
 BINARY_REDIRECT_BODY = (
     b"binary provider response; the bytes live on the broker file store, follow the location header"
@@ -60,7 +61,13 @@ class ComposioProxyTransport(httpx.AsyncBaseTransport):
     the provider having failed. That is a transport fault of the hop this transport is, so it
     raises as `httpx.ProxyError`, which the connector's retry envelope retries like any other
     transport error; handed through as the provider's status it read as the provider refusing the
-    request, which no connector retries and one run's worth of pages died on."""
+    request, which no connector retries and one run's worth of pages died on.
+
+    A 400 whose message does not name the request's URL never dialed it: Composio refused the
+    request itself — an endpoint it cannot parse (`host "<invalid>"`), a cross-origin endpoint, a
+    missing auth context. Sending it again draws the same answer, so it is handed through as a
+    `400` carrying Composio's body, which the connector reads as a refused request and no retry
+    envelope repeats."""
 
     api_base: str
     api_key: str
@@ -100,9 +107,20 @@ class ComposioProxyTransport(httpx.AsyncBaseTransport):
         proxy_response = await self.inner.handle_async_request(proxy_request)
         proxy_content = await proxy_response.aread()
         if proxy_response.status_code >= 400:
+            message = _proxy_message(proxy_content)
+            if (
+                proxy_response.status_code == COMPOSIO_REFUSAL_STATUS
+                and str(request.url.copy_with(query=None)) not in message
+            ):
+                return httpx.Response(
+                    status_code=COMPOSIO_REFUSAL_STATUS,
+                    headers={"content-type": "application/json"},
+                    content=proxy_content,
+                    request=request,
+                )
             raise httpx.ProxyError(
                 f"composio proxy-execute {proxy_response.status_code}: "
-                f"{_proxy_fault(proxy_content)}",
+                f"{message[:PROXY_FAULT_MAX_CHARS]}",
                 request=request,
             )
         return self._provider_response(json.loads(proxy_content.decode("utf-8")), request)
@@ -150,12 +168,12 @@ class ComposioProxyTransport(httpx.AsyncBaseTransport):
         await self.inner.aclose()
 
 
-def _proxy_fault(content: bytes) -> str:
+def _proxy_message(content: bytes) -> str:
     text = content.decode("utf-8", errors="replace")
     try:
         body = json.loads(text)
     except ValueError:
-        return text[:PROXY_FAULT_MAX_CHARS]
+        return text
     error = body.get("error") if isinstance(body, dict) else None
     message = error.get("message") if isinstance(error, dict) else None
-    return (message if isinstance(message, str) and message else text)[:PROXY_FAULT_MAX_CHARS]
+    return message if isinstance(message, str) and message else text
