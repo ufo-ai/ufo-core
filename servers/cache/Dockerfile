@@ -17,6 +17,14 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
 
+FROM debian:trixie-slim AS zlib-build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential debhelper autoconf dpkg-dev curl ca-certificates binutils \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=zlib-security / /security
+RUN sh /security/build.sh
+
 FROM debian:trixie-slim AS runtime-packages
 RUN apt-get update \
     && apt-get upgrade -y \
@@ -30,6 +38,9 @@ RUN apt-get update \
     done \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=zlib-build /out/ /tmp/zlib-packages/
+RUN sh /tmp/zlib-packages/install.sh /tmp/zlib-packages && rm -r /tmp/zlib-packages
+
 RUN set -eu; \
     find /usr/lib -type f \( -name EUC-JISX0213.so -o -name SHIFT_JISX0213.so \) -delete; \
     find /usr/lib -type f \( -name gconv-modules -o -name gconv-modules-extra.conf \) -exec sed -i '/EUC-JISX0213\|SHIFT_JISX0213/d' {} +; \
@@ -42,6 +53,7 @@ RUN set -eu; \
     test "$(printf '\244\242' | iconv -f EUC-JP -t UTF-8)" = "$(printf '\343\201\202')"; \
     test "$(printf x | iconv -f ISO-2022-JP-3 -t UTF-8)" = x; \
     test "$(printf x | iconv -f UTF-8 -t UTF-8)" = x
+
 FROM runtime-packages AS runtime
 COPY --from=build /build/target/release/ufo-cache /usr/local/bin/ufo-cache
 ENTRYPOINT ["ufo-cache"]

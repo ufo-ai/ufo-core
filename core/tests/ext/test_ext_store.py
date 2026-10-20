@@ -10,7 +10,14 @@ import ufo_ext_sample.manifest as sample
 from ufo_ext_sample.jobs import JOB_KEY, JOB_NAME
 from ufo_ext_sample.tools import NOTE_TABLE
 
-from ufo.bundle import BUNDLE_CONSTRAINTS_NAME, BUNDLE_WHEELS_DIR, Bundle, wheel_name
+from ufo.bundle import (
+    BUNDLE_CONSTRAINTS_NAME,
+    BUNDLE_WHEELS_DIR,
+    BUNDLE_ZLIB_DIR,
+    ZLIB_ASSETS,
+    Bundle,
+    wheel_name,
+)
 from ufo.db import workspace_tx
 from ufo.host.ext.loader import (
     LOCKFILE_PATH_ENV,
@@ -244,7 +251,10 @@ def test_bundle_pins_a_bundle_only_extension_and_writes_a_build_context(
     locked = Lockfile.model_validate_json(result.lockfile.read_text())
     assert {pin.name for pin in locked.extensions} == {sample.NAME}
     dockerfile = result.dockerfile.read_text()
-    assert dockerfile.startswith("FROM python:3.12-slim-trixie\n")
+    assert "FROM python:3.12-slim-trixie AS runtime-packages\n" in dockerfile
+    assert "FROM runtime-packages AS runtime\n" in dockerfile
+    for source in ZLIB_ASSETS.iterdir():
+        assert (out / BUNDLE_ZLIB_DIR / source.name).read_bytes() == source.read_bytes()
     assert "apt-get install -y --no-install-recommends libpcre2-8-0" in dockerfile
     assert (
         "dpkg --compare-versions \"$(dpkg-query -W -f='${Version}' libpcre2-8-0)\" "

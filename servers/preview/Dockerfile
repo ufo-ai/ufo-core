@@ -16,6 +16,14 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
 
+FROM debian:trixie-slim AS zlib-build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential debhelper autoconf dpkg-dev curl ca-certificates binutils \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=zlib-security / /security
+RUN sh /security/build.sh
+
 FROM debian:trixie-slim AS libxml2-build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential debhelper liblzma-dev pkg-config rename zlib1g-dev \
@@ -55,6 +63,8 @@ RUN test "$(dpkg-query -W -f='${Version}' libfreetype6)" = '2.13.3+dfsg-1+deb13u
     && mkdir -p /usr/local/share/ufo-preview \
     && cp /tmp/freetype/freetype-provenance.json /tmp/freetype/freetype.sha256 /usr/local/share/ufo-preview/ \
     && rm -rf /tmp/freetype
+COPY --from=zlib-build /out/ /tmp/zlib-packages/
+RUN sh /tmp/zlib-packages/install.sh /tmp/zlib-packages && rm -r /tmp/zlib-packages
 COPY --from=libxml2-build /out/ /tmp/libxml2/
 RUN test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3' \
     && dpkg -i /tmp/libxml2/libxml2_*.deb \
@@ -88,7 +98,7 @@ COPY --from=build /build/target/release/preview-worker /usr/local/bin/preview-wo
 COPY scripts/capture-site.py /usr/local/libexec/ufo-site-preview.py
 RUN rm /usr/lib/*-linux-gnu/libcjson_utils.so.* \
     && test -z "$(find /usr /opt -name 'libcjson_utils.so*' -print -quit)" \
-    && test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo1' \
+    && test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo2' \
     && sha256sum -c /usr/local/share/ufo-preview/libxml2.sha256 \
     && test "$(dpkg-query -W -f='${Version}' libfreetype6)" = '2.13.3+dfsg-1+deb13u1+ufo1' \
     && sha256sum -c /usr/local/share/ufo-preview/freetype.sha256 \

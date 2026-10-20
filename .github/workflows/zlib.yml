@@ -1,0 +1,54 @@
+name: zlib
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths: ["core/src/ufo/runtime/security/zlib/**", "core/src/ufo/bundle.py", "servers/cache/Dockerfile", "servers/egress/Dockerfile", ".github/workflows/zlib.yml"]
+  pull_request:
+    paths: ["core/src/ufo/runtime/security/zlib/**", "core/src/ufo/bundle.py", "servers/cache/Dockerfile", "servers/egress/Dockerfile", ".github/workflows/zlib.yml"]
+
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        family: [cache, egress, bundle]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        if: matrix.family == 'bundle'
+        with:
+          python-version: "3.12"
+      - name: Build runtime packages
+        env:
+          FAMILY: ${{ matrix.family }}
+        run: |
+          if [ "$FAMILY" = bundle ]; then
+            uv run python - <<'PY'
+          from pathlib import Path
+          from shutil import copytree
+          from ufo.bundle import Bundle, ZLIB_ASSETS
+          out = Path("/tmp/zlib-bundle")
+          out.mkdir()
+          copytree(ZLIB_ASSETS, out / "zlib")
+          bundle = Bundle(Path("ufo.toml"), None, out, (), Path("client"), "")
+          (out / "Dockerfile").write_text(bundle._dockerfile())
+          PY
+            docker build --target runtime-packages -t zlib-runtime /tmp/zlib-bundle
+          else
+            docker build --target runtime-packages \
+              --build-context zlib-security=./core/src/ufo/runtime/security/zlib \
+              -t zlib-runtime "servers/$FAMILY"
+          fi
+      - name: Check installed package state
+        run: |
+          docker run --rm --network none --entrypoint sh zlib-runtime -ec '
+            test "$(dpkg-query -W -f="\${Version}" zlib1g)" = "1:1.3.dfsg+really1.3.1-1+ufo1"
+            test -z "$(dpkg --audit)"
+            test -s /usr/local/share/ufo-zlib/provenance.json
+            ldd /usr/lib/x86_64-linux-gnu/libz.so.1
+          '
