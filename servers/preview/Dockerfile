@@ -83,7 +83,7 @@ COPY --from=build /build/target/release/preview-worker /usr/local/bin/preview-wo
 COPY scripts/capture-site.py /usr/local/libexec/ufo-site-preview.py
 RUN rm /usr/lib/*-linux-gnu/libcjson_utils.so.* \
     && test -z "$(find /usr /opt -name 'libcjson_utils.so*' -print -quit)" \
-    && test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo1' \
+    && test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo2' \
     && sha256sum -c /usr/local/share/ufo-preview/libxml2.sha256 \
     && test -z "$(find /usr/lib /usr/local/lib \( -name 'libxml2.py' -o -name 'libxml2mod*' \) -print -quit)" \
     && ldconfig
