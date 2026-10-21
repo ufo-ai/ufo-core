@@ -57,8 +57,17 @@ jobs:
           import ctypes
           import importlib.util
           import json
+          import shutil
           import subprocess
           from pathlib import Path
+          for package in ("gpg", "gpg-agent", "gpgconf", "libreoffice-writer", "libreoffice-calc", "libreoffice-impress"):
+              assert subprocess.check_output(["dpkg-query", "-W", "-f=${Status}", package], text=True) == "install ok installed"
+          for command in ("gpgsm", "gpgtar"):
+              assert shutil.which(command) is None
+              assert not Path(f"/usr/bin/{command}").exists()
+          for command in ("gpg", "gpg-agent", "gpgconf", "soffice"):
+              subprocess.run([command, "--version"], check=True, timeout=15)
+          assert not subprocess.check_output(["dpkg", "--audit"], text=True)
           assert not list(Path("/usr").rglob("libcjson_utils.so*"))
           ctypes.CDLL("libcjson.so.1")
           ctypes.CDLL("librist.so.4")

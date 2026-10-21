@@ -46,6 +46,7 @@ RUN apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         libreoffice-writer libreoffice-calc libreoffice-impress \
+        gpg gpg-agent gpgconf \
         fonts-liberation fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
         ffmpeg chromium python3 ca-certificates curl tini \
     && printf '%s\n' 'deb http://deb.debian.org/debian trixie-backports main' > /etc/apt/sources.list.d/curl-backports.list \
@@ -57,6 +58,15 @@ RUN apt-get update \
     done \
     && rm -rf /var/lib/apt/lists/*
 RUN ! command -v tiffcrop
+RUN apt-get purge -y gnupg gpgsm \
+    && for package in gpg gpg-agent gpgconf libreoffice-writer libreoffice-calc libreoffice-impress; do \
+        test "$(dpkg-query -W -f='${Status}' "$package")" = 'install ok installed' || exit 1; \
+    done \
+    && ! command -v gpgsm \
+    && ! command -v gpgtar \
+    && test ! -e /usr/bin/gpgsm \
+    && test ! -e /usr/bin/gpgtar \
+    && test -z "$(dpkg --audit)"
 COPY --from=freetype-build /out/ /tmp/freetype/
 RUN test "$(dpkg-query -W -f='${Version}' libfreetype6)" = '2.13.3+dfsg-1+deb13u1' \
     && dpkg -i /tmp/freetype/libfreetype6_*.deb \
