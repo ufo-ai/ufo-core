@@ -49,6 +49,7 @@ from e2b.template.types import BuildInfo
 from ufo.harness.sandbox.client_binary import CLIENT_BINARY_NAME, client_binary
 from ufo.runtime.skills.runtime import SystemSkillBundle, discover_skills
 from ufo.sdk.sandbox import (
+    DISTRUSTED_ROOT_CAS,
     PLAYWRIGHT_BROWSERS_DIR,
     PLAYWRIGHT_VERSION,
     SANDBOX_ENV,
@@ -57,6 +58,7 @@ from ufo.sdk.sandbox import (
     SANDBOX_SIZES,
     SANDBOX_TMPDIR,
     SANDBOX_UID,
+    SYSTEM_CA_BUNDLE,
     SYSTEM_SKILLS_ROOT,
     WORKSPACE_DIR,
 )
@@ -141,14 +143,14 @@ GH_INSTALL_COMMAND = (
     "apt-get update && apt-get install -y --no-install-recommends gh && "
     "rm -rf /var/lib/apt/lists/*"
 )
-NODE_VERSION = "24.19.0"
+NODE_VERSION = "24.22.1"
 PNPM_VERSION = "11.24.0"
 NODE_INSTALL_COMMAND = (
     'case "$(dpkg --print-architecture)" in '
     "amd64) node_arch=x64; node_sha="
-    "f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4 ;; "
+    "eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c ;; "
     "arm64) node_arch=arm64; node_sha="
-    "d28c8a5bf0a808f0ed434a1dce8c54ae98f0371c0bd86ac58abc613f73e6643f ;; "
+    "33c37be234ba8bee041961047b19160f4d7d0f164e8e246f78bdd10feff148b3 ;; "
     '*) echo "unsupported Node architecture" >&2; exit 1 ;; esac && '
     f"archive=/tmp/node-v{NODE_VERSION}-linux-${{node_arch}}.tar.gz && "
     f"curl -fsSL https://nodejs.org/dist/v{NODE_VERSION}/"
@@ -217,6 +219,19 @@ NPM_PACKAGES = (
     "pdf-lib",
     f"playwright@{PLAYWRIGHT_VERSION}",
 )
+BUNDLE_TRUST_PROBE = (
+    "import ssl, sys; "
+    "held = {value for cert in ssl.create_default_context(cafile=sys.argv[1]).get_ca_certs() "
+    "for rdn in cert['subject'] for key, value in rdn if key == 'commonName'}; "
+    f"sys.exit(not held.isdisjoint({DISTRUSTED_ROOT_CAS!r}))"
+)
+NODE_TRUST_PROBE = (
+    "const { X509Certificate } = require('crypto'); "
+    "const held = require('tls').rootCertificates"
+    ".flatMap((pem) => new X509Certificate(pem).subject.split('\\n')); "
+    f"process.exit([{', '.join(f"'CN={name}'" for name in DISTRUSTED_ROOT_CAS)}]"
+    ".some((name) => held.includes(name)) ? 1 : 0);"
+)
 SANDBOX_TEMPLATE_READY_COMMAND = f"""
 set -ex
 command -v python3 >/dev/null
@@ -234,6 +249,8 @@ command -v soffice >/dev/null
 command -v gh >/dev/null
 python3 -c 'import brotli, docx, fontTools, reportlab'
 test "$(node --version)" = "v{NODE_VERSION}"
+python3 -c "{BUNDLE_TRUST_PROBE}" {SYSTEM_CA_BUNDLE}
+node -e "{NODE_TRUST_PROBE}"
 test "$(pnpm --version)" = "{PNPM_VERSION}"
 test "$(rustc --version | cut -d' ' -f2)" = "{RUST_VERSION}"
 test "$(TMPDIR={SANDBOX_TMPDIR} python3 -c 'import tempfile; print(tempfile.gettempdir())')" \\
@@ -423,7 +440,7 @@ def build_docker_image() -> None:
     stage_client_binary()
     stage_system_skills()
     process = subprocess.run(
-        ["docker", "build", "-t", DOCKER_IMAGE_TAG, "-f", "-", str(ROOT)],
+        ["docker", "build", "--pull", "--no-cache", "-t", DOCKER_IMAGE_TAG, "-f", "-", str(ROOT)],
         input=pod_dockerfile().encode(),
         check=False,
     )
@@ -500,7 +517,8 @@ def check_published_template(name: str, expected: str) -> None:
 
 
 def _built(size: str, sizing: Sizing) -> BuildInfo:
-    """An E2B build timeout says nothing about the definition; the same inputs answer on retry."""
+    """An E2B build timeout says nothing about the definition; the same inputs answer on retry. A
+    cached layer keeps the CA bundle and unpinned packages of its build, so the cache is skipped."""
     for attempt in range(1, BUILD_ATTEMPTS + 1):
         try:
             return Template.build(
@@ -508,6 +526,7 @@ def _built(size: str, sizing: Sizing) -> BuildInfo:
                 name=template_name(size),
                 cpu_count=sizing.cpu_count,
                 memory_mb=sizing.memory_mb,
+                skip_cache=True,
             )
         except (httpx.TransportError, TimeoutException) as unreachable:
             if attempt == BUILD_ATTEMPTS:

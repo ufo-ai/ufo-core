@@ -13,6 +13,7 @@ from ufo.harness.sandbox.ingress_token import (
 )
 from ufo.harness.sandbox.session import CA_SANDBOX_PATH as CA_SANDBOX_PATH
 from ufo.harness.sandbox.session import CA_STAGING_PATH as CA_STAGING_PATH
+from ufo.harness.sandbox.session import DISTRUSTED_ROOT_CAS as DISTRUSTED_ROOT_CAS
 from ufo.harness.sandbox.session import NO_PROXY_HOSTS as NO_PROXY_HOSTS
 from ufo.harness.sandbox.session import NODE_GLOBAL_MODULES as NODE_GLOBAL_MODULES
 from ufo.harness.sandbox.session import PLAYWRIGHT_BROWSERS_DIR as PLAYWRIGHT_BROWSERS_DIR
