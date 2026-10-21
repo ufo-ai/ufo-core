@@ -12,8 +12,10 @@ from ufo_ext_sample.tools import NOTE_TABLE
 
 from ufo.bundle import (
     BUNDLE_CONSTRAINTS_NAME,
+    BUNDLE_LXML_DIR,
     BUNDLE_WHEELS_DIR,
     BUNDLE_ZLIB_DIR,
+    LXML_ASSETS,
     ZLIB_ASSETS,
     Bundle,
     wheel_name,
@@ -255,6 +257,8 @@ def test_bundle_pins_a_bundle_only_extension_and_writes_a_build_context(
     assert "FROM runtime-packages AS runtime\n" in dockerfile
     for source in ZLIB_ASSETS.iterdir():
         assert (out / BUNDLE_ZLIB_DIR / source.name).read_bytes() == source.read_bytes()
+    for source in LXML_ASSETS.iterdir():
+        assert (out / BUNDLE_LXML_DIR / source.name).read_bytes() == source.read_bytes()
     assert "apt-get install -y --no-install-recommends libpcre2-8-0" in dockerfile
     assert (
         "dpkg --compare-versions \"$(dpkg-query -W -f='${Version}' libpcre2-8-0)\" "

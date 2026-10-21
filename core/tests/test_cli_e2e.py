@@ -674,6 +674,8 @@ def test_bundle_writes_a_runnable_artifact(cli_home: CliRunner) -> None:
     assert (out / "ufo-sandbox-client").read_bytes() == b"client"
     for source in bundle.ZLIB_ASSETS.iterdir():
         assert (out / bundle.BUNDLE_ZLIB_DIR / source.name).read_bytes() == source.read_bytes()
+    for source in bundle.LXML_ASSETS.iterdir():
+        assert (out / bundle.BUNDLE_LXML_DIR / source.name).read_bytes() == source.read_bytes()
     lockfile = (out / "ufo.lock").read_text()
     assert "ufo_version" in lockfile
     assert "memory" in lockfile
