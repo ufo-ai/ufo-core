@@ -14,12 +14,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY security/libxml2 /security/libxml2
 RUN sh /security/libxml2/build.sh
 
+FROM debian:trixie-slim AS freetype-build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential debhelper autoconf bzip2 gettext libbrotli-dev \
+        libbz2-dev libpng-dev libtool pkgconf zlib1g-dev libfreetype6 \
+        fonts-dejavu-core curl ca-certificates patch xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+COPY security/freetype /security/freetype
+RUN sh /security/freetype/build.sh
+
 FROM rust:1
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer libreoffice-calc libreoffice-impress \
         fonts-liberation fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
         ffmpeg chromium python3 curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=freetype-build /out/ /tmp/freetype/
+RUN test "$(dpkg-query -W -f='${Version}' libfreetype6)" = '2.13.3+dfsg-1+deb13u1' \
+    && dpkg -i /tmp/freetype/libfreetype6_*.deb \
+    && test "$(dpkg-query -W -f='${Version}' libfreetype6)" = '2.13.3+dfsg-1+deb13u1+ufo1' \
+    && rm -rf /tmp/freetype
 COPY --from=zlib-build /out/ /tmp/zlib-packages/
 RUN sh /tmp/zlib-packages/install.sh /tmp/zlib-packages && rm -r /tmp/zlib-packages
 COPY --from=libxml2-build /out/ /tmp/libxml2/
