@@ -517,9 +517,8 @@ def check_published_template(name: str, expected: str) -> None:
 
 
 def _built(size: str, sizing: Sizing) -> BuildInfo:
-    """An E2B build timeout says nothing about the definition; the same inputs answer on retry.
-    The cache is skipped because a cached layer keeps the CA bundle and unpinned packages of the
-    build that made it, which no digest input moves."""
+    """An E2B build timeout says nothing about the definition; the same inputs answer on retry. A
+    cached layer keeps the CA bundle and unpinned packages of its build, so the cache is skipped."""
     for attempt in range(1, BUILD_ATTEMPTS + 1):
         try:
             return Template.build(
