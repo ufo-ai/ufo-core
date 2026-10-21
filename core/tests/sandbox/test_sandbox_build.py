@@ -7,13 +7,19 @@ render targets (E2B template, Docker image) share `apply_layers`, so this offlin
 Dockerfile render also covers what the E2B template bakes."""
 
 import json
+import subprocess
 import sys
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 from e2b.exceptions import BuildException, SandboxException, TimeoutException
 from e2b.template.types import BuildInfo
 
@@ -21,11 +27,13 @@ import sandbox.build_template as build_template
 from sandbox.build_template import (
     APT_HTTPS_COMMAND,
     APT_PACKAGES,
+    BUNDLE_TRUST_PROBE,
     CLIENT_ROOT_FILES,
     CLIENT_SOURCE_DIRS,
     CLIENT_STAGE_PATH,
     GH_INSTALL_COMMAND,
     NODE_INSTALL_COMMAND,
+    NODE_TRUST_PROBE,
     NPM_PACKAGES,
     PIP_PACKAGES,
     PNPM_VERSION,
@@ -49,11 +57,13 @@ from sandbox.build_template import (
 from ufo.harness.sandbox.session import SYSTEM_SKILLS_BAKED_ENV
 from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY
 from ufo.sdk.sandbox import (
+    DISTRUSTED_ROOT_CAS,
     PLAYWRIGHT_VERSION,
     SANDBOX_GID,
     SANDBOX_RUNS_ROOT,
     SANDBOX_SIZES,
     SANDBOX_UID,
+    SYSTEM_CA_BUNDLE,
     SYSTEM_SKILLS_ROOT,
 )
 
@@ -223,6 +233,8 @@ def _check_ready_probe_checks_every_baked_entrypoint() -> None:
     ):
         assert f"command -v {tool}" in SANDBOX_TEMPLATE_READY_COMMAND
     assert "chromium" in SANDBOX_TEMPLATE_READY_COMMAND
+    assert f'python3 -c "{BUNDLE_TRUST_PROBE}" {SYSTEM_CA_BUNDLE}' in SANDBOX_TEMPLATE_READY_COMMAND
+    assert f'node -e "{NODE_TRUST_PROBE}"' in SANDBOX_TEMPLATE_READY_COMMAND
 
 
 def _check_scratch_resolves_onto_the_disk_not_the_memory_backed_tmpfs() -> None:
@@ -447,7 +459,7 @@ def test_publish_builds_every_tier_and_prints_the_size_map(monkeypatch, capsys) 
     ]
 
     assert built == [
-        {"cpu_count": sizing.cpu_count, "memory_mb": sizing.memory_mb}
+        {"cpu_count": sizing.cpu_count, "memory_mb": sizing.memory_mb, "skip_cache": True}
         for sizing in SANDBOX_TIERS.values()
     ]
     assert capsys.readouterr().out == (
@@ -564,6 +576,37 @@ def test_check_reads_every_tier_against_its_own_digest(monkeypatch) -> None:
         (template_name(size), build_definition_digest(sizing))
         for size, sizing in SANDBOX_TIERS.items()
     ]
+
+
+def _root_pem(common_name: str) -> bytes:
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = datetime.now(UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return certificate.public_bytes(serialization.Encoding.PEM)
+
+
+@pytest.mark.parametrize("distrusted", DISTRUSTED_ROOT_CAS)
+def test_the_bundle_probe_fails_only_a_bundle_holding_a_distrusted_root(
+    tmp_path, distrusted: str
+) -> None:
+    clean = tmp_path / "clean.pem"
+    clean.write_bytes(_root_pem("ufo test root"))
+    held = tmp_path / "held.pem"
+    held.write_bytes(_root_pem("ufo test root") + _root_pem(distrusted))
+    probe = [sys.executable, "-c", BUNDLE_TRUST_PROBE]
+    assert subprocess.run([*probe, str(clean)], check=False).returncode == 0
+    assert subprocess.run([*probe, str(held)], check=False).returncode == 1
 
 
 def test_sandbox_build_contract() -> None:

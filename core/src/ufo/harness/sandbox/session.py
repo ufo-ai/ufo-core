@@ -286,6 +286,10 @@ inside it. Exempting loopback grants no reach a raw socket does not already have
 CA_STAGING_PATH = "/root/.ufo-egress-ca.pem"
 CA_SANDBOX_PATH = "/usr/local/share/ca-certificates/ufo-egress-ca.crt"
 SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+DISTRUSTED_ROOT_CAS = ("emSign ECC Root CA - G3", "AAA Certificate Services")
+"""The roots eMudhra's compromised `EM DV TLS CA - G3B` intermediate chains to (CVE-2026-111943);
+a sandbox trust store holding either accepts any certificate that intermediate signs."""
+NODE_SYSTEM_CA_OPTIONS = "--use-openssl-ca"
 PROXY_PASSWORD = "ufo"
 NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
 PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
@@ -336,7 +340,9 @@ def egress_proxy_env(proxy: "ProxyEndpoint", run_token: str) -> dict[str, str]:
     the non-empty password makes `urllib` send authentication. `NO_PROXY` exempts the sandbox's own
     loopback services, the model keys are the sentinels the proxy swaps for real keys on the wire,
     and the CA is the one written into the sandbox so the proxy can terminate target TLS the
-    sandbox trusts. Off-cluster means the public base is required — absent it (the check `serve`
+    sandbox trusts. Node reads the system bundle too (`--use-openssl-ca` under `SSL_CERT_FILE`)
+    rather than the roots compiled into its binary, so one store answers for every client in the
+    box. Off-cluster means the public base is required — absent it (the check `serve`
     applies at boot), the sandbox would have no metered route out, so this fails loud rather than
     build an open sandbox."""
     if proxy.public_url is None:
@@ -366,6 +372,7 @@ def egress_proxy_env(proxy: "ProxyEndpoint", run_token: str) -> dict[str, str]:
         "REQUESTS_CA_BUNDLE": SYSTEM_CA_BUNDLE,
         "CURL_CA_BUNDLE": SYSTEM_CA_BUNDLE,
         "NODE_EXTRA_CA_CERTS": CA_SANDBOX_PATH,
+        "NODE_OPTIONS": NODE_SYSTEM_CA_OPTIONS,
     }
 
 

@@ -90,6 +90,7 @@ def _check_egress_proxy_env_embeds_run_token_and_sentinels() -> None:
     assert env["OPENAI_API_KEY"] == SENTINEL_MODEL_KEY
     assert env["NO_PROXY"] == env["no_proxy"] == NO_PROXY_HOSTS
     assert env["NODE_EXTRA_CA_CERTS"] == CA_SANDBOX_PATH
+    assert env["NODE_OPTIONS"] == "--use-openssl-ca"
 
 
 def _check_egress_proxy_env_refuses_missing_or_http_url() -> None:
