@@ -723,102 +723,44 @@ async def test_companies_search_reanchors_at_the_result_window() -> None:
     assert max(seen_after) == HUBSPOT_RESULT_WINDOW - 100
 
 
-def _site_search_handler(
-    seen: list[int], *, total: int, refuses_past: int = HUBSPOT_RESULT_WINDOW
-) -> Callable[[httpx.Request], httpx.Response]:
+async def test_knowledge_articles_list_the_knowledge_base_by_cursor() -> None:
+    seen: list[httpx.URL] = []
+
     def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path != "/cms/v3/site-search/search":
-            return httpx.Response(404, json={"path": request.url.path})
-        offset = int(request.url.params["offset"])
-        limit = int(request.url.params["limit"])
-        seen.append(offset)
-        if offset + limit > refuses_past:
+        seen.append(request.url)
+        if request.url.path != "/cms/knowledge-base/2027-03-beta/articles":
+            return httpx.Response(400, json={"message": "required attributes are not set [q]"})
+        article = {
+            "title": "Reset a password",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-02-01T00:00:00Z",
+        }
+        if request.url.params.get("after") is None:
             return httpx.Response(
-                400,
+                200,
                 json={
-                    "status": "error",
-                    "message": (
-                        "Result window is too large, count + offset must be less than or equal "
-                        f"to: {refuses_past} but was {offset + limit}"
-                    ),
+                    "results": [{**article, "id": "kb1"}],
+                    "paging": {"next": {"after": "MjU="}},
                 },
             )
+        return httpx.Response(200, json={"results": [{**article, "id": "kb2"}]})
+
+    result = await _fetch("knowledge_articles", handle)
+    assert [url.params.get("after") for url in seen] == [None, "MjU="]
+    assert {page.source_ref for page in result.pages} == {
+        "knowledge_articles/kb1",
+        "knowledge_articles/kb2",
+    }
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
+
+
+async def test_knowledge_articles_skip_when_the_knowledge_base_scope_is_missing() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
-            200,
-            json={
-                "total": total,
-                "offset": offset,
-                "limit": limit,
-                "results": [
-                    {"id": f"ka{index}", "title": f"Article {index}"}
-                    for index in range(offset, min(offset + limit, total))
-                ],
-            },
+            403,
+            json={"message": "This app hasn't been granted all required scopes to make this call."},
         )
 
-    return handle
-
-
-async def _drive_site_search(
-    handler: Callable[[httpx.Request], httpx.Response], cursor: str | None = None
-) -> tuple[list[str], str | None]:
-    refs: list[str] = []
-    for _ in range(5):
-        result = await _fetch("knowledge_articles", handler, cursor=cursor)
-        refs.extend(page.source_ref for page in result.pages)
-        cursor = result.next_cursor
-        if len(result.pages) < MAX_RECORDS_PER_RUN:
-            return refs, cursor
-    raise AssertionError("knowledge_articles did not finish within five runs")
-
-
-async def test_site_search_stops_at_the_result_window(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The walk ends at the window HubSpot serves, reports the content past it once, and asks for
-    no page the endpoint answers with a 400."""
-    seen: list[int] = []
-
-    with caplog.at_level(logging.WARNING):
-        refs, cursor = await _drive_site_search(
-            _site_search_handler(seen, total=HUBSPOT_RESULT_WINDOW + 150)
-        )
-
-    assert refs == [f"knowledge_articles/ka{index}" for index in range(HUBSPOT_RESULT_WINDOW)]
-    assert seen == sorted(set(seen))
-    assert max(seen) + 100 <= HUBSPOT_RESULT_WINDOW
-    reached = [
-        record.ufo for record in caplog.records if record.msg == "source_sync.result_window_reached"
-    ]
-    assert [fields["window"] for fields in reached] == [HUBSPOT_RESULT_WINDOW]
-    assert reached[0]["stream"] == "knowledge_articles"
-
-    caplog.clear()
-    seen.clear()
-    with caplog.at_level(logging.WARNING):
-        again, _ = await _drive_site_search(
-            _site_search_handler(seen, total=HUBSPOT_RESULT_WINDOW + 150), cursor
-        )
-
-    assert again == refs
-    assert "source_sync.result_window_reached" not in {record.msg for record in caplog.records}
-
-
-async def test_site_search_ends_the_run_when_hubspot_refuses_the_window(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A portal whose window closes earlier than the documented 10,000 results refuses the page with
-    a 400: the run keeps what it read and ends, rather than failing every run forever."""
-    seen: list[int] = []
-    handler = _site_search_handler(seen, total=HUBSPOT_RESULT_WINDOW + 150, refuses_past=9_000)
-
-    with caplog.at_level(logging.WARNING):
-        refs, cursor = await _drive_site_search(handler)
-
-    assert refs == [f"knowledge_articles/ka{index}" for index in range(9_000)]
-    assert [record.msg for record in caplog.records].count("source_sync.result_window_reached") == 1
-
-    caplog.clear()
-    again, _ = await _drive_site_search(handler, cursor)
-
-    assert again == refs
+    with pytest.raises(StreamSkipped):
+        await _fetch("knowledge_articles", handle)

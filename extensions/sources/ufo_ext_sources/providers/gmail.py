@@ -19,12 +19,13 @@ leaves backfill mode instead of re-enumerating itself every interval. With a cur
 `GET /gmail/v1/users/me/history` from that id names the messages added and deleted since (label
 moves surface as add/delete pairs), the net-added ids are body-fetched, and the deleted ids land as
 tombstones alongside the new `historyId`. A `404` on the history walk means the id aged out of
-Gmail's window, so the connector raises `CursorExpired` and core refetches from scratch — the next
-run backfills the same pinned window, never a fresh one; a grant that lacks the scope (`401`/`403`)
-yields `StreamSkipped` so the run records a skip, not a failure, while a refusal naming a usage
-limit instead of the grant raises (`ufo_ext_sources.providers.google`); a message that vanished
-between the
-history walk and its body fetch (`404`) is skipped. The credential is resolved through the auth
+Gmail's window and a `400` `FAILED_PRECONDITION` means Gmail will not walk from it, so either raises
+`CursorExpired` and core refetches from scratch — the next run backfills the same pinned window,
+never a fresh one; a grant that lacks the scope (`401`/`403`) yields `StreamSkipped` so the run
+records a skip, not a failure, while a refusal naming a usage limit instead of the grant raises
+(`ufo_ext_sources.providers.google`); a message that vanished between the history walk and its body
+fetch (`404`) is skipped, and one Gmail refuses to serve (`400` `FAILED_PRECONDITION`) is skipped
+with a warning so it does not fail the rest of the run. The credential is resolved through the auth
 proxy the runner threads — this connector holds no token. The write path is intentionally absent —
 the source seam only reads."""
 
@@ -37,6 +38,7 @@ from typing import Any
 
 import httpx
 
+from ufo.sdk.o11y import warn
 from ufo.sdk.sources import (
     MAIL_BACKFILL_WINDOW_DAYS,
     CursorExpired,
@@ -54,6 +56,7 @@ HISTORY_PATH = "/gmail/v1/users/me/history"
 PROFILE_PATH = "/gmail/v1/users/me/profile"
 LIST_PAGE_SIZE = 500
 BODIES_CHUNK_SIZE = 200
+FAILED_PRECONDITION = "FAILED_PRECONDITION"
 _HEADER_INTEREST = frozenset({"from", "to", "cc", "subject"})
 _BLOCK_TAGS = frozenset(
     {
@@ -168,7 +171,7 @@ class GmailConnector(RestConnector):
                     client, f"{MESSAGES_PATH}/{added[0]}", params={"format": "minimal"}
                 )
             except httpx.HTTPStatusError as error:
-                if error.response.status_code != 404:
+                if error.response.status_code != 404 and not _failed_precondition(error):
                     raise
             else:
                 newest_history_id = newest.get("historyId")
@@ -179,7 +182,8 @@ class GmailConnector(RestConnector):
     async def _history(
         self, client: httpx.AsyncClient, history_id: str
     ) -> tuple[list[str], list[str], str | None]:
-        """A `404` means the id aged out of Gmail's history window."""
+        """A `404` means the id aged out of Gmail's history window, and a `400`
+        `FAILED_PRECONDITION` means Gmail refuses to walk from it."""
         params: dict[str, Any] = {
             "startHistoryId": history_id,
             "maxResults": LIST_PAGE_SIZE,
@@ -206,7 +210,7 @@ class GmailConnector(RestConnector):
                 if not isinstance(token, str) or not token:
                     break
         except httpx.HTTPStatusError as error:
-            if error.response.status_code == 404:
+            if error.response.status_code == 404 or _failed_precondition(error):
                 raise CursorExpired(f"gmail historyId {history_id} expired") from error
             raise
         return list(added - deleted), list(deleted), next_history
@@ -222,6 +226,16 @@ class GmailConnector(RestConnector):
                 )
             except httpx.HTTPStatusError as error:
                 if error.response.status_code == 404:
+                    continue
+                if _failed_precondition(error):
+                    warn(
+                        "source_sync.record_skipped",
+                        connector=self.name,
+                        stream="messages",
+                        message_id=message_id,
+                        http_status=error.response.status_code,
+                        reason=FAILED_PRECONDITION,
+                    )
                     continue
                 raise
             records.append(_flatten_message(raw))
@@ -248,6 +262,13 @@ class GmailConnector(RestConnector):
             _message_body(record),
         ]
         return title, "\n\n".join(part for part in parts if part).strip()
+
+
+def _failed_precondition(error: httpx.HTTPStatusError) -> bool:
+    return (
+        error.response.status_code == 400
+        and google.error_detail(error).get("status") == FAILED_PRECONDITION
+    )
 
 
 def _message_ids(entries: Any) -> list[str]:

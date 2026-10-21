@@ -57,7 +57,6 @@ from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_LIMIT = 100
 SEARCH_RESULT_WINDOW = 10_000
-_WINDOW_REPORTED = "reported"
 _FORMS_SUBMISSIONS_LIMIT = 50
 _ANALYTICS_REPORT_LIMIT = 350
 _ANALYTICS_REPORT_START = "20000101"
@@ -116,7 +115,7 @@ _GET_PRODUCT_API_PATHS: dict[str, str] = {
     "marketing_events": "/marketing/marketing-events/2026-03",
     "forms": "/marketing/v3/forms",
     "conversations": "/conversations/v3/conversations/threads",
-    "knowledge_articles": "/cms/v3/site-search/search",
+    "knowledge_articles": "/cms/knowledge-base/2027-03-beta/articles",
     "site_pages": "/cms/pages/2026-03/site-pages",
     "landing_pages": "/cms/pages/2026-03/landing-pages",
     "blog_posts": "/cms/blogs/2026-03/posts",
@@ -277,17 +276,6 @@ def _past_result_window(offset: str | int) -> bool:
     search endpoints reject with `400 Result window is too large`."""
     start = int(offset) if isinstance(offset, int) or offset.isdecimal() else 0
     return start + PAGE_LIMIT > SEARCH_RESULT_WINDOW
-
-
-def _site_search_resume(cursor: str | None) -> tuple[bool, int]:
-    """The site-search walk's checkpoint read back: whether the result window was already reported,
-    and the offset the walk resumes at."""
-    reported, _, offset = (cursor or "").rpartition(":")
-    return reported == _WINDOW_REPORTED, int(offset) if offset.isdecimal() else 0
-
-
-def _site_search_checkpoint(reported: bool, *, offset: int) -> str:
-    return f"{_WINDOW_REPORTED}:{offset}" if reported else str(offset)
 
 
 def _stream(
@@ -475,6 +463,8 @@ CONVERSATION_MESSAGES = _product_api_stream(
 KNOWLEDGE_ARTICLES = _product_api_stream(
     "knowledge_articles",
     source_object="knowledge_articles",
+    cursor_field="updatedAt",
+    pagination=_hubspot_get_pagination("/cms/knowledge-base/2027-03-beta/articles"),
     canonical=True,
 )
 CAMPAIGN_ASSETS = _product_api_stream(
@@ -761,8 +751,6 @@ class HubSpotConnector(RestConnector):
                 name = item.get("name")
                 if isinstance(name, str):
                     flat[name] = item.get("value")
-        if stream.name == "knowledge_articles":
-            flat["publishedDate"] = _normalize_epoch_millis(flat.get("publishedDate"))
         if stream.name == "email_events":
             flat["createdAt"] = _normalize_epoch_millis(flat.get("created"))
         return flat
@@ -1010,9 +998,6 @@ class HubSpotConnector(RestConnector):
         ] = {
             "owner_teams": self._paginate_owner_teams,
             "lists": self._paginate_lists,
-            "knowledge_articles": partial(
-                self._paginate_site_search, content_type="KNOWLEDGE_ARTICLE", cursor=cursor
-            ),
             "analytics_views": self._paginate_analytics_views,
             "analytics_reports": self._paginate_analytics_reports,
             "event_types": self._paginate_event_types,
@@ -1405,50 +1390,6 @@ class HubSpotConnector(RestConnector):
                 offset = next_offset
             else:
                 offset += len(page)
-
-    async def _paginate_site_search(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        content_type: str,
-        cursor: str | None,
-    ) -> AsyncIterator[StreamPage]:
-        """HubSpot site search pages by offset, orders on relevance, and stops at a 10,000-result
-        window."""
-        reported, offset = _site_search_resume(cursor)
-        while offset < SEARCH_RESULT_WINDOW:
-            limit = min(PAGE_LIMIT, SEARCH_RESULT_WINDOW - offset)
-            try:
-                data = await self._get(
-                    client,
-                    "/cms/v3/site-search/search",
-                    params={"type": content_type, "limit": limit, "offset": offset},
-                )
-            except httpx.HTTPStatusError as e:
-                if not self._is_result_window_refusal(e):
-                    raise
-                break
-            page = [row for row in data.get("results", []) or [] if isinstance(row, dict)]
-            next_offset = offset + len(page)
-            total = data.get("total")
-            if not page or not isinstance(total, int) or next_offset >= total:
-                yield StreamPage(
-                    records=page, next_cursor=_site_search_checkpoint(reported, offset=0)
-                )
-                return
-            yield StreamPage(
-                records=page, next_cursor=_site_search_checkpoint(reported, offset=next_offset)
-            )
-            offset = next_offset
-        if not reported:
-            warn(
-                "source_sync.result_window_reached",
-                connector=self.name,
-                stream="knowledge_articles",
-                content_type=content_type,
-                window=SEARCH_RESULT_WINDOW,
-            )
-        yield StreamPage(next_cursor=_site_search_checkpoint(True, offset=0))
 
     async def _paginate_analytics_views(
         self,

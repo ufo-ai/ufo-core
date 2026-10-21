@@ -8,6 +8,7 @@ block over the plain-text body, never the raw base64/multipart markers. Offline 
 transport, no DB, no token, no broker."""
 
 import base64
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -251,6 +252,80 @@ async def test_expired_history_id_raises_cursor_expired() -> None:
     except CursorExpired:
         return
     raise AssertionError("a 404 on history.list must raise CursorExpired")
+
+
+def _failed_precondition() -> httpx.Response:
+    return httpx.Response(
+        400,
+        json={
+            "error": {
+                "code": 400,
+                "message": "Precondition check failed.",
+                "errors": [{"reason": "failedPrecondition"}],
+                "status": "FAILED_PRECONDITION",
+            }
+        },
+    )
+
+
+async def test_failed_precondition_on_history_raises_cursor_expired() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/gmail/v1/users/me/history":
+            return _failed_precondition()
+        return httpx.Response(404, json={"path": request.url.path})
+
+    with pytest.raises(CursorExpired):
+        await _fetch(handle, cursor="9001")
+
+
+async def test_a_message_gmail_refuses_to_serve_is_skipped_and_the_run_lands_the_rest(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/gmail/v1/users/me/history":
+            return httpx.Response(
+                200,
+                json={
+                    "history": [
+                        {"messagesAdded": [{"message": {"id": "m2"}}]},
+                        {"messagesAdded": [{"message": {"id": "m3"}}]},
+                    ],
+                    "historyId": "9100",
+                },
+            )
+        if path == "/gmail/v1/users/me/messages/m2":
+            return _failed_precondition()
+        if path.startswith("/gmail/v1/users/me/messages/"):
+            return _get(path.rsplit("/", 1)[-1], request)
+        return httpx.Response(404, json={"path": path})
+
+    with caplog.at_level(logging.WARNING):
+        result = await _fetch(handle, cursor="9001")
+
+    assert {page.source_ref for page in result.pages} == {"messages/m3"}
+    assert result.next_cursor == "9100"
+    skipped = [
+        record.ufo for record in caplog.records if record.msg == "source_sync.record_skipped"
+    ]
+    assert [fields["message_id"] for fields in skipped] == ["m2"]
+
+
+async def test_any_other_bad_request_on_a_message_still_fails_the_run() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/gmail/v1/users/me/history":
+            return httpx.Response(
+                200,
+                json={"history": [{"messagesAdded": [{"message": {"id": "m3"}}]}]},
+            )
+        return httpx.Response(
+            400,
+            json={"error": {"code": 400, "message": "Invalid id", "status": "INVALID_ARGUMENT"}},
+        )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _fetch(handle, cursor="9001")
 
 
 async def test_scope_refusal_yields_stream_skipped() -> None:
