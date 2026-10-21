@@ -41,3 +41,14 @@ def test_bundle_names_the_distributions_the_loader_trusts(monkeypatch: pytest.Mo
     assert "UFO_FIRST_PARTY_DISTRIBUTIONS=ufo\n" in _dockerfile()
     monkeypatch.setenv("UFO_FIRST_PARTY_DISTRIBUTIONS", "acme")
     assert "UFO_FIRST_PARTY_DISTRIBUTIONS=acme,ufo\n" in _dockerfile()
+
+
+def test_bundle_installs_the_checked_zlib_package_before_wheels() -> None:
+    dockerfile = _dockerfile()
+    assert "COPY zlib /security" in dockerfile
+    assert "RUN sh /security/build.sh" in dockerfile
+    assert "COPY --from=build /out /tmp/zlib-packages" in dockerfile
+    assert "sh /tmp/zlib-packages/install.sh /tmp/zlib-packages" in dockerfile
+    assert dockerfile.index("sh /tmp/zlib-packages/install.sh") < dockerfile.index(
+        "RUN pip install"
+    )

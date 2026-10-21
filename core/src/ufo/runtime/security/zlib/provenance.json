@@ -1,0 +1,11 @@
+{
+  "source": "https://deb.debian.org/debian/pool/main/z/zlib/",
+  "sourceVersion": "1:1.3.dfsg+really1.3.1-1",
+  "stockBinaryVersion": "1:1.3.dfsg+really1.3.1-1+b1",
+  "packageVersion": "1:1.3.dfsg+really1.3.1-1+ufo1",
+  "cve": "CVE-2026-85091",
+  "upstreamFix": "https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148",
+  "adaptation": "Reset retained caller input in the older fatal gz_comp error branch. Preserve the older return value and error handling. The older source has no nonblocking again field.",
+  "regression": "Inspect pending input and its pointer after a direct or compressed /dev/full write error. No gzclearerr, follow-up write, or overflow probe is used.",
+  "debianAdvisory": "https://security-tracker.debian.org/tracker/CVE-2026-85091"
+}
