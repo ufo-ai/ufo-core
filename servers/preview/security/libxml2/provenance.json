@@ -1,7 +1,7 @@
 {
   "source": "https://deb.debian.org/debian/pool/main/libx/libxml2/",
   "version": "2.12.7+dfsg+really2.9.14-2.1+deb13u3",
-  "packageVersion": "2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo2",
+  "packageVersion": "2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo3",
   "testCorpus": {
     "url": "https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.14.tar.xz",
     "sha256": "60d74a257d1ccec0475e749cba2f21559e48139efba6ff28224357c7c798dfee",
@@ -13,11 +13,13 @@
     "CVE-2026-86142": "https://github.com/GNOME/libxml2/commit/6b3a736c0edc74ceec3d82f5252499d7911b3a58",
     "CVE-2026-86143": "https://github.com/GNOME/libxml2/commit/90f293ba74d28b1d570920382e707586f68ebf35",
     "CVE-2026-86144": "https://github.com/GNOME/libxml2/commit/b63cd517afecb76582dd9488c55e54ceaf50de61",
-    "CVE-2026-76781": "https://github.com/GNOME/libxml2/commit/c63248941708bc1d2e3a4292954593312212f6ca"
+    "CVE-2026-76781": "https://github.com/GNOME/libxml2/commit/c63248941708bc1d2e3a4292954593312212f6ca",
+    "CVE-2026-86141": "https://github.com/GNOME/libxml2/commit/e89a8aae4c9b40cdafcf66b3f9e57c62db37bb55"
   },
   "adaptations": {
     "CVE-2026-86142": "Use the older xmlXPtrErrMemory error API.",
     "CVE-2026-86143": "Keep size_t until checks in the older Write, WriteEscape, and Flush implementations.",
-    "CVE-2026-86144": "Pass options to the older xmlLoadExternalEntity parser context; retain the older error API."
+    "CVE-2026-86144": "Pass options to the older xmlLoadExternalEntity parser context; retain the older error API.",
+    "CVE-2026-86141": "The older parser has no length field. Add the allocation check before it can return a context with a null string."
   }
 }
