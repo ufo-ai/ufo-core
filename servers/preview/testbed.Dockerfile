@@ -14,6 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY security/libxml2 /security/libxml2
 RUN sh /security/libxml2/build.sh
 
+FROM debian:trixie-slim AS freetype-build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential debhelper autoconf bzip2 gettext libbrotli-dev \
+        libbz2-dev libpng-dev libtool pkgconf zlib1g-dev libfreetype6 \
+        fonts-dejavu-core curl ca-certificates patch xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+COPY security/freetype /security/freetype
+RUN sh /security/freetype/build.sh
+
 FROM rust:1
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer libreoffice-calc libreoffice-impress \
@@ -30,12 +39,17 @@ RUN apt-get purge -y gnupg gpgsm \
     && test ! -e /usr/bin/gpgsm \
     && test ! -e /usr/bin/gpgtar \
     && test -z "$(dpkg --audit)"
+COPY --from=freetype-build /out/ /tmp/freetype/
+RUN test "$(dpkg-query -W -f='${Version}' libfreetype6)" = '2.13.3+dfsg-1+deb13u1' \
+    && dpkg -i /tmp/freetype/libfreetype6_*.deb \
+    && test "$(dpkg-query -W -f='${Version}' libfreetype6)" = '2.13.3+dfsg-1+deb13u1+ufo1' \
+    && rm -rf /tmp/freetype
 COPY --from=zlib-build /out/ /tmp/zlib-packages/
 RUN sh /tmp/zlib-packages/install.sh /tmp/zlib-packages && rm -r /tmp/zlib-packages
 COPY --from=libxml2-build /out/ /tmp/libxml2/
 RUN test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3' \
     && dpkg -i /tmp/libxml2/libxml2_*.deb \
-    && test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo2' \
+    && test "$(dpkg-query -W -f='${Version}' libxml2)" = '2.12.7+dfsg+really2.9.14-2.1+deb13u3+ufo3' \
     && rm -rf /tmp/libxml2
 COPY scripts/fetch-pdfium.sh /tmp/fetch-pdfium.sh
 RUN set -eu; \

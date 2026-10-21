@@ -1,0 +1,56 @@
+name: lxml
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths: ["core/src/ufo/runtime/security/lxml/**", "core/src/ufo/bundle.py", ".github/workflows/lxml.yml"]
+  pull_request:
+    paths: ["core/src/ufo/runtime/security/lxml/**", "core/src/ufo/bundle.py", ".github/workflows/lxml.yml"]
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Build the closed bundle source
+        run: |
+          uv build --wheel --out-dir /tmp/lxml-bundle
+          uv export --no-dev --no-hashes --no-emit-project > /tmp/lxml-bundle/constraints.txt
+          uv run python - <<'PY'
+          from pathlib import Path
+          from shutil import copytree
+          from ufo.bundle import Bundle, LXML_ASSETS, ZLIB_ASSETS
+          out = Path("/tmp/lxml-bundle")
+          copytree(ZLIB_ASSETS, out / "zlib")
+          copytree(LXML_ASSETS, out / "lxml")
+          wheels = tuple(out.glob("*.whl"))
+          assert len(wheels) == 1
+          bundle = Bundle(Path("ufo.toml"), None, out, wheels, Path("client"), "")
+          (out / "Dockerfile").write_text(bundle._dockerfile())
+          for name in ("ufo.toml", "ufo.lock", "ufo-sandbox-client"):
+              (out / name).touch()
+          PY
+      - name: Build the actual final bundle image
+        run: docker build -t lxml-bundle /tmp/lxml-bundle
+      - name: Check installed libraries and real document fixtures
+        run: |
+          docker run --rm --network none --entrypoint python \
+            --mount type=bind,src="$PWD/core/src/ufo/runtime/security/lxml/check.py",dst=/check.py,readonly \
+            --mount type=bind,src="$PWD/servers/preview/tests/fixtures",dst=/fixtures,readonly \
+            lxml-bundle /check.py /fixtures/fixture.docx /fixtures/fixture.xlsx /fixtures/fixture.pptx
+          mkdir -p /tmp/lxml-proof
+          docker run --rm --network none --entrypoint cat lxml-bundle \
+            /usr/local/share/ufo-lxml-zlib/module-sha256.json > /tmp/lxml-proof/module-sha256.json
+          docker run --rm --network none --entrypoint cat lxml-bundle \
+            /usr/local/share/ufo-lxml-zlib/provenance.json > /tmp/lxml-proof/provenance.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lxml-installed-proof
+          path: /tmp/lxml-proof/
