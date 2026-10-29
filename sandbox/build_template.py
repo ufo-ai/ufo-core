@@ -189,7 +189,7 @@ RUST_INSTALL_COMMAND = (
 build's disk ran out under it: `tar` exit 2 on every template rebuild since the layer landed."""
 PIP_PACKAGES = (
     "urllib3",
-    "brotli",
+    "brotli==1.2.1",
     "fonttools",
     "markitdown[pptx]",
     "openpyxl",

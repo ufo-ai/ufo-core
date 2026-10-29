@@ -109,7 +109,7 @@ EXPECTED_APT = (
 )
 EXPECTED_PIP = (
     "urllib3",
-    "brotli",
+    "brotli==1.2.1",
     "fonttools",
     "markitdown[pptx]",
     "openpyxl",
