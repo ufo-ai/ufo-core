@@ -63,6 +63,7 @@ member = sa.Table(
 )
 
 sa.Index("member_email", member.c.email)
+sa.Index("member_first", member.c.workspace_id, member.c.created_at, member.c.id)
 
 surface_identity = sa.Table(
     "surface_identity",
