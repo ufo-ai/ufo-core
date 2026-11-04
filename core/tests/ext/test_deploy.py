@@ -59,6 +59,8 @@ FLEET_ROUTE = f"/internal/{sample.NAME}/{FLEET_PATH}"
 FOUNDER = "founder@acme.test"
 TEAMMATE = "teammate@acme.test"
 BASE = datetime(2026, 9, 1, tzinfo=UTC)
+QUERY_PLAN_WORKSPACES = 64
+QUERY_PLAN_MEMBERS = 6000
 
 
 def _sample() -> Manifest:
@@ -315,6 +317,104 @@ async def test_first_member_emails_answer_each_named_workspace_that_has_a_member
     assert found == {acme: FOUNDER, globex: "founder@globex.test"}
     assert await context.first_member_emails((), audit=False) == {}
     assert await context.workspace_count(audit=False) == 4
+
+
+async def test_first_member_reads_keep_uuid_ties_and_revoked_founders(
+    db: None, tmp_path: Path
+) -> None:
+    tied, other, empty = uuid4(), uuid4(), uuid4()
+    members = await _found(tied, ("one@shared.test", _second(0)), ("two@shared.test", _second(0)))
+    first_email = min(members, key=members.__getitem__)
+    await _found(other, ("other@shared.test", _second(0)))
+    await _found(empty)
+    with ws(tied):
+        async with workspace_tx() as connection:
+            await Seats(workspace_id=tied).revoke(connection, first_email)
+    context = _context(tmp_path)
+
+    assert await context.first_member_emails((tied, other, empty), audit=False) == {
+        tied: first_email,
+        other: "other@shared.test",
+    }
+    assert await context.workspaces_by_first_domain("shared.test", audit=False) == tuple(
+        sorted(
+            (FirstMember(tied, first_email), FirstMember(other, "other@shared.test")),
+            key=lambda first: first.workspace_id,
+        )
+    )
+    assert [
+        (membership.workspace_id, membership.first_email)
+        for membership in await context.memberships(first_email, audit=False)
+    ] == [(tied, first_email)]
+
+
+async def test_first_domain_lookup_reads_one_member_per_workspace(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    if not database_url.startswith("postgresql"):
+        pytest.skip("query plans are a PostgreSQL contract")
+    workspaces = tuple(UUID(int=index + 1) for index in range(QUERY_PLAN_WORKSPACES))
+    async with owner_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace),
+            [
+                {"id": workspace_id, "created_at": BASE, "updated_at": BASE}
+                for workspace_id in workspaces
+            ],
+        )
+        await connection.execute(
+            sa.insert(tables.member),
+            [
+                {
+                    "id": UUID(int=index + 1),
+                    "workspace_id": workspaces[index % QUERY_PLAN_WORKSPACES],
+                    "email": f"member-{index}@acme.test",
+                    "created_at": _second(index),
+                    "updated_at": BASE,
+                }
+                for index in range(QUERY_PLAN_MEMBERS)
+            ],
+        )
+        await connection.exec_driver_sql("ANALYZE workspace")
+        await connection.exec_driver_sql("ANALYZE member")
+
+    captured: list[tuple[str, tuple[object, ...]]] = []
+
+    def record(
+        sync_connection: sa.Connection,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        if statement.lstrip().startswith("SELECT") and "member" in statement:
+            assert isinstance(parameters, tuple)
+            captured.append((statement, parameters))
+
+    async with owner_tx() as connection:
+        engine = connection.engine.sync_engine
+        sa.event.listen(engine, "before_cursor_execute", record)
+        try:
+            found = await _context(tmp_path).workspaces_by_first_domain("acme.test", audit=False)
+        finally:
+            sa.event.remove(engine, "before_cursor_execute", record)
+        assert len(found) == QUERY_PLAN_WORKSPACES
+        assert len(captured) == 1
+        statement, parameters = captured[0]
+        explained = (
+            await connection.exec_driver_sql(
+                f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {statement}", parameters
+            )
+        ).scalar_one()[0]
+    nodes = [explained["Plan"]]
+    for node in nodes:
+        nodes.extend(node.get("Plans", ()))
+    member_reads = [node for node in nodes if node.get("Relation Name") == "member"]
+    assert member_reads
+    assert sum(node["Actual Rows"] * node["Actual Loops"] for node in member_reads) <= (
+        QUERY_PLAN_WORKSPACES + len(found)
+    )
 
 
 async def test_workspace_ids_name_every_workspace_a_member_or_none(

@@ -128,15 +128,12 @@ class DeployContext:
     async def memberships(self, email: str, *, audit: bool) -> tuple[Membership, ...]:
         """Every workspace holding a member row for `email`, seated or revoked, in joining order."""
         address = email.strip().lower()
-        matching = tables.member.alias("matching")
-        first = _first_members(
-            tables.member.c.workspace_id.in_(
-                sa.select(matching.c.workspace_id).where(matching.c.email == address)
-            )
-        )
         query = (
-            sa.select(tables.member.c.workspace_id, first.c.email, tables.member.c.created_at)
-            .join(first, first.c.workspace_id == tables.member.c.workspace_id)
+            sa.select(
+                tables.member.c.workspace_id,
+                _first_member_email(tables.member.c.workspace_id).label("email"),
+                tables.member.c.created_at,
+            )
             .where(tables.member.c.email == address)
             .order_by(tables.member.c.created_at, tables.member.c.workspace_id)
         )
@@ -154,13 +151,13 @@ class DeployContext:
     ) -> tuple[FirstMember, ...]:
         """Every workspace whose first member's address is at `domain`, compared without case as
         `email_domain` reads a stored address."""
-        first = _first_members(None)
+        first_email = _first_member_email(tables.workspace.c.id)
         query = (
-            sa.select(first.c.workspace_id, first.c.email)
+            sa.select(tables.workspace.c.id.label("workspace_id"), first_email.label("email"))
             .where(
-                sa.func.lower(first.c.email).endswith(f"@{domain.strip().lower()}", autoescape=True)
+                sa.func.lower(first_email).endswith(f"@{domain.strip().lower()}", autoescape=True)
             )
-            .order_by(first.c.workspace_id)
+            .order_by(tables.workspace.c.id)
         )
         async with self.owner_transaction(audit=audit) as connection:
             rows = (await connection.execute(query)).all()
@@ -170,10 +167,13 @@ class DeployContext:
         self, workspace_ids: Collection[UUID], *, audit: bool
     ) -> Mapping[UUID, str]:
         """The first member's address of each named workspace that has a member."""
-        first = _first_members(tables.member.c.workspace_id.in_(tuple(workspace_ids)))
+        query = sa.select(
+            tables.workspace.c.id.label("workspace_id"),
+            _first_member_email(tables.workspace.c.id).label("email"),
+        ).where(tables.workspace.c.id.in_(tuple(workspace_ids)))
         async with self.owner_transaction(audit=audit) as connection:
-            rows = (await connection.execute(sa.select(first.c.workspace_id, first.c.email))).all()
-        return {row.workspace_id: row.email for row in rows}
+            rows = (await connection.execute(query)).all()
+        return {row.workspace_id: row.email for row in rows if row.email is not None}
 
     async def workspace_count(self, *, audit: bool) -> int:
         async with self.owner_transaction(audit=audit) as connection:
@@ -234,24 +234,15 @@ class DeployContext:
             yield connection
 
 
-def _first_members(scope: sa.ColumnElement[bool] | None) -> sa.Subquery:
-    ranked = sa.select(
-        tables.member.c.workspace_id,
-        tables.member.c.email,
-        sa.func.row_number()
-        .over(
-            partition_by=tables.member.c.workspace_id,
-            order_by=(tables.member.c.created_at, tables.member.c.id),
-        )
-        .label("rank"),
-    )
-    if scope is not None:
-        ranked = ranked.where(scope)
-    inner = ranked.subquery("ranked")
+def _first_member_email(workspace_id: sa.ColumnElement[UUID]) -> sa.ScalarSelect[str]:
+    first = tables.member.alias("first_member")
     return (
-        sa.select(inner.c.workspace_id, inner.c.email)
-        .where(inner.c.rank == 1)
-        .subquery("first_member")
+        sa.select(first.c.email)
+        .where(first.c.workspace_id == workspace_id)
+        .order_by(first.c.created_at, first.c.id)
+        .limit(1)
+        .correlate_except(first)
+        .scalar_subquery()
     )
 
 
