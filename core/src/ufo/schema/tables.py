@@ -32,6 +32,16 @@ workspace = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
 
+rate_limit = sa.Table(
+    "rate_limit",
+    metadata,
+    sa.Column("namespace", sa.Text, primary_key=True),
+    sa.Column("dimension", sa.Text, primary_key=True),
+    sa.Column("subject_hash", sa.LargeBinary, primary_key=True),
+    sa.Column("window_start", sa.DateTime(timezone=True), primary_key=True),
+    sa.Column("hits", sa.Integer, nullable=False),
+)
+
 member = sa.Table(
     "member",
     metadata,

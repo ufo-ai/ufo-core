@@ -34,7 +34,7 @@ SH_FILE = Path(".github/scripts/sandbox_image_key.sh")
 PROBE_CLIENT = Path("extensions/probe/ufo_ext_probe/client.py")
 PROBE_MANIFEST = Path("extensions/probe/ufo_ext_probe/manifest.py")
 PIPEDREAM_MANIFEST = Path("extensions/pipedream/ufo_ext_pipedream/manifest.py")
-UNSCOPED_TABLES = frozenset({"alembic_version", "workspace"})
+UNSCOPED_TABLES = frozenset({"alembic_version", "rate_limit", "workspace"})
 TABLE_COLUMNS = {
     "sqlite": (
         "select t.name, c.name from pragma_table_list as t, pragma_table_info(t.name) as c "
