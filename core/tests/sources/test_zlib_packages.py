@@ -43,6 +43,10 @@ def test_zlib_backport_is_pinned_and_checks_real_package_state() -> None:
     assert "dpkg-buildpackage --build=binary -Pnobiarch" in build
     assert "LD_LIBRARY_PATH=$(dirname" in build
     assert "diff -u /tmp/zlib-before.symbols /tmp/zlib-after.symbols" in build
+    install = (SECURITY / "install.sh").read_text()
+    assert "dpkg --compare-versions" in install
+    assert "1:1.3.dfsg+really1.3.1-1+deb13u1" in install
+    assert "1:1.3.dfsg+really1.3.1-1+ufo1" in install
     regression = (SECURITY / "test-write-state.c").read_text()
     assert "state->strm.avail_in != 0" in regression
     assert "state->strm.next_in != state->in" in regression

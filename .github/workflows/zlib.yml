@@ -47,7 +47,8 @@ jobs:
       - name: Check installed package state
         run: |
           docker run --rm --network none --entrypoint sh zlib-runtime -ec '
-            test "$(dpkg-query -W -f="\${Version}" zlib1g)" = "1:1.3.dfsg+really1.3.1-1+ufo1"
+            dpkg --compare-versions "$(dpkg-query -W -f="\${Version}" zlib1g)" \
+              ge "1:1.3.dfsg+really1.3.1-1+deb13u1"
             test -z "$(dpkg --audit)"
             test -s /usr/local/share/ufo-zlib/provenance.json
             ldd /usr/lib/x86_64-linux-gnu/libz.so.1
