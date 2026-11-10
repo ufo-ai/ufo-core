@@ -4421,6 +4421,9 @@ async def test_idle_workspaces_skip_source_sync_until_a_member_message_arrives(
         await connection.execute(
             sa.update(tables.turn).where(tables.turn.c.id == turn_id).values(created_at=old)
         )
+    assert await driver.candidate_workspaces() == ()
+
+    async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.inbound_message).values(
                 id=uuid4(),
@@ -4434,6 +4437,7 @@ async def test_idle_workspaces_skip_source_sync_until_a_member_message_arrives(
                 created_at=sa.func.now(),
             )
         )
+    await _make_due()
     assert await driver.candidate_workspaces() == (workspace_id,)
 
 
