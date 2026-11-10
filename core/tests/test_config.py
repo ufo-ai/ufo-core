@@ -25,6 +25,7 @@ def test_load_config_with_defaults(tmp_path: Path) -> None:
     assert config.serve.port == 8710
     assert config.serve.request_shutdown_seconds == 30
     assert config.serve.graceful_shutdown_seconds == 0
+    assert config.serve.source_sync_idle_days is None
     assert config.models.anthropic_api_key_env == "ANTHROPIC_API_KEY"
     assert config.sandbox.workspace_root == Path("./workspaces")
     assert config.o11y.otlp_endpoint is None
@@ -54,6 +55,12 @@ def test_negative_request_shutdown_rejected(tmp_path: Path) -> None:
     path.write_text(VALID + "\n[serve]\nrequest_shutdown_seconds = -1\n")
     with pytest.raises(ValidationError):
         load_config(path)
+
+
+def test_source_sync_idle_days_parses(tmp_path: Path) -> None:
+    path = tmp_path / "ufo.toml"
+    path.write_text(VALID + "\n[serve]\nsource_sync_idle_days = 14\n")
+    assert load_config(path).serve.source_sync_idle_days == 14
 
 
 def test_filesystem_backend_requires_root(tmp_path: Path) -> None:

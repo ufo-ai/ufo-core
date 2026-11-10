@@ -520,6 +520,13 @@ turn = sa.Table(
         sqlite_where=sa.text("admission_source = 'member'"),
     ),
     sa.Index(
+        "turn_member_activity",
+        "workspace_id",
+        "created_at",
+        postgresql_where=sa.text("admission_source = 'member'"),
+        sqlite_where=sa.text("admission_source = 'member'"),
+    ),
+    sa.Index(
         "turn_parent",
         "parent_turn_id",
         postgresql_where=sa.text("parent_turn_id is not null"),
@@ -589,6 +596,13 @@ inbound_message = sa.Table(
         "conversation_id",
         postgresql_where=sa.text("consumed_turn_id is null"),
         sqlite_where=sa.text("consumed_turn_id is null"),
+    ),
+    sa.Index(
+        "inbound_message_member_activity",
+        "workspace_id",
+        "created_at",
+        postgresql_where=sa.text("admission_source = 'member'"),
+        sqlite_where=sa.text("admission_source = 'member'"),
     ),
 )
 

@@ -80,6 +80,7 @@ from ufo.runtime.turns.subjects import connection_subject
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
+from ufo.schema.records import MEMBER_ADMISSION
 
 FOLDER_BACKEND = "folder"
 SOURCE_SYNC_JOB = "source_sync"
@@ -733,6 +734,41 @@ def _readers_remain() -> sa.ColumnElement[bool]:
     )
 
 
+def _workspace_active_after(cutoff: datetime) -> sa.ColumnElement[bool]:
+    workspace_id = tables.source.c.workspace_id
+    return sa.or_(
+        sa.exists(
+            sa.select(sa.literal(1))
+            .select_from(tables.workspace)
+            .where(
+                tables.workspace.c.id == workspace_id,
+                tables.workspace.c.created_at >= cutoff,
+            )
+            .correlate(tables.source)
+        ),
+        sa.exists(
+            sa.select(sa.literal(1))
+            .select_from(tables.turn)
+            .where(
+                tables.turn.c.workspace_id == workspace_id,
+                tables.turn.c.admission_source == MEMBER_ADMISSION,
+                tables.turn.c.created_at >= cutoff,
+            )
+            .correlate(tables.source)
+        ),
+        sa.exists(
+            sa.select(sa.literal(1))
+            .select_from(tables.inbound_message)
+            .where(
+                tables.inbound_message.c.workspace_id == workspace_id,
+                tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
+                tables.inbound_message.c.created_at >= cutoff,
+            )
+            .correlate(tables.source)
+        ),
+    )
+
+
 def run_claim(workflow_id: str | None) -> str:
     """The claim a sync run holds its rows under. Inside a DBOS workflow it is fixed by the workflow
     id, so a run that recovery replays after its process died takes back the rows its first attempt
@@ -764,6 +800,7 @@ class SyncDriver:
     source_credentials: SourceCredentialResolver | None = None
     identity_resolvers: Mapping[str, SourceIdentityResolver] = field(default_factory=dict)
     spend: SpendGates = NO_SPEND_GATES
+    idle_after: timedelta | None = None
 
     async def candidate_workspaces(self) -> tuple[UUID, ...]:
         """Workspaces holding a source due for sync — one distinct `workspace_id` per such
@@ -771,10 +808,16 @@ class SyncDriver:
         role RLS policies exempt, so the dispatcher binds only those and a workspace with nothing
         due runs no per-workspace transaction on the tick."""
         now = datetime.now(UTC)
+        active = (
+            sa.true() if self.idle_after is None else _workspace_active_after(now - self.idle_after)
+        )
         async with owner_tx() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(tables.source.c.workspace_id)
+                    sa.select(
+                        tables.source.c.workspace_id,
+                        active.label("active"),
+                    )
                     .where(
                         tables.source.c.next_sync_at <= now,
                         sa.or_(
@@ -787,7 +830,28 @@ class SyncDriver:
                     .distinct()
                 )
             ).all()
-        return tuple(row.workspace_id for row in rows)
+            idle = tuple(row.workspace_id for row in rows if not row.active)
+            if idle:
+                await connection.execute(
+                    sa.update(tables.source)
+                    .where(
+                        tables.source.c.workspace_id.in_(idle),
+                        tables.source.c.next_sync_at <= now,
+                    )
+                    .values(
+                        next_sync_at=now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS),
+                        updated_at=sa.func.now(),
+                    )
+                )
+        if idle:
+            assert self.idle_after is not None
+            for workspace_id in idle:
+                log(
+                    "source_sync.workspace_idle",
+                    workspace_id=str(workspace_id),
+                    idle_seconds=str(int(self.idle_after.total_seconds())),
+                )
+        return tuple(row.workspace_id for row in rows if row.active)
 
     async def run(self) -> None:
         claim = run_claim(DBOS.workflow_id)
@@ -913,6 +977,9 @@ class SyncDriver:
 
     async def _claim_due(self, claim: str) -> tuple[ClaimedSource, ...]:
         now = datetime.now(UTC)
+        active = (
+            sa.true() if self.idle_after is None else _workspace_active_after(now - self.idle_after)
+        )
         due = (
             sa.select(
                 tables.source.c.uid,
@@ -939,6 +1006,7 @@ class SyncDriver:
                 ),
                 _readers_remain(),
                 self.spend.admitting(tables.source.c.workspace_id),
+                active,
             )
             .order_by(tables.source.c.next_sync_at, tables.source.c.uid)
             .limit(DUE_BATCH_MAX_SOURCES)

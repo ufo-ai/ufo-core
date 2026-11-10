@@ -129,7 +129,7 @@ from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import sole_workspace, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import MEMBER_ADMISSION, Agent, Turn
 
 TOOL_NARRATION = "looking through what they synced"
 
@@ -4343,6 +4343,102 @@ def _metric_points(reader: InMemoryMetricReader, name: str) -> list[dict[str, st
 
 def _events(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
     return [record for record in caplog.records if record.message == event]
+
+
+async def _member_turn(workspace_id: UUID, created_at: datetime) -> tuple[UUID, UUID, UUID]:
+    member_id = await _member(workspace_id)
+    agent_id = uuid5(NAMESPACE_URL, f"{workspace_id}/main")
+    conversation_id, turn_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="cli",
+                queue_key="idle-sync-test",
+                member_id=member_id,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="queued",
+                inbound="hello",
+                admission_source=MEMBER_ADMISSION,
+                speaker_member_id=member_id,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+    return member_id, conversation_id, turn_id
+
+
+async def test_idle_workspaces_skip_source_sync_until_a_member_message_arrives(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_connector_source(workspace_id)
+    old = datetime.now(UTC) - timedelta(days=15)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.workspace)
+            .where(tables.workspace.c.id == workspace_id)
+            .values(created_at=old)
+        )
+    driver = replace(
+        _connector_driver([], database_url, tmp_path / "blobs"),
+        idle_after=timedelta(days=14),
+    )
+    due = (await _source_state(source_id))["next_sync_at"]
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        assert await driver.candidate_workspaces() == ()
+
+    assert (await _source_state(source_id))["next_sync_at"] > due
+    skipped = _events(caplog, "source_sync.workspace_idle")
+    assert len(skipped) == 1
+    assert skipped[0].ufo == {
+        "workspace_id": str(workspace_id),
+        "idle_seconds": str(14 * 24 * 60 * 60),
+    }
+    await _make_due()
+    assert await _claims(driver) == ()
+
+    member_id, conversation_id, turn_id = await _member_turn(workspace_id, datetime.now(UTC))
+    assert await driver.candidate_workspaces() == (workspace_id,)
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn).where(tables.turn.c.id == turn_id).values(created_at=old)
+        )
+    assert await driver.candidate_workspaces() == ()
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                seq=1,
+                body="one more thing",
+                admission_source=MEMBER_ADMISSION,
+                speaker_member_id=member_id,
+                admitted_turn_id=turn_id,
+                created_at=sa.func.now(),
+            )
+        )
+    await _make_due()
+    assert await driver.candidate_workspaces() == (workspace_id,)
 
 
 def _utc(when: datetime) -> datetime:
