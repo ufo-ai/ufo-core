@@ -139,6 +139,7 @@ class ServeConfig(BaseModel):
     request_shutdown_seconds: int = Field(default=30, ge=0)
     graceful_shutdown_seconds: int = Field(default=0, ge=0)
     disabled_jobs: tuple[str, ...] = ()
+    source_sync_idle_days: int | None = Field(default=None, gt=0)
     sign_in_path: str | None = None
     """The path on this deploy's host where a browser signs in, answered by a gateway in front of
     it. An expired artifact link sends a browser there with the link as its `a` target. Unset, the

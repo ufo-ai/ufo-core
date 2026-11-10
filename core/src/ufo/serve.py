@@ -581,6 +581,11 @@ def run(fleet: Fleet) -> None:
         source_credentials=SourceCredentialResolver(connectors),
         identity_resolvers=_source_identity_resolvers(manifests, credentials, blob),
         spend=spend,
+        idle_after=(
+            None
+            if config.serve.source_sync_idle_days is None
+            else timedelta(days=config.serve.source_sync_idle_days)
+        ),
     )
     unknown_backends = sorted(
         {entry.backend for entry in config.sources} - sync_driver.backends.keys()
