@@ -78,6 +78,7 @@ APPLY_NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
 def test_each_fire_selects_the_workspace_delivery_path() -> None:
     assert "share_file to broadcast a result worth sharing with the workspace" in REPORT_INSTRUCTION
     assert "use Markdown links as usual" in REPORT_INSTRUCTION
+    assert "an error the run hit and recovered from is not part of the result" in REPORT_INSTRUCTION
     assert FINAL_FIRE_INSTRUCTION.startswith(REPORT_INSTRUCTION)
 
 
