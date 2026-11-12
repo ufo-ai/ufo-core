@@ -4302,7 +4302,7 @@ def _context_line(text: str) -> dict[str, object]:
 
 def _reply_text(writeback: Writeback) -> str:
     if writeback.terminal.status == "failed":
-        return SLACK_TURN_FAILED_TEXT
+        return writeback.terminal.text or SLACK_TURN_FAILED_TEXT
     if writeback.terminal.status == "cancelled":
         return writeback.terminal.text or SLACK_TURN_CANCELLED_TEXT
     return writeback.terminal.text or SLACK_EMPTY_REPLY_TEXT

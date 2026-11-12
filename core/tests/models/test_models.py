@@ -211,11 +211,13 @@ def anthropic_thinking(text: str, signature: str, index: int = 0) -> list[object
 
 
 def anthropic_output(
-    output_tokens: int, stop_reason: str | None = None
+    output_tokens: int,
+    stop_reason: str | None = None,
+    stop_details: anthropic.types.RefusalStopDetails | None = None,
 ) -> anthropic.types.RawMessageDeltaEvent:
     return anthropic.types.RawMessageDeltaEvent(
         type="message_delta",
-        delta=Delta(stop_reason=stop_reason),
+        delta=Delta(stop_reason=stop_reason, stop_details=stop_details),
         usage=anthropic.types.MessageDeltaUsage(output_tokens=output_tokens),
     )
 
@@ -1256,23 +1258,45 @@ async def test_anthropic_truncation_raises() -> None:
     assert events[-1] == Usage(input_tokens=1, output_tokens=9)
 
 
-async def test_anthropic_refusal_raises() -> None:
+async def test_anthropic_refusal_carries_details_and_partial_text() -> None:
     create = ScriptedCreate(
         (
             [
                 anthropic_message_start(input_tokens=1),
-                anthropic_output(1, stop_reason="refusal"),
+                anthropic_text("partial answer"),
+                anthropic_output(
+                    3,
+                    stop_reason="refusal",
+                    stop_details=anthropic.types.RefusalStopDetails(
+                        type="refusal",
+                        category="bio",
+                        explanation="This request could enable biological harm.",
+                    ),
+                ),
             ],
             None,
         )
     )
     events = []
-    with pytest.raises(ModelRefusal):
+    with pytest.raises(ModelRefusal) as raised:
         async for event in AnthropicClient(
             client=anthropic_sdk(create), spec=ANTHROPIC_SPEC
         ).complete(REQUEST):
             events.append(event)
-    assert events == [ModelStreamStart(), Usage(input_tokens=1, output_tokens=1)]
+    assert events == [
+        ModelStreamStart(),
+        TextDelta(text="partial answer"),
+        Usage(input_tokens=1, output_tokens=3),
+    ]
+    assert raised.value.explanation == "This request could enable biological harm."
+    assert raised.value.category == "bio"
+    assert raised.value.details == {
+        "type": "refusal",
+        "category": "bio",
+        "explanation": "This request could enable biological harm.",
+    }
+    assert raised.value.partial_text == "partial answer"
+    assert str(raised.value) == "This request could enable biological harm."
     assert create.calls == 1
 
 

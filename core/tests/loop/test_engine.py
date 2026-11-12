@@ -61,6 +61,7 @@ from ufo.harness.models.interface import (
     ModelAccountUnavailable,
     ModelClient,
     ModelEvent,
+    ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
     ModelStreamStart,
@@ -880,6 +881,17 @@ class StreamErrorModel:
         if self.calls == 1:
             raise RuntimeError("stream boom")
         yield Usage(input_tokens=1, output_tokens=1)
+
+
+class RefusingModel:
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield ModelStreamStart()
+        yield TextDelta(text="partial answer")
+        raise ModelRefusal(
+            explanation="This request could enable biological harm.",
+            category="bio",
+            partial_text="partial answer",
+        )
 
 
 @dataclass
@@ -4875,6 +4887,34 @@ async def test_a_finished_turn_meters_its_wall_clock_its_rounds_and_its_outcome(
     assert (terminal.value, dict(terminal.attributes)) == (
         1,
         {"status": "done", "error_class": "", "profile": "main", **ws_tag},
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_id", "provider"),
+    (("claude-opus-4-8", "Anthropic"), ("gpt-5.6-sol", "OpenAI")),
+)
+async def test_a_model_refusal_names_the_provider_model_and_explanation(
+    db: None, tmp_path: Path, model_id: str, provider: str
+) -> None:
+    turn = await _seed_turn("queued", None)
+    with pytest.raises(ModelStreamError) as raised:
+        await _engine(turn, RefusingModel(), tmp_path, model_id=model_id).run()
+    assert raised.value.model_error_class == "ModelRefusal"
+
+    async with workspace_tx() as connection:
+        terminal = (
+            await connection.execute(
+                sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    frame = TerminalFrame.model_validate(terminal)
+    assert frame.status == "failed"
+    assert frame.error_class == "ModelRefusal"
+    assert frame.error_message == "This request could enable biological harm."
+    assert frame.text == (
+        f"{provider} ({model_id}) declined this request.\n\n"
+        "Provider explanation: This request could enable biological harm."
     )
 
 

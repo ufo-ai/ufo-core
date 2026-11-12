@@ -3635,17 +3635,25 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
     }
 
 
-async def test_every_outcome_line_a_turn_without_its_own_text_posts(
+async def test_terminal_reply_uses_failure_text_and_falls_back_when_empty(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    """A done turn that produced no text still gets the placeholder, and a failed or cancelled turn
-    still gets its outcome line."""
+    """A provider refusal carries the runtime's specific failure text. Other empty terminal outcomes
+    still get the surface's own fallback line."""
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
     await _seed_done_turn(workspace_id, "C6:200.0", "", blob, artifact=False)
     await _seed_done_turn(workspace_id, "C7:200.0", "", blob, artifact=False, status="failed")
     await _seed_done_turn(workspace_id, "C8:200.0", "", blob, artifact=False, status="cancelled")
+    await _seed_done_turn(
+        workspace_id,
+        "C9:200.0",
+        "Anthropic (claude-opus-4-8) declined this request.",
+        blob,
+        artifact=False,
+        status="failed",
+    )
 
     await app.state.writeback_poller.drain()
 
@@ -3657,6 +3665,7 @@ async def test_every_outcome_line_a_turn_without_its_own_text_posts(
         "C6": slack.SLACK_EMPTY_REPLY_TEXT,
         "C7": slack.SLACK_TURN_FAILED_TEXT,
         "C8": slack.SLACK_TURN_CANCELLED_TEXT,
+        "C9": "Anthropic (claude-opus-4-8) declined this request.",
     }
 
 

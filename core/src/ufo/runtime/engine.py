@@ -443,6 +443,13 @@ GUIDANCE_PREEMPTED_NOTICE = (
     "in the meantime — they follow. Work the call did before the restart may have partially "
     "applied. Re-issue it after reading them if it still applies."
 )
+_PROVIDER_NAMES = {"anthropic": "Anthropic", "openai": "OpenAI"}
+
+
+def _model_refusal_text(provider: str, model: str, explanation: str) -> str:
+    declined = f"{_PROVIDER_NAMES.get(provider, provider)} ({model}) declined this request."
+    explanation = explanation.strip()
+    return declined if not explanation else f"{declined}\n\nProvider explanation: {explanation}"
 
 
 class StreamResult(BaseModel):
@@ -4580,6 +4587,12 @@ class TurnEngine:
                 case _:
                     error_class = type(error).__name__
                     error_message = str(error)
+            if isinstance(error, ModelStreamError) and error.model_error_class == "ModelRefusal":
+                answer = _model_refusal_text(
+                    self.serving.spec.provider,
+                    self.serving.model,
+                    error.model_error_message[:TERMINAL_ERROR_MESSAGE_MAX_CHARS],
+                )
             frame = TerminalFrame(
                 status=status,
                 text=answer,

@@ -269,6 +269,8 @@ class _AnthropicStream:
         self.cache_write_1h_tokens = 0
         self.output_tokens: int | None = None
         self.stop_reason: str | None = None
+        self.stop_details: anthropic.types.RefusalStopDetails | None = None
+        self.text_parts: list[str] = []
 
     def accept(self, event: object) -> tuple[ModelEvent, ...]:
         emitted: tuple[ModelEvent, ...] = ()
@@ -283,6 +285,7 @@ class _AnthropicStream:
             case anthropic.types.RawContentBlockDeltaEvent(
                 delta=anthropic.types.TextDelta(text=text)
             ):
+                self.text_parts.append(text)
                 emitted = (TextDelta(text=text),)
             case anthropic.types.RawContentBlockDeltaEvent(
                 delta=anthropic.types.InputJSONDelta(partial_json=partial_json), index=index
@@ -313,6 +316,7 @@ class _AnthropicStream:
             case anthropic.types.RawMessageDeltaEvent(delta=delta, usage=usage):
                 self.output_tokens = usage.output_tokens
                 self.stop_reason = delta.stop_reason
+                self.stop_details = delta.stop_details
         self.yielded = self.yielded or bool(emitted)
         return emitted
 
@@ -488,7 +492,21 @@ class AnthropicClient:
                 )
             if state.stop_reason == "refusal":
                 yield state.usage()
-                raise ModelRefusal("Anthropic declined the completion (stop_reason=refusal)")
+                details = (
+                    state.stop_details.model_dump(mode="json")
+                    if state.stop_details is not None
+                    else None
+                )
+                raise ModelRefusal(
+                    explanation=(
+                        state.stop_details.explanation if state.stop_details is not None else None
+                    ),
+                    category=(
+                        state.stop_details.category if state.stop_details is not None else None
+                    ),
+                    details=details,
+                    partial_text="".join(state.text_parts),
+                )
             if state.output_tokens is None:
                 if state.has_usage():
                     yield state.usage()

@@ -19,8 +19,11 @@ from openai.types.responses import (
     ResponseIncompleteEvent,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
+    ResponseOutputRefusal,
     ResponseReasoningItem,
     ResponseRefusalDeltaEvent,
+    ResponseRefusalDoneEvent,
     ResponseTextDeltaEvent,
 )
 from openai.types.responses.response import IncompleteDetails
@@ -97,13 +100,14 @@ def _response(
     *,
     usage: ResponseUsage | None = None,
     incomplete: IncompleteDetails | None = None,
+    output: list[ResponseOutputMessage] | None = None,
 ) -> Response:
     return Response(
         id="response-1",
         created_at=0,
         model="gpt-5.6-terra",
         object="response",
-        output=[],
+        output=[] if output is None else output,
         parallel_tool_calls=True,
         tool_choice="auto",
         tools=[],
@@ -423,7 +427,23 @@ async def test_responses_path_fails_loud_on_truncation_and_refusal() -> None:
                     output_index=0,
                     content_index=0,
                     sequence_number=0,
-                    delta="no",
+                    delta="I can",
+                ),
+                ResponseRefusalDeltaEvent(
+                    type="response.refusal.delta",
+                    item_id="message-1",
+                    output_index=0,
+                    content_index=0,
+                    sequence_number=1,
+                    delta="not help with that.",
+                ),
+                ResponseRefusalDoneEvent(
+                    type="response.refusal.done",
+                    item_id="message-1",
+                    output_index=0,
+                    content_index=0,
+                    sequence_number=2,
+                    refusal="I cannot help with that.",
                 ),
                 *_completed_events(text="", input_tokens=3, output_tokens=7),
             ],
@@ -431,10 +451,100 @@ async def test_responses_path_fails_loud_on_truncation_and_refusal() -> None:
         )
     )
     refused_events = []
-    with pytest.raises(ModelRefusal):
+    with pytest.raises(ModelRefusal) as raised:
         async for event in _responses_client(refused).complete(_request()):
             refused_events.append(event)
     assert refused_events == [ModelStreamStart(), Usage(input_tokens=3, output_tokens=7)]
+    assert raised.value.explanation == "I cannot help with that."
+    assert raised.value.details == {
+        "type": "refusal",
+        "refusal": "I cannot help with that.",
+    }
+
+
+async def test_responses_completed_output_refusal_carries_the_explanation() -> None:
+    usage = ResponseUsage(
+        input_tokens=3,
+        output_tokens=7,
+        total_tokens=10,
+        input_tokens_details=InputTokensDetails(cached_tokens=0),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+    )
+    scripted = ScriptedResponses(
+        (
+            [
+                ResponseCompletedEvent(
+                    type="response.completed",
+                    sequence_number=0,
+                    response=_response(
+                        usage=usage,
+                        output=[
+                            ResponseOutputMessage(
+                                id="message-1",
+                                type="message",
+                                role="assistant",
+                                status="completed",
+                                content=[
+                                    ResponseOutputRefusal(
+                                        type="refusal",
+                                        refusal="I cannot assist with that request.",
+                                    )
+                                ],
+                            )
+                        ],
+                    ),
+                )
+            ],
+            None,
+        )
+    )
+    with pytest.raises(ModelRefusal) as raised:
+        [event async for event in _responses_client(scripted).complete(_request())]
+    assert raised.value.explanation == "I cannot assist with that request."
+    assert raised.value.details == {
+        "type": "refusal",
+        "refusal": "I cannot assist with that request.",
+    }
+
+
+async def test_responses_content_filter_carries_category_and_partial_text() -> None:
+    usage = ResponseUsage(
+        input_tokens=3,
+        output_tokens=2,
+        total_tokens=5,
+        input_tokens_details=InputTokensDetails(cached_tokens=0),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+    )
+    scripted = ScriptedResponses(
+        (
+            [
+                ResponseTextDeltaEvent(
+                    type="response.output_text.delta",
+                    item_id="message-1",
+                    output_index=0,
+                    content_index=0,
+                    sequence_number=0,
+                    delta="partial answer",
+                    logprobs=[],
+                ),
+                ResponseIncompleteEvent(
+                    type="response.incomplete",
+                    sequence_number=1,
+                    response=_response(
+                        usage=usage,
+                        incomplete=IncompleteDetails(reason="content_filter"),
+                    ),
+                ),
+            ],
+            None,
+        )
+    )
+    with pytest.raises(ModelRefusal) as raised:
+        [event async for event in _responses_client(scripted).complete(_request())]
+    assert raised.value.category == "content_filter"
+    assert raised.value.details == {"reason": "content_filter"}
+    assert raised.value.partial_text == "partial answer"
+    assert str(raised.value) == "Refusal category: content_filter."
 
 
 async def test_responses_path_keeps_the_terminal_class_without_usage() -> None:
@@ -473,10 +583,11 @@ async def test_responses_path_keeps_the_terminal_class_without_usage() -> None:
         )
     )
     refused_events = []
-    with pytest.raises(ModelRefusal):
+    with pytest.raises(ModelRefusal) as raised:
         async for event in _responses_client(refused).complete(_request()):
             refused_events.append(event)
     assert refused_events == [ModelStreamStart()]
+    assert raised.value.explanation == "no"
 
 
 @pytest.mark.parametrize("status", [429, 500])
