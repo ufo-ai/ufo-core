@@ -68,6 +68,7 @@ from ufo.harness.o11y import (
 )
 from ufo.runtime.access.connectors import AuthProxy, SourceCredentialResolver
 from ufo.runtime.billing.spend import NO_SPEND_GATES, SpendGates
+from ufo.runtime.candidates import workspace_active_after
 from ufo.runtime.sources.connector import (
     FieldValue,
     ParentPages,
@@ -80,7 +81,6 @@ from ufo.runtime.turns.subjects import connection_subject
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
-from ufo.schema.records import MEMBER_ADMISSION
 
 FOLDER_BACKEND = "folder"
 SOURCE_SYNC_JOB = "source_sync"
@@ -734,41 +734,6 @@ def _readers_remain() -> sa.ColumnElement[bool]:
     )
 
 
-def _workspace_active_after(cutoff: datetime) -> sa.ColumnElement[bool]:
-    workspace_id = tables.source.c.workspace_id
-    return sa.or_(
-        sa.exists(
-            sa.select(sa.literal(1))
-            .select_from(tables.workspace)
-            .where(
-                tables.workspace.c.id == workspace_id,
-                tables.workspace.c.created_at >= cutoff,
-            )
-            .correlate(tables.source)
-        ),
-        sa.exists(
-            sa.select(sa.literal(1))
-            .select_from(tables.turn)
-            .where(
-                tables.turn.c.workspace_id == workspace_id,
-                tables.turn.c.admission_source == MEMBER_ADMISSION,
-                tables.turn.c.created_at >= cutoff,
-            )
-            .correlate(tables.source)
-        ),
-        sa.exists(
-            sa.select(sa.literal(1))
-            .select_from(tables.inbound_message)
-            .where(
-                tables.inbound_message.c.workspace_id == workspace_id,
-                tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
-                tables.inbound_message.c.created_at >= cutoff,
-            )
-            .correlate(tables.source)
-        ),
-    )
-
-
 def run_claim(workflow_id: str | None) -> str:
     """The claim a sync run holds its rows under. Inside a DBOS workflow it is fixed by the workflow
     id, so a run that recovery replays after its process died takes back the rows its first attempt
@@ -809,7 +774,9 @@ class SyncDriver:
         due runs no per-workspace transaction on the tick."""
         now = datetime.now(UTC)
         active = (
-            sa.true() if self.idle_after is None else _workspace_active_after(now - self.idle_after)
+            sa.true()
+            if self.idle_after is None
+            else workspace_active_after(tables.source.c.workspace_id, now - self.idle_after)
         )
         async with owner_tx() as connection:
             rows = (
@@ -978,7 +945,9 @@ class SyncDriver:
     async def _claim_due(self, claim: str) -> tuple[ClaimedSource, ...]:
         now = datetime.now(UTC)
         active = (
-            sa.true() if self.idle_after is None else _workspace_active_after(now - self.idle_after)
+            sa.true()
+            if self.idle_after is None
+            else workspace_active_after(tables.source.c.workspace_id, now - self.idle_after)
         )
         due = (
             sa.select(

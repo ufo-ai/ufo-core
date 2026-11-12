@@ -5,11 +5,13 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from dbos import DBOS, SetWorkflowID
+from dbos import DBOS, DBOSClient, SetWorkflowID
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from ufo_ext_sample.spend import SampleGate, allow
@@ -47,7 +49,7 @@ from ufo.runtime.billing.accounting import OffTurnSpendRefused
 from ufo.runtime.billing.spend import PARK, GateDeploy, SpendGates
 from ufo.runtime.candidates import owner_candidates
 from ufo.runtime.ext.context import ExtensionContext, ScopedStore
-from ufo.runtime.ext.manifest import JOB_FAULT_MAX_CHARS, JobFault, JobSpec
+from ufo.runtime.ext.manifest import JOB_FAULT_MAX_CHARS, JobFault, JobSpec, Manifest
 from ufo.runtime.jobs import (
     CORE_EXTENSION,
     JOB_FAILED_METRIC,
@@ -203,6 +205,92 @@ async def test_fire_with_empty_candidates_never_invokes_the_handler(db: None) ->
     for workspace_id in await runner.candidates(f"{CORE_EXTENSION}:idle"):
         await runner.fire(f"{CORE_EXTENSION}:idle", workspace_id)
     assert calls == 0
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_tick_does_not_enqueue_an_active_deduplication_id(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    active = await _workspace()
+    fresh = await _workspace()
+    key = f"{CORE_EXTENSION}:probe"
+    queried: list[dict[str, object]] = []
+    enqueued: list[tuple[object, ...]] = []
+
+    async def candidates() -> tuple[UUID, ...]:
+        return active, fresh
+
+    async def list_queued(**filters: object) -> list[SimpleNamespace]:
+        queried.append(filters)
+        return [SimpleNamespace(deduplication_id=f"{key}:{active}")]
+
+    async def enqueue(*args: object) -> None:
+        enqueued.append(args)
+
+    monkeypatch.setattr(DBOS, "enqueue_workflow_async", enqueue)
+    runner = replace(
+        _runner(
+            (
+                JobSpec(
+                    name="probe",
+                    schedule=DORMANT_CRON,
+                    handler=_write_marker,
+                    candidates=candidates,
+                ),
+            )
+        ),
+        client=cast(DBOSClient, SimpleNamespace(list_workflows_async=list_queued)),
+    )
+
+    await runner.tick(datetime.now(UTC), key)
+
+    assert queried == [
+        {
+            "queue_name": jobs_module.JOB_QUEUE_NAME,
+            "status": ["ENQUEUED", "PENDING"],
+            "queues_only": True,
+            "load_input": False,
+            "load_output": False,
+        }
+    ]
+    assert len(enqueued) == 1
+    assert enqueued[0][0] == jobs_module.JOB_QUEUE_NAME
+    assert enqueued[0][3:] == (key, str(fresh))
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_idle_filter_applies_only_to_the_four_high_fanout_jobs(db: None) -> None:
+    recent = await _seeded_workspace(founded_days_ago=1)
+    active = await _seeded_workspace(founded_days_ago=30, member_turn_days_ago=1)
+    inactive = await _seeded_workspace(founded_days_ago=30)
+
+    async def candidates() -> tuple[UUID, ...]:
+        return recent, active, inactive
+
+    for key in (
+        "web:setup-goals",
+        "core:product_census",
+        "core:member_gravatar",
+        "metronome:usage_shipper",
+        "core:unfiltered",
+    ):
+        extension, name = key.split(":", 1)
+        spec = JobSpec(
+            name=name, schedule=DORMANT_CRON, handler=_write_marker, candidates=candidates
+        )
+        manifests = (
+            ()
+            if extension == CORE_EXTENSION
+            else (Manifest(name=extension, version="1", jobs=(spec,)),)
+        )
+        core_specs = (spec,) if extension == CORE_EXTENSION else ()
+        runner = JobRunner(
+            bindings=bindings_from(manifests, core_specs),
+            manifests=manifests,
+            idle_after=timedelta(days=14),
+        )
+        expected = (recent, active) if key != "core:unfiltered" else (recent, active, inactive)
+        assert await runner.candidates(key) == expected
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

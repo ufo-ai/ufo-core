@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -232,8 +233,10 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
     registry = SimpleNamespace(key_slot_for=lambda _model: None, specs={})
     page_runner = object()
     captured: dict[str, object] = {}
+    config = _local_config()
+    config.serve.source_sync_idle_days = 14
     runtime = SimpleNamespace(
-        config=_local_config(),
+        config=config,
         manifests=manifests,
         dbos=object(),
         index=object(),
@@ -281,9 +284,11 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["page"]["manifests"] is manifests
     assert captured["page"]["registry"] is registry
     assert captured["jobs"]["registry"] is registry
+    assert captured["jobs"]["client"] is runtime.dbos
     assert captured["launched"] is True
     assert captured["page"]["probes"] is probes
     assert captured["jobs"]["probes"] is probes
+    assert captured["jobs"]["idle_after"] == timedelta(days=14)
     assert captured["page"]["spend"] is captured["jobs"]["spend"] is runtime.spend
     assert captured["page"]["ledger"] is captured["jobs"]["ledger"] is runtime.ledger
     assert captured["disabled"] == frozenset()
@@ -342,6 +347,7 @@ async def test_serve_lifespan_waits_for_background_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recovery = ShutdownProbe()
+    retention = ShutdownProbe()
     reconciler = ShutdownProbe()
     stranded = ShutdownProbe()
     poller = ShutdownProbe()
@@ -354,6 +360,7 @@ async def test_serve_lifespan_waits_for_background_shutdown(
         state=SimpleNamespace(
             fleet=serve.WHOLE_FLEET,
             dbos=object(),
+            dbos_retention=retention,
             writeback_poller=poller,
             mid_turn_reply_poller=speaker,
             surface_listeners=(listener,),
@@ -363,12 +370,14 @@ async def test_serve_lifespan_waits_for_background_shutdown(
     )
     async with serve._serve_lifespan(app):
         await recovery.started.wait()
+        await retention.started.wait()
         await reconciler.started.wait()
         await stranded.started.wait()
         await poller.started.wait()
         await speaker.started.wait()
         await listener.started.wait()
     assert recovery.stopped.is_set()
+    assert retention.stopped.is_set()
     assert reconciler.stopped.is_set()
     assert stranded.stopped.is_set()
     assert poller.stopped.is_set()
@@ -379,8 +388,8 @@ async def test_serve_lifespan_waits_for_background_shutdown(
 async def test_the_jobs_fleet_runs_the_reconcilers_and_none_of_the_surface_delivery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The three reconcilers are the whole deploy's safety net, so both fleets run them — a jobs
-    process reclaims a dead turns process's turns and the reverse."""
+    """Fleet-wide sweeps run on both fleets, so a jobs process can reclaim a dead turns process's
+    turns and the reverse."""
     recovery = ShutdownProbe()
     reconciler = ShutdownProbe()
     stranded = ShutdownProbe()
@@ -394,6 +403,7 @@ async def test_the_jobs_fleet_runs_the_reconcilers_and_none_of_the_surface_deliv
         state=SimpleNamespace(
             fleet=serve.JOBS_FLEET,
             dbos=object(),
+            dbos_retention=ShutdownProbe(),
             writeback_poller=poller,
             mid_turn_reply_poller=speaker,
             surface_listeners=(listener,),
@@ -427,6 +437,7 @@ async def test_a_surface_boot_starts_its_work_before_the_first_request(
             state=SimpleNamespace(
                 fleet=fleet,
                 dbos=object(),
+                dbos_retention=ShutdownProbe(),
                 writeback_poller=None,
                 mid_turn_reply_poller=None,
                 surface_listeners=(),
@@ -457,6 +468,7 @@ async def test_serve_lifespan_propagates_a_background_failure(
         state=SimpleNamespace(
             fleet=serve.WHOLE_FLEET,
             dbos=object(),
+            dbos_retention=ShutdownProbe(),
             writeback_poller=None,
             mid_turn_reply_poller=None,
             surface_listeners=(),
@@ -496,6 +508,7 @@ async def test_the_lifespan_registers_configured_sources_into_the_one_workspace(
         state=SimpleNamespace(
             fleet=serve.JOBS_FLEET,
             dbos=object(),
+            dbos_retention=ShutdownProbe(),
             writeback_poller=None,
             mid_turn_reply_poller=None,
             surface_listeners=(),

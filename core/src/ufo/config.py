@@ -46,12 +46,18 @@ class DatabaseConfig(BaseModel):
 
     `owner_url` is the RLS-bypassing owner-role DSN the shared fleet's jobs and `ufoctl proxy` use
     for cross-workspace enumeration. Reads bind or filter the workspace before accessing its data.
-    Serve fails loud when neither this field nor its `UFO_OWNER_DSN` override is set."""
+    Serve fails loud when neither this field nor its `UFO_OWNER_DSN` override is set.
+
+    `dbos_retention_days` keeps terminal workflow history for that many days. The optional
+    `dbos_retention_row_cap` also keeps at most that many terminal workflows, newest first. Neither
+    policy removes queued or running workflows."""
 
     model_config = ConfigDict(extra="forbid")
     url: str
     system_url: str = ""
     owner_url: str | None = None
+    dbos_retention_days: int = Field(default=7, gt=0)
+    dbos_retention_row_cap: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _derive_system_url(self) -> "DatabaseConfig":

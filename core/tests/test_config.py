@@ -21,6 +21,8 @@ def test_load_config_with_defaults(tmp_path: Path) -> None:
     path.write_text(VALID)
     config = load_config(path)
     assert config.database.system_url == "sqlite:///ufo_dbos.db"
+    assert config.database.dbos_retention_days == 7
+    assert config.database.dbos_retention_row_cap is None
     assert config.blob.root == Path("./blobs")
     assert config.serve.port == 8710
     assert config.serve.request_shutdown_seconds == 30
@@ -61,6 +63,29 @@ def test_source_sync_idle_days_parses(tmp_path: Path) -> None:
     path = tmp_path / "ufo.toml"
     path.write_text(VALID + "\n[serve]\nsource_sync_idle_days = 14\n")
     assert load_config(path).serve.source_sync_idle_days == 14
+
+
+def test_dbos_retention_settings_parse_and_must_be_positive(tmp_path: Path) -> None:
+    path = tmp_path / "ufo.toml"
+    configured = VALID.replace(
+        'url = "sqlite+aiosqlite:///ufo.db"',
+        'url = "sqlite+aiosqlite:///ufo.db"\n'
+        "dbos_retention_days = 14\n"
+        "dbos_retention_row_cap = 100000",
+    )
+    path.write_text(configured)
+    assert load_config(path).database.dbos_retention_days == 14
+    assert load_config(path).database.dbos_retention_row_cap == 100_000
+
+    for key in ("dbos_retention_days", "dbos_retention_row_cap"):
+        path.write_text(
+            VALID.replace(
+                'url = "sqlite+aiosqlite:///ufo.db"',
+                f'{key} = 0\nurl = "sqlite+aiosqlite:///ufo.db"',
+            )
+        )
+        with pytest.raises(ValidationError):
+            load_config(path)
 
 
 def test_filesystem_backend_requires_root(tmp_path: Path) -> None:

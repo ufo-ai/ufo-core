@@ -12,7 +12,9 @@ from ufo.runtime import runtime_instance
 from ufo.runtime.runtime_instance import (
     STALE_AFTER_SECONDS,
     STRANDED_TURN_GRACE_SECONDS,
+    TERMINAL_WORKFLOW_STATUSES,
     CancelReconciler,
+    DBOSRetention,
     ExecutorRecovery,
     Heartbeat,
     StrandedTurnReconciler,
@@ -186,6 +188,44 @@ class _RecordingClient:
             for workflow_id in workflow_ids
             if self.carries.get(workflow_id) in status
         ]
+
+
+@dataclass
+class _RetentionClient:
+    listed: list[dict[str, object]] = field(default_factory=list)
+    deleted: list[list[str]] = field(default_factory=list)
+
+    async def list_workflows_async(self, **filters: object) -> list[SimpleNamespace]:
+        self.listed.append(filters)
+        if filters["completed_before"] is not None:
+            return [SimpleNamespace(workflow_id="expired-success")]
+        return [SimpleNamespace(workflow_id="over-cap")]
+
+    async def delete_workflows_async(self, workflow_ids: list[str]) -> None:
+        self.deleted.append(workflow_ids)
+
+
+async def test_dbos_retention_deletes_only_terminal_workflows_past_age_or_cap() -> None:
+    client = _RetentionClient()
+    before = datetime.now(UTC) - timedelta(days=7, seconds=1)
+
+    deleted = await DBOSRetention(client=client, retention_days=7, row_cap=50).sweep()  # type: ignore[arg-type]
+
+    after = datetime.now(UTC) - timedelta(days=7)
+    assert deleted == 2
+    assert client.deleted == [["expired-success"], ["over-cap"]]
+    assert len(client.listed) == 2
+    age, cap = client.listed
+    assert age["status"] == list(TERMINAL_WORKFLOW_STATUSES)
+    assert before <= datetime.fromisoformat(str(age["completed_before"])) <= after
+    assert age["offset"] is None
+    assert age["sort_desc"] is False
+    assert cap["status"] == list(TERMINAL_WORKFLOW_STATUSES)
+    assert cap["completed_before"] is None
+    assert cap["offset"] == 50
+    assert cap["sort_desc"] is True
+    assert all(call["load_input"] is False for call in client.listed)
+    assert all(call["load_output"] is False for call in client.listed)
 
 
 async def _agent(workspace_id: UUID) -> UUID:
