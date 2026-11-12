@@ -57,7 +57,7 @@ from ufo.runtime.billing.spend import (
     SpendGates,
     composed,
 )
-from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
+from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates, workspace_active_after
 from ufo.runtime.ext.context import (
     CORE_EXTENSION,
     SPEND_REFUSAL_NOTICE_KEY,
@@ -1182,6 +1182,17 @@ def bindings_from(
     return tuple(binding for binding in bindings if binding.key not in disabled)
 
 
+IDLE_FILTERED_JOB_KEYS = frozenset(
+    {
+        "web:setup-goals",
+        "core:product_census",
+        "core:member_gravatar",
+        "metronome:usage_shipper",
+    }
+)
+ACTIVE_JOB_WORKFLOW_STATUSES = ("ENQUEUED", "PENDING")
+
+
 @dataclass(frozen=True)
 class JobRunner:
     """Boot registration for the deploy: publish the firing table, then register each cron job and
@@ -1198,6 +1209,7 @@ class JobRunner:
 
     bindings: tuple[_Binding, ...]
     manifests: tuple[Manifest, ...]
+    client: DBOSClient | None = None
     invoker_factory: InvokerFactory | None = None
     index: IndexBackend | None = None
     embed: EmbedClient | None = None
@@ -1211,6 +1223,7 @@ class JobRunner:
     ledger: Ledger = UNGATED_LEDGER
     public_base_url: str | None = None
     home_surface: str | None = None
+    idle_after: timedelta | None = None
     provisioned_workspaces: set[UUID] = field(default_factory=set, compare=False, repr=False)
 
     def launch(self) -> None:
@@ -1256,31 +1269,69 @@ class JobRunner:
         if self._registered(key) is None:
             warn("jobs.tick_unregistered", key=key)
             return
-        for workspace_id in await self.candidates(key):
-            with SetEnqueueOptions(deduplication_id=f"{key}:{workspace_id}"):
+        candidates = await self.candidates(key)
+        if not candidates:
+            return
+        if self.client is None:
+            queued = await DBOS.list_queued_workflows_async(
+                queue_name=JOB_QUEUE_NAME,
+                status=list(ACTIVE_JOB_WORKFLOW_STATUSES),
+                load_input=False,
+                load_output=False,
+            )
+        else:
+            queued = await self.client.list_workflows_async(
+                queue_name=JOB_QUEUE_NAME,
+                status=list(ACTIVE_JOB_WORKFLOW_STATUSES),
+                queues_only=True,
+                load_input=False,
+                load_output=False,
+            )
+        active_deduplication_ids = {
+            workflow.deduplication_id
+            for workflow in queued
+            if workflow.deduplication_id is not None
+        }
+        for workspace_id in candidates:
+            deduplication_id = f"{key}:{workspace_id}"
+            if deduplication_id in active_deduplication_ids:
+                warn("jobs.tick_skipped", key=key, workspace_id=str(workspace_id))
+                continue
+            with SetEnqueueOptions(deduplication_id=deduplication_id):
                 try:
                     await DBOS.enqueue_workflow_async(
                         JOB_QUEUE_NAME, job_workflow, scheduled_time, key, str(workspace_id)
                     )
                 except dbos_error.DBOSQueueDeduplicatedError:
                     warn("jobs.tick_skipped", key=key, workspace_id=str(workspace_id))
+                else:
+                    active_deduplication_ids.add(deduplication_id)
 
     async def candidates(self, key: str) -> tuple[UUID, ...]:
         spec = self._binding(key).spec
         named = await spec.candidates()
-        if not spec.spends or not named or not self.spend.gates:
+        if not named:
+            return named
+        filters: list[sa.ColumnElement[bool]] = []
+        if spec.spends and self.spend.gates:
+            filters.append(self.spend.admitting(tables.workspace.c.id))
+        if self.idle_after is not None and key in IDLE_FILTERED_JOB_KEYS:
+            filters.append(
+                workspace_active_after(tables.workspace.c.id, datetime.now(UTC) - self.idle_after)
+            )
+        if not filters:
             return named
         async with owner_tx() as connection:
             rows = (
                 await connection.execute(
                     sa.select(tables.workspace.c.id).where(
                         tables.workspace.c.id.in_(named),
-                        self.spend.admitting(tables.workspace.c.id),
+                        *filters,
                     )
                 )
             ).all()
-        solvent = {row.id for row in rows}
-        return tuple(workspace_id for workspace_id in named if workspace_id in solvent)
+        admitted = {row.id for row in rows}
+        return tuple(workspace_id for workspace_id in named if workspace_id in admitted)
 
     async def fire(self, key: str, workspace_id: UUID) -> None:
         binding = self._binding(key)

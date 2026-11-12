@@ -34,9 +34,17 @@ EXECUTOR_RECOVERY_INTERVAL_SECONDS = 5
 CANCEL_RECONCILE_INTERVAL_SECONDS = 5
 STRANDED_RECONCILE_INTERVAL_SECONDS = 60
 STRANDED_TURN_GRACE_SECONDS = 300
+DBOS_RETENTION_INTERVAL_SECONDS = 3600
+DBOS_RETENTION_DELETE_BATCH_SIZE = 10_000
 PENDING_WORKFLOW_SCAN_LIMIT = 1000
 CLAIMED_TURN_SCAN_LIMIT = 1000
 ADVANCING_WORKFLOW_STATUSES = ("PENDING", "ENQUEUED", "DELAYED")
+TERMINAL_WORKFLOW_STATUSES = (
+    "SUCCESS",
+    "ERROR",
+    "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
+    "CANCELLED",
+)
 
 
 async def record_fleet_seat(instance_id: UUID) -> None:
@@ -98,6 +106,63 @@ class Heartbeat:
                     tables.runtime_instance.c.id == self.instance_id
                 )
             )
+
+
+@dataclass(frozen=True)
+class DBOSRetention:
+    client: DBOSClient
+    retention_days: int = 7
+    row_cap: int | None = None
+    interval_seconds: float = DBOS_RETENTION_INTERVAL_SECONDS
+
+    async def run(self) -> None:
+        while True:
+            await asyncio.sleep(self.interval_seconds)
+            try:
+                await self.sweep()
+            except (sa.exc.SQLAlchemyError, dbos_error.DBOSException) as error:
+                log("instance.dbos_retention_failed", error_class=type(error).__name__)
+
+    async def sweep(self) -> int:
+        cutoff = datetime.now(UTC) - timedelta(days=self.retention_days)
+        deleted = await self._delete_batches(completed_before=cutoff.isoformat())
+        if self.row_cap is not None:
+            deleted += await self._delete_batches(offset=self.row_cap, sort_desc=True)
+        if deleted:
+            log(
+                "instance.dbos_retention_pruned",
+                workflows=deleted,
+                retention_days=self.retention_days,
+                row_cap=self.row_cap,
+            )
+        return deleted
+
+    async def _delete_batches(
+        self,
+        *,
+        completed_before: str | None = None,
+        offset: int | None = None,
+        sort_desc: bool = False,
+    ) -> int:
+        deleted = 0
+        while True:
+            workflows = await self.client.list_workflows_async(
+                status=list(TERMINAL_WORKFLOW_STATUSES),
+                completed_before=completed_before,
+                offset=offset,
+                sort_desc=sort_desc,
+                limit=DBOS_RETENTION_DELETE_BATCH_SIZE,
+                load_input=False,
+                load_output=False,
+            )
+            if not workflows:
+                return deleted
+            await self.client.delete_workflows_async(
+                [workflow.workflow_id for workflow in workflows]
+            )
+            deleted += len(workflows)
+            if len(workflows) < DBOS_RETENTION_DELETE_BATCH_SIZE:
+                return deleted
 
 
 @dataclass(frozen=True)

@@ -15,13 +15,50 @@ would freeze it. A core sweep names its candidates the same shape — a zero-arg
 returning workspace ids — computing them however it needs."""
 
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from uuid import UUID
 
 import sqlalchemy as sa
 
 from ufo.db import owner_tx
+from ufo.schema import tables
+from ufo.schema.records import MEMBER_ADMISSION
 
 WorkspaceCandidates = Callable[[], Awaitable[tuple[UUID, ...]]]
+
+
+def workspace_active_after(
+    workspace_id: sa.ColumnElement[UUID], cutoff: datetime
+) -> sa.ColumnElement[bool]:
+    workspace = tables.workspace.alias("active_workspace")
+    return sa.or_(
+        sa.exists(
+            sa.select(sa.literal(1))
+            .select_from(workspace)
+            .where(
+                workspace.c.id == workspace_id,
+                workspace.c.created_at >= cutoff,
+            )
+        ),
+        sa.exists(
+            sa.select(sa.literal(1))
+            .select_from(tables.turn)
+            .where(
+                tables.turn.c.workspace_id == workspace_id,
+                tables.turn.c.admission_source == MEMBER_ADMISSION,
+                tables.turn.c.created_at >= cutoff,
+            )
+        ),
+        sa.exists(
+            sa.select(sa.literal(1))
+            .select_from(tables.inbound_message)
+            .where(
+                tables.inbound_message.c.workspace_id == workspace_id,
+                tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
+                tables.inbound_message.c.created_at >= cutoff,
+            )
+        ),
+    )
 
 
 def owner_candidates(due: Callable[[], sa.Select[tuple[UUID]]]) -> WorkspaceCandidates:

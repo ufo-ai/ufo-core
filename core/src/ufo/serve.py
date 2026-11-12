@@ -193,6 +193,7 @@ from ufo.runtime.provisioning import Provisioning
 from ufo.runtime.queue import Runtime, init_runtime, register_turn_queues
 from ufo.runtime.runtime_instance import (
     CancelReconciler,
+    DBOSRetention,
     ExecutorRecovery,
     Heartbeat,
     StrandedTurnReconciler,
@@ -553,6 +554,11 @@ def run(fleet: Fleet) -> None:
     app.state.fleet = fleet
     app.state.hub = hub
     app.state.dbos = dbos_client
+    app.state.dbos_retention = DBOSRetention(
+        client=dbos_client,
+        retention_days=config.database.dbos_retention_days,
+        row_cap=config.database.dbos_retention_row_cap,
+    )
     app.state.instance_id = instance_id
     app.state.durable_surfaces = durable_surfaces(manifests)
     app.state.writeback_poller = None
@@ -751,6 +757,7 @@ def _launch_jobs(
     JobRunner(
         bindings=bindings,
         manifests=runtime.manifests,
+        client=runtime.dbos,
         invoker_factory=invoker_for,
         index=runtime.index,
         embed=runtime.embed,
@@ -764,6 +771,11 @@ def _launch_jobs(
         ledger=runtime.ledger,
         public_base_url=runtime.config.connect.public_base_url,
         home_surface=home_surface(runtime.manifests),
+        idle_after=(
+            None
+            if runtime.config.serve.source_sync_idle_days is None
+            else timedelta(days=runtime.config.serve.source_sync_idle_days)
+        ),
     ).launch()
 
 
@@ -1483,6 +1495,7 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with asyncio.TaskGroup() as group:
         tasks = [
             group.create_task(ExecutorRecovery().run()),
+            group.create_task(app.state.dbos_retention.run()),
             group.create_task(CancelReconciler(client=app.state.dbos).run()),
             group.create_task(StrandedTurnReconciler(client=app.state.dbos).run()),
         ]
