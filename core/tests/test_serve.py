@@ -370,14 +370,13 @@ async def test_serve_lifespan_waits_for_background_shutdown(
     )
     async with serve._serve_lifespan(app):
         await recovery.started.wait()
-        await retention.started.wait()
         await reconciler.started.wait()
         await stranded.started.wait()
         await poller.started.wait()
         await speaker.started.wait()
         await listener.started.wait()
+        assert not retention.started.is_set()
     assert recovery.stopped.is_set()
-    assert retention.stopped.is_set()
     assert reconciler.stopped.is_set()
     assert stranded.stopped.is_set()
     assert poller.stopped.is_set()
@@ -391,6 +390,7 @@ async def test_the_jobs_fleet_runs_the_reconcilers_and_none_of_the_surface_deliv
     """Fleet-wide sweeps run on both fleets, so a jobs process can reclaim a dead turns process's
     turns and the reverse."""
     recovery = ShutdownProbe()
+    retention = ShutdownProbe()
     reconciler = ShutdownProbe()
     stranded = ShutdownProbe()
     poller = ShutdownProbe()
@@ -403,7 +403,7 @@ async def test_the_jobs_fleet_runs_the_reconcilers_and_none_of_the_surface_deliv
         state=SimpleNamespace(
             fleet=serve.JOBS_FLEET,
             dbos=object(),
-            dbos_retention=ShutdownProbe(),
+            dbos_retention=retention,
             writeback_poller=poller,
             mid_turn_reply_poller=speaker,
             surface_listeners=(listener,),
@@ -413,12 +413,14 @@ async def test_the_jobs_fleet_runs_the_reconcilers_and_none_of_the_surface_deliv
     )
     async with serve._serve_lifespan(app):
         await recovery.started.wait()
+        await retention.started.wait()
         await reconciler.started.wait()
         await stranded.started.wait()
         await asyncio.sleep(0)
         assert not poller.started.is_set()
         assert not speaker.started.is_set()
         assert not listener.started.is_set()
+    assert retention.stopped.is_set()
 
 
 async def test_a_surface_boot_starts_its_work_before_the_first_request(

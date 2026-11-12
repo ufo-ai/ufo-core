@@ -13,6 +13,7 @@ mid-execution; recovering it would start a second concurrent execution of a live
 loser parks forever in DBOS's duplicate-execution wait — the sweep never touches it."""
 
 import asyncio
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -34,8 +35,13 @@ EXECUTOR_RECOVERY_INTERVAL_SECONDS = 5
 CANCEL_RECONCILE_INTERVAL_SECONDS = 5
 STRANDED_RECONCILE_INTERVAL_SECONDS = 60
 STRANDED_TURN_GRACE_SECONDS = 300
+DBOS_RETENTION_INITIAL_DELAY_SECONDS = 60
 DBOS_RETENTION_INTERVAL_SECONDS = 3600
-DBOS_RETENTION_DELETE_BATCH_SIZE = 10_000
+DBOS_RETENTION_DELETE_BATCH_SIZE = 1000
+DBOS_RETENTION_BATCH_PAUSE_SECONDS = 0.1
+DBOS_RETENTION_ROW_BUDGET = 10_000
+DBOS_RETENTION_TIME_BUDGET_SECONDS = 30
+DBOS_RETENTION_ADVISORY_LOCK_ID = 1_437_808_162
 PENDING_WORKFLOW_SCAN_LIMIT = 1000
 CLAIMED_TURN_SCAN_LIMIT = 1000
 ADVANCING_WORKFLOW_STATUSES = ("PENDING", "ENQUEUED", "DELAYED")
@@ -113,56 +119,108 @@ class DBOSRetention:
     client: DBOSClient
     retention_days: int = 7
     row_cap: int | None = None
+    initial_delay_seconds: float = DBOS_RETENTION_INITIAL_DELAY_SECONDS
     interval_seconds: float = DBOS_RETENTION_INTERVAL_SECONDS
 
     async def run(self) -> None:
+        await asyncio.sleep(self.initial_delay_seconds)
         while True:
-            await asyncio.sleep(self.interval_seconds)
             try:
                 await self.sweep()
-            except (sa.exc.SQLAlchemyError, dbos_error.DBOSException) as error:
+            except Exception as error:
                 log("instance.dbos_retention_failed", error_class=type(error).__name__)
+            await asyncio.sleep(self.interval_seconds)
 
     async def sweep(self) -> int:
-        cutoff = datetime.now(UTC) - timedelta(days=self.retention_days)
-        deleted = await self._delete_batches(completed_before=cutoff.isoformat())
-        if self.row_cap is not None:
-            deleted += await self._delete_batches(offset=self.row_cap, sort_desc=True)
-        if deleted:
+        started = time.monotonic()
+        deleted = 0
+        batches = 0
+        budget_exhausted = False
+        try:
+            async with owner_tx() as connection:
+                lock_acquired = (
+                    await connection.execute(
+                        sa.text("select pg_try_advisory_lock(:lock_id)"),
+                        {"lock_id": DBOS_RETENTION_ADVISORY_LOCK_ID},
+                    )
+                ).scalar_one()
+                if not lock_acquired:
+                    return 0
+                try:
+                    cutoff = datetime.now(UTC) - timedelta(days=self.retention_days)
+                    pruned, batch_count, budget_exhausted = await self._delete_batches(
+                        started=started,
+                        row_budget=DBOS_RETENTION_ROW_BUDGET,
+                        completed_before=cutoff.isoformat(),
+                    )
+                    deleted += pruned
+                    batches += batch_count
+                    if self.row_cap is not None and not budget_exhausted:
+                        pruned, batch_count, budget_exhausted = await self._delete_batches(
+                            started=started,
+                            row_budget=DBOS_RETENTION_ROW_BUDGET - deleted,
+                            offset=self.row_cap,
+                            sort_desc=True,
+                        )
+                        deleted += pruned
+                        batches += batch_count
+                finally:
+                    await connection.execute(
+                        sa.text("select pg_advisory_unlock(:lock_id)"),
+                        {"lock_id": DBOS_RETENTION_ADVISORY_LOCK_ID},
+                    )
+        finally:
             log(
-                "instance.dbos_retention_pruned",
-                workflows=deleted,
-                retention_days=self.retention_days,
-                row_cap=self.row_cap,
+                "instance.dbos_retention_sweep",
+                deleted=deleted,
+                duration_ms=round((time.monotonic() - started) * 1000),
+                batches=batches,
+                budget_exhausted=budget_exhausted,
             )
         return deleted
 
     async def _delete_batches(
         self,
         *,
+        started: float,
+        row_budget: int,
         completed_before: str | None = None,
         offset: int | None = None,
         sort_desc: bool = False,
-    ) -> int:
+    ) -> tuple[int, int, bool]:
         deleted = 0
+        batches = 0
         while True:
+            if (
+                deleted >= row_budget
+                or time.monotonic() - started >= DBOS_RETENTION_TIME_BUDGET_SECONDS
+            ):
+                return deleted, batches, True
+            limit = min(DBOS_RETENTION_DELETE_BATCH_SIZE, row_budget - deleted)
             workflows = await self.client.list_workflows_async(
                 status=list(TERMINAL_WORKFLOW_STATUSES),
                 completed_before=completed_before,
                 offset=offset,
                 sort_desc=sort_desc,
-                limit=DBOS_RETENTION_DELETE_BATCH_SIZE,
+                limit=limit,
                 load_input=False,
                 load_output=False,
             )
             if not workflows:
-                return deleted
+                return deleted, batches, False
             await self.client.delete_workflows_async(
                 [workflow.workflow_id for workflow in workflows]
             )
             deleted += len(workflows)
-            if len(workflows) < DBOS_RETENTION_DELETE_BATCH_SIZE:
-                return deleted
+            batches += 1
+            if len(workflows) < limit:
+                return deleted, batches, False
+            if (
+                deleted >= row_budget
+                or time.monotonic() - started >= DBOS_RETENTION_TIME_BUDGET_SECONDS
+            ):
+                return deleted, batches, True
+            await asyncio.sleep(DBOS_RETENTION_BATCH_PAUSE_SECONDS)
 
 
 @dataclass(frozen=True)

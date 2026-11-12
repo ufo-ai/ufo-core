@@ -1495,10 +1495,11 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with asyncio.TaskGroup() as group:
         tasks = [
             group.create_task(ExecutorRecovery().run()),
-            group.create_task(app.state.dbos_retention.run()),
             group.create_task(CancelReconciler(client=app.state.dbos).run()),
             group.create_task(StrandedTurnReconciler(client=app.state.dbos).run()),
         ]
+        if app.state.fleet == JOBS_FLEET:
+            tasks.append(group.create_task(app.state.dbos_retention.run()))
         if app.state.fleet.surfaces:
             for boot in app.state.surface_boots:
                 boot(FleetBlobStore(backend=app.state.blob.backend))
