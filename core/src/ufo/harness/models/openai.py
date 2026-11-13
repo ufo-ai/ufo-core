@@ -17,7 +17,7 @@ import asyncio
 import base64
 import binascii
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, cast
 
@@ -35,9 +35,12 @@ from openai.types.responses import (
     ResponseIncompleteEvent,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
+    ResponseOutputRefusal,
     ResponseReasoningItem,
     ResponseReasoningItemParam,
     ResponseRefusalDeltaEvent,
+    ResponseRefusalDoneEvent,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
 )
@@ -610,11 +613,16 @@ class _ResponsesStream:
         self.reasoning: list[ReasoningItemBlock] = []
         self.usage: Usage | None = None
         self.terminal_error: Exception | None = None
+        self.text_parts: list[str] = []
+        self.refusal_parts: list[str] = []
+        self.refusal: str | None = None
+        self.refusal_details: dict[str, object] | None = None
 
     def accept(self, event: ResponseStreamEvent) -> tuple[ModelEvent, ...]:
         emitted: tuple[ModelEvent, ...] = ()
         match event:
             case ResponseTextDeltaEvent(delta=text):
+                self.text_parts.append(text)
                 emitted = (TextDelta(text=text),)
             case ResponseOutputItemAddedEvent(
                 item=ResponseFunctionToolCall(id=item_id, call_id=call_id, name=name)
@@ -635,11 +643,14 @@ class _ResponsesStream:
             case ResponseOutputItemDoneEvent(item=ResponseReasoningItem() as item):
                 self._record_reasoning(item)
             case ResponseRefusalDeltaEvent(delta=refusal):
-                self.terminal_error = ModelRefusal(f"OpenAI declined the completion: {refusal}")
+                self.refusal_parts.append(refusal)
+            case ResponseRefusalDoneEvent(refusal=refusal):
+                self.refusal = refusal
             case ResponseCompletedEvent(response=response):
                 if response.usage is None:
                     raise RuntimeError("model stream produced no usage")
                 self.usage = _responses_usage(response.usage, self.cache_write_30m_priced)
+                self._record_completed_refusal(response.output)
             case ResponseIncompleteEvent(response=response):
                 self._record_incomplete(response)
             case ResponseFailedEvent(response=response):
@@ -651,6 +662,15 @@ class _ResponsesStream:
                 self.terminal_error = RuntimeError(f"OpenAI response failed: {message}")
         self.yielded = self.yielded or bool(emitted)
         return emitted
+
+    def _record_completed_refusal(self, output: Sequence[object]) -> None:
+        for item in output:
+            if not isinstance(item, ResponseOutputMessage):
+                continue
+            for part in item.content:
+                if isinstance(part, ResponseOutputRefusal):
+                    self.refusal = part.refusal
+                    self.refusal_details = part.model_dump(mode="json")
 
     def _record_reasoning(self, item: ResponseReasoningItem) -> None:
         if item.encrypted_content is None:
@@ -672,18 +692,31 @@ class _ResponsesStream:
                 "OpenAI response truncated at the max_output_tokens budget"
             )
         elif reason is not None and reason.reason == "content_filter":
-            self.terminal_error = ModelRefusal("OpenAI declined the completion (content_filter)")
+            self.terminal_error = ModelRefusal(
+                category="content_filter",
+                details=reason.model_dump(mode="json"),
+                partial_text="".join(self.text_parts),
+            )
         else:
             self.terminal_error = RuntimeError("OpenAI returned an incomplete response")
 
     def finish(self) -> tuple[Usage, Exception | None]:
         """A truncation or refusal that reported no usage keeps its own class, so the engine
         recovers the round."""
+        terminal_error = self.terminal_error
+        if terminal_error is None and (self.refusal is not None or self.refusal_parts):
+            explanation = self.refusal or "".join(self.refusal_parts)
+            terminal_error = ModelRefusal(
+                explanation=explanation or None,
+                details=self.refusal_details
+                or ({"type": "refusal", "refusal": explanation} if explanation else None),
+                partial_text="".join(self.text_parts),
+            )
         if self.usage is None:
-            if self.terminal_error is not None:
-                raise self.terminal_error
+            if terminal_error is not None:
+                raise terminal_error
             raise RuntimeError("model stream produced no usage")
-        return self.usage, self.terminal_error
+        return self.usage, terminal_error
 
 
 @dataclass(frozen=True)

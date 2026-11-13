@@ -209,9 +209,24 @@ class ModelResponseTruncated(RuntimeError):
 
 
 class ModelRefusal(RuntimeError):
-    """The provider declined the completion outright (Anthropic stop_reason=refusal). Raised
-    loudly rather than delivering the zero-content stream as an empty success — a refusal is
-    deterministic per request, so retrying or degrading would only mislabel the failure."""
+    """The provider declined the completion outright. The provider's explanation and category,
+    its raw refusal details, and any answer text emitted before a mid-stream refusal stay attached
+    so the runtime can report the decline without mislabeling it as an internal failure."""
+
+    def __init__(
+        self,
+        *,
+        explanation: str | None = None,
+        category: str | None = None,
+        details: dict[str, object] | None = None,
+        partial_text: str = "",
+    ) -> None:
+        self.explanation = explanation
+        self.category = category
+        self.details = details
+        self.partial_text = partial_text
+        message = explanation or (f"Refusal category: {category}." if category else "")
+        super().__init__(message)
 
 
 class ModelAccountRateLimited(RuntimeError):
