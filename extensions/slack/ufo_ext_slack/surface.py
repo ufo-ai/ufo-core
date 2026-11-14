@@ -67,8 +67,9 @@ past its first checkpoint posts bare — the footer belongs to the turn's first 
 reporter cannot be sending.
 
 A reply whose turn ended by asking the user (`Writeback.question`) renders the whole ask as one
-Block Kit form — the title, a control per question (radio buttons for a single choice, checkboxes
-for a multi-select, a text box for free text), and one submit button for all of them. The controls
+Block Kit form in the originating thread — the title, a control per question (radio buttons for a
+single choice, checkboxes for a multi-select, a text box for free text), and one submit button for
+all of them. The controls
 sit in input blocks, which dispatch nothing as they change, so a selection is local to the member's
 own client: they switch a choice, tick and untick values, and retype until the answer reads right,
 and this surface hears none of it. Only the submit is a commit. The `interactive` route receives it,
@@ -843,7 +844,6 @@ ASK_REPLY_TEXT = "Reply with your answers."
 ASK_PROSE_HINT = "_Answer by replying in this thread._"
 ASK_MULTI_SELECT_NOTE = "_Select all that apply._"
 ASK_EMPTY_SUBMIT_TEXT = "Choose an answer before you submit."
-TARGETED_ASK_PUBLIC_TEXT = "A private question is available to the requested member."
 ASK_SUBMITTED_LINE = "✅ *{question}* — {answer}"
 ASK_UNANSWERED_LINE = "*{question}* — no answer"
 ASK_SUBMITTED_BY_LINE = "Submitted by <@{user}>"
@@ -1384,13 +1384,13 @@ def slack_ask_blocks(
     if question is None:
         return None
     if question.target_member_id is None and binding is not None:
-        raise ValueError("an untargeted Slack question cannot carry a private binding")
+        raise ValueError("an untargeted Slack question cannot carry a targeted binding")
     if question.target_member_id is not None and (
         binding is None
         or binding.target_member_id != question.target_member_id
         or binding.authorization_id != question.authorization_id
     ):
-        raise ValueError("a targeted Slack question requires its exact private binding")
+        raise ValueError("a targeted Slack question requires its exact binding")
     controls = [_ask_control(index, ask) for index, ask in enumerate(question.questions)]
     title = _ask_sections(f"*{question.title}*")
     if any(control is None for control in controls):
@@ -1610,7 +1610,7 @@ def slack_public_question_reply(
 ) -> tuple[tuple[str, ...], list[dict[str, object]] | None]:
     """Keep a public form when it fits; split its complete prose when it exceeds Slack limits."""
     if question is not None and question.target_member_id is not None:
-        raise ValueError("private questions require bound controls")
+        raise ValueError("targeted questions require bound controls")
     actions = [*(slack_ask_blocks(question) or ()), *(connect_actions or ())] or None
     parts = tuple(slack_reply_parts(text))
     if question is None:
@@ -1630,17 +1630,19 @@ def slack_public_question_reply(
     ), connect_actions
 
 
-def slack_private_question_reply(
+def slack_targeted_question_reply(
     channel: str,
+    thread_ts: str | None,
     text: str,
+    metadata: str | None,
     question: AskUserInput,
     binding: _SlackAskBinding,
+    connect_actions: list[dict[str, object]] | None = None,
 ) -> tuple[tuple[str, ...], list[dict[str, object]], _SlackStoredQuestion | None]:
-    """Keep private controls together and store full questions for split messages."""
-    actions = slack_ask_blocks(question, binding)
-    assert actions is not None
+    """Keep targeted controls together and store full questions for split messages."""
+    actions = [*(slack_ask_blocks(question, binding) or ()), *(connect_actions or ())]
     parts = () if is_silence_sentinel(text) else tuple(slack_reply_parts(text))
-    if _slack_form_fits(channel, None, ASK_FORM_TEXT, None, actions):
+    if _slack_form_fits(channel, thread_ts, ASK_FORM_TEXT, metadata, actions):
         return (*parts, ASK_FORM_TEXT), actions, None
     bound = binding.model_copy(update={"stored_question": True})
     compact = question.model_copy(
@@ -1666,8 +1668,7 @@ def slack_private_question_reply(
             "title": "Questions",
         }
     )
-    actions = slack_ask_blocks(compact, bound)
-    assert actions is not None
+    actions = [*(slack_ask_blocks(compact, bound) or ()), *(connect_actions or ())]
     prose = "\n\n".join(
         (
             question.title,
@@ -1677,10 +1678,10 @@ def slack_private_question_reply(
             ),
         )
     )
-    parts = (*parts, *_slack_question_parts(channel, None, prose, None, None))
+    parts = (*parts, *_slack_question_parts(channel, thread_ts, prose, None, None))
     control_text = ASK_FORM_TEXT
-    if not _slack_form_fits(channel, None, control_text, None, actions):
-        raise ValueError("Private Slack controls exceed the message size limit")
+    if not _slack_form_fits(channel, thread_ts, control_text, metadata, actions):
+        raise ValueError("Targeted Slack controls exceed the message size limit")
     return (
         (*parts, control_text),
         actions,
@@ -1695,7 +1696,7 @@ def slack_private_question_reply(
 def slack_connect_blocks(
     request: ConnectRequest | None, turn_id: UUID
 ) -> list[dict[str, object]] | None:
-    """The requester-checked private OAuth handoff for a turn's connect request.
+    """The requester-checked OAuth handoff for a turn's connect request.
 
     It rides the reply beside the question's controls when the turn left both. The two are separate
     acts — one is answered in the thread, the other on the provider's pages — so a turn that asked
@@ -4829,9 +4830,9 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
     Before an uncertain request, its delivery ID is attached as Slack message metadata; a retry
     reads that marker back before deciding whether to post, covering a response lost after Slack
     accepted the message. The completed checkpoint survives until `attach`, after core has durably
-    recorded the first message as the delivery ref. A targeted question posts only a generic line
-    in the public thread and sends its exact reply and controls to the target's linked bot DM; both
-    destinations share this checkpoint and the private control routes its answer back here."""
+    recorded the first message as the delivery ref. A targeted question posts its exact reply and
+    controls in the originating thread. Its binding accepts an answer only from the target member
+    and routes that answer back to the original conversation."""
     channel = writeback.queue_key.partition(":")[0]
     if writeback_says_nothing(writeback):
         log("slack.reply_suppressed", turn=str(writeback.turn_id), channel=channel)
@@ -4853,29 +4854,29 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
         return f"{channel}:{progress.deliveries[0].ts}"
     linked = await _reply_with_links(ctx, writeback)
     question = writeback.terminal.question
-    target_member_id = None if question is None else question.target_member_id
-    targeted = target_member_id is not None
-    private_user = (
-        None if target_member_id is None else await ctx.member_external_id(target_member_id)
-    )
-    private_channel = (
-        None if private_user is None else await _member_dm_channel(bot_token, private_user)
-    )
-    if targeted:
-        text = TARGETED_ASK_PUBLIC_TEXT
-    else:
-        progress, stored, text = await _reply_mentions_mapped(
-            ctx,
-            bot_token,
-            channel,
-            linked,
-            store,
-            progress_key,
-            progress,
-            stored,
-            writeback.conversation_id,
-            writeback.agent_id,
+    binding = (
+        None
+        if question is None or question.target_member_id is None
+        else _SlackAskBinding(
+            target_member_id=question.target_member_id,
+            conversation_id=writeback.conversation_id,
+            queue_key=writeback.queue_key,
+            question_turn_id=writeback.turn_id,
+            authorization_id=question.authorization_id,
         )
+    )
+    progress, stored, text = await _reply_mentions_mapped(
+        ctx,
+        bot_token,
+        channel,
+        linked,
+        store,
+        progress_key,
+        progress,
+        stored,
+        writeback.conversation_id,
+        writeback.agent_id,
+    )
     unfurl = not any(artifact.role == "details" for artifact in writeback.artifacts)
     model = writeback.terminal.model or "no-model"
     params = (
@@ -4891,59 +4892,45 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
         f"({writeback.terminal.tokens:,} tokens, {writeback.terminal.cache_percent}% cached) · "
         f"{model}{params}",
     )
-    public_parts, public_actions = slack_public_question_reply(
-        channel,
-        thread,
-        text,
-        metadata,
-        None if targeted else question,
-        slack_connect_blocks(writeback.terminal.connect_request, writeback.turn_id),
-    )
+    connect_actions = slack_connect_blocks(writeback.terminal.connect_request, writeback.turn_id)
+    if binding is None:
+        parts, actions = slack_public_question_reply(
+            channel,
+            thread,
+            text,
+            metadata,
+            question,
+            connect_actions,
+        )
+        stored_question = None
+    else:
+        assert question is not None
+        parts, actions, stored_question = slack_targeted_question_reply(
+            channel,
+            thread,
+            text,
+            metadata,
+            question,
+            binding,
+            connect_actions,
+        )
+    if stored_question is not None:
+        await store.put(
+            f"{SLACK_ASK_FORM_PREFIX}{writeback.turn_id}",
+            stored_question.model_dump(mode="json"),
+        )
     targets = [
         _SlackReplyTarget(
             channel=channel,
             thread_ts=thread,
-            parts=public_parts,
+            parts=parts,
             metadata=metadata,
-            actions=public_actions,
+            actions=actions,
             scope="",
             unfurl=unfurl,
             hold_connect=True,
         )
     ]
-    if targeted and private_channel is not None:
-        assert question is not None
-        assert question.target_member_id is not None
-        binding = _SlackAskBinding(
-            target_member_id=question.target_member_id,
-            conversation_id=writeback.conversation_id,
-            queue_key=writeback.queue_key,
-            question_turn_id=writeback.turn_id,
-            authorization_id=question.authorization_id,
-        )
-        private_parts, private_actions, stored_question = slack_private_question_reply(
-            private_channel,
-            linked,
-            question,
-            binding,
-        )
-        if stored_question is not None:
-            await store.put(
-                f"{SLACK_ASK_FORM_PREFIX}{writeback.turn_id}",
-                stored_question.model_dump(mode="json"),
-            )
-        targets.append(
-            _SlackReplyTarget(
-                channel=private_channel,
-                thread_ts=None,
-                parts=private_parts,
-                metadata=None,
-                actions=private_actions,
-                scope="private:",
-                unfurl=unfurl,
-                hold_connect=False,
-            )
-        )
     first_ts: str | None = None
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         if progress.pending is not None:

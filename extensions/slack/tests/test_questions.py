@@ -307,7 +307,7 @@ def test_public_question_overflow_keeps_existing_reply_parts() -> None:
 
 @pytest.mark.parametrize("character", ["a", "界", "🚀"])
 @pytest.mark.parametrize("question_length", [40, 12_000])
-def test_private_question_overflow_keeps_bound_controls_and_full_text(
+def test_targeted_question_overflow_keeps_bound_controls_and_full_text(
     character: str, question_length: int
 ) -> None:
     member_id = uuid4()
@@ -318,7 +318,7 @@ def test_private_question_overflow_keeps_bound_controls_and_full_text(
         question_turn_id=uuid4(),
     )
     question = AskUserInput(
-        title="Private report scope",
+        title="Targeted report scope",
         target_member_id=member_id,
         questions=tuple(
             AskQuestion(
@@ -336,10 +336,12 @@ def test_private_question_overflow_keeps_bound_controls_and_full_text(
             for index in range(4)
         ),
     )
-    parts, actions, stored = slack.slack_private_question_reply("D1", "Choose.", question, binding)
+    parts, actions, stored = slack.slack_targeted_question_reply(
+        "C1", "123.456", "Choose.", None, question, binding
+    )
     assert stored is not None
     assert stored.question == question
-    assert stored.channel == "D1"
+    assert stored.channel == "C1"
     assert stored.binding == binding.model_copy(update={"stored_question": True})
     visible = "".join(parts)
     assert question.title in visible
@@ -369,8 +371,8 @@ def test_private_question_overflow_keeps_bound_controls_and_full_text(
         messages = [
             json.loads(
                 slack.slack_reply_body(
-                    "D1",
-                    None,
+                    "C1",
+                    "123.456",
                     part,
                     None,
                     actions=actions if index == len(parts) - 1 else None,
@@ -387,7 +389,7 @@ def test_private_question_overflow_keeps_bound_controls_and_full_text(
         assert sum(block["type"] == "input" for block in messages[-1]["blocks"]) == 4
 
 
-def test_private_question_that_fits_keeps_original_binding() -> None:
+def test_targeted_question_that_fits_keeps_original_binding() -> None:
     member_id = uuid4()
     binding = slack._SlackAskBinding(
         target_member_id=member_id,
@@ -396,11 +398,13 @@ def test_private_question_that_fits_keeps_original_binding() -> None:
         question_turn_id=uuid4(),
     )
     question = AskUserInput(
-        title="Private scope",
+        title="Targeted scope",
         target_member_id=member_id,
         questions=(AskQuestion(question="Which scope?"),),
     )
-    parts, actions, stored = slack.slack_private_question_reply("D1", "Choose.", question, binding)
+    parts, actions, stored = slack.slack_targeted_question_reply(
+        "C1", "123.456", "Choose.", None, question, binding
+    )
     assert parts == ("Choose.", "Submit your answers below.")
     assert actions == slack.slack_ask_blocks(question, binding)
     assert stored is None
@@ -411,7 +415,7 @@ def test_private_question_that_fits_keeps_original_binding() -> None:
     [(None, "Scope"), ("Keep this answer.", "Scope " * 20_000), ("y" * 3_001, "Scope")],
     ids=["suggestion", "chosen", "oversized-chosen"],
 )
-def test_private_free_text_keeps_large_suggestions_outside_the_control(
+def test_targeted_free_text_keeps_large_suggestions_outside_the_control(
     chosen: str | None,
     title: str,
 ) -> None:
@@ -435,7 +439,9 @@ def test_private_free_text_keeps_large_suggestions_outside_the_control(
         queue_key="C5:200.0",
         question_turn_id=uuid4(),
     )
-    parts, actions, stored = slack.slack_private_question_reply("D-U1", "Read.", question, binding)
+    parts, actions, stored = slack.slack_targeted_question_reply(
+        "C5", "200.0", "Read.", None, question, binding
+    )
     assert stored is not None
     assert suggestion in "".join(parts)
     if chosen:
@@ -448,8 +454,8 @@ def test_private_free_text_keeps_large_suggestions_outside_the_control(
     for index, part in enumerate(parts):
         for sections in (False, True):
             body = slack.slack_reply_body(
-                "D-U1",
-                None,
+                "C5",
+                "200.0",
                 part,
                 None,
                 actions=actions if index == len(parts) - 1 else None,
@@ -459,12 +465,12 @@ def test_private_free_text_keeps_large_suggestions_outside_the_control(
 
 
 @pytest.mark.parametrize("text", ["# Heading\n- One\n- Two\n```\ncode\n```", "Details. " * 3_000])
-@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("targeted", [False, True])
 def test_forms_keep_reply_markdown_and_use_a_separate_control_message(
-    text: str, private: bool
+    text: str, targeted: bool
 ) -> None:
     question = AskUserInput(title="Scope", questions=(AskQuestion(question="What should change?"),))
-    if private:
+    if targeted:
         member_id = uuid4()
         question = question.model_copy(update={"target_member_id": member_id})
         binding = slack._SlackAskBinding(
@@ -473,7 +479,9 @@ def test_forms_keep_reply_markdown_and_use_a_separate_control_message(
             queue_key="C1:123.456",
             question_turn_id=uuid4(),
         )
-        parts, actions, stored = slack.slack_private_question_reply("D1", text, question, binding)
+        parts, actions, stored = slack.slack_targeted_question_reply(
+            "C1", "123.456", text, None, question, binding
+        )
         assert stored is None
     else:
         parts, actions = slack.slack_public_question_reply("C1", None, text, None, question)
@@ -482,8 +490,8 @@ def test_forms_keep_reply_markdown_and_use_a_separate_control_message(
     messages = [
         json.loads(
             slack.slack_reply_body(
-                "D1" if private else "C1",
-                None,
+                "C1",
+                "123.456" if targeted else None,
                 part,
                 None,
                 actions=actions if index == len(parts) - 1 else None,
@@ -521,21 +529,23 @@ def test_connect_only_reply_keeps_markdown() -> None:
 
 
 @pytest.mark.parametrize("text", ["<br>", "<br/>", "<BR />", " <response></response> "])
-@pytest.mark.parametrize("private", [False, True])
-def test_silent_question_posts_only_the_form(text: str, private: bool) -> None:
+@pytest.mark.parametrize("targeted", [False, True])
+def test_silent_question_posts_only_the_form(text: str, targeted: bool) -> None:
     question = AskUserInput(
         title="Decision",
         questions=(AskQuestion(question="Proceed?", free_text_only=True),),
-        target_member_id=uuid4() if private else None,
+        target_member_id=uuid4() if targeted else None,
     )
-    if private:
+    if targeted:
         binding = slack._SlackAskBinding(
             target_member_id=question.target_member_id,
             conversation_id=uuid4(),
             queue_key="C1:1.0",
             question_turn_id=uuid4(),
         )
-        parts, actions, stored = slack.slack_private_question_reply("D1", text, question, binding)
+        parts, actions, stored = slack.slack_targeted_question_reply(
+            "C1", "1.0", text, None, question, binding
+        )
         assert stored is None
     else:
         parts, actions = slack.slack_public_question_reply("C1", "1.0", text, None, question)

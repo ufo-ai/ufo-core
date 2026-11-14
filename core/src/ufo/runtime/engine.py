@@ -3718,9 +3718,7 @@ class TurnEngine:
 
     def _sole_active_member(self, requesters: Mapping[UUID, ActiveMessage]) -> UUID | None:
         active_members = self._active_member_ids(requesters)
-        if len(active_members) != 1 or any(
-            message.member_id is None for message in requesters.values()
-        ):
+        if len(active_members) != 1:
             return None
         return next(iter(active_members))
 

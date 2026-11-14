@@ -2791,7 +2791,7 @@ async def test_multi_speaker_calls_resolve_connections_per_call_without_a_scope(
     ]
 
 
-async def test_an_unattributed_speaker_blocks_automatic_member_authority(
+async def test_an_unattributed_request_does_not_turn_a_sole_member_into_a_redirect(
     db: None, tmp_path: Path
 ) -> None:
     class Input(BaseModel):
@@ -2837,10 +2837,8 @@ async def test_an_unattributed_speaker_blocks_automatic_member_authority(
     )
 
     assert not common.is_error and not selected.is_error
-    assert seen == [(None, True), (member, True)]
-    [request] = gate.requests
-    assert request.member_id == member
-    assert request.selected_from_multiple
+    assert seen == [(member, True), (member, True)]
+    assert gate.requests == []
 
 
 async def test_an_omitted_ref_binds_the_only_active_member_in_any_conversation(

@@ -7536,9 +7536,9 @@ async def test_a_dm_past_the_listed_pages_is_posted_to_the_member_id(member_id: 
 
 
 @pytest.mark.parametrize("description_repetitions", [1, 5, 1_000])
-@pytest.mark.parametrize("target_user, dm_listed", [("U1", True), ("U1", False), ("W1", False)])
-async def test_a_targeted_question_is_private_and_answers_its_original_conversation(
-    db: None, tmp_path, monkeypatch, description_repetitions: int, target_user: str, dm_listed: bool
+@pytest.mark.parametrize("target_user", ["U1", "W1"])
+async def test_a_targeted_question_stays_in_its_thread_and_answers_its_original_conversation(
+    db: None, tmp_path, monkeypatch, description_repetitions: int, target_user: str
 ) -> None:
     workspace_id, target_id = await _seed(member_email="target@example.com")
     assert target_id is not None
@@ -7578,18 +7578,7 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
     transport = _mock_transport(
         recorder, {target_user: "target@example.com", "U8": "peer@example.com"}
     )
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if str(request.url).split("?")[0] == slack.SLACK_CONVERSATIONS_LIST_URL and not dm_listed:
-            recorder.append(request)
-            return httpx.Response(
-                200, json={"ok": True, "channels": [], "response_metadata": {"next_cursor": ""}}
-            )
-        return transport.handle_request(request)
-
-    app, client, blob = await _mount_transport(
-        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
-    )
+    app, client, blob = await _mount_transport(monkeypatch, workspace_id, tmp_path, transport)
     authorization_id = uuid4()
     targeted = AskUserInput(
         title="Approve payroll export",
@@ -7635,34 +7624,21 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
         json.loads(request.content)
         for request in _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
     ]
-    public, private = posts[0], posts[-1]
+    control_post = posts[-1]
     compact = description_repetitions == 1_000
-    assert (len(posts) > 3) == compact
-    assert (public["channel"], public["thread_ts"], public["text"]) == (
-        "C5",
-        "200.0",
-        slack.TARGETED_ASK_PUBLIC_TEXT,
-    )
-    public_wire = json.dumps(public)
-    for private_text in (
-        "salary export",
-        "salary.csv",
-        "payroll@example.com",
-        "Allow",
-        "Deny",
-    ):
-        assert private_text not in public_wire
-    assert private["channel"] == (f"D-{target_user}" if dm_listed else target_user)
-    private_wire = (
-        "".join(post["text"] for post in posts[1:])
+    assert (len(posts) > 2) == compact
+    assert all((post["channel"], post["thread_ts"]) == ("C5", "200.0") for post in posts)
+    assert not _requests_to(recorder, slack.SLACK_CONVERSATIONS_LIST_URL)
+    thread_wire = (
+        "".join(post["text"] for post in posts)
         if compact
-        else json.dumps(posts[1:], ensure_ascii=False)
+        else json.dumps(posts, ensure_ascii=False)
     )
-    assert "The salary export is ready for approval." in private_wire
-    assert "Export payroll data with the payroll account?" in private_wire
-    [control] = [block for block in private["blocks"] if block["type"] == "input"]
-    private_options = control["element"]["options"]
-    assert [option["value"] for option in private_options] == [
+    assert "The salary export is ready for approval." in thread_wire
+    assert "Export payroll data with the payroll account?" in thread_wire
+    [control] = [block for block in control_post["blocks"] if block["type"] == "input"]
+    options = control["element"]["options"]
+    assert [option["value"] for option in options] == [
         "allow",
         "deny",
         "always",
@@ -7672,10 +7648,14 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
         "Do not export payroll data.",
         "Export payroll data with this account without asking again.",
     ):
-        assert description * description_repetitions in private_wire
-    binding = slack._SlackAskBinding.model_validate_json(
-        private["blocks"][-1]["elements"][0]["value"]
+        assert description * description_repetitions in thread_wire
+    submit = next(
+        element
+        for block in control_post["blocks"]
+        for element in block.get("elements", ())
+        if element.get("action_id") == slack.ASK_SUBMIT_ACTION_ID
     )
+    binding = slack._SlackAskBinding.model_validate_json(submit["value"])
     async with workspace_tx() as connection:
         original_conversation_id = await connection.scalar(
             sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == question_turn_id)
@@ -7696,7 +7676,7 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
         assert slack._SlackStoredQuestion.model_validate(stored).question == targeted
     blocks = [
         ({**block, "block_id": SUBMIT_BLOCK_ID} if block["type"] == "actions" else block)
-        for block in private["blocks"]
+        for block in control_post["blocks"]
     ]
     choice = {
         "type": "radio_buttons",
@@ -7707,18 +7687,15 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
     }
 
     wrong = _submit_body(
-        choice, user="U8", channel=f"D-{target_user}", thread=None, blocks=blocks, binding=binding
+        choice, user="U8", channel="C5", thread="200.0", blocks=blocks, binding=binding
     )
     right = _submit_body(
         choice,
         user=target_user,
-        channel=f"D-{target_user}",
-        thread=None,
+        channel="C5",
+        thread="200.0",
         blocks=blocks,
         binding=binding,
-    )
-    outside_dm = _submit_body(
-        choice, user=target_user, channel="C5", thread=None, blocks=blocks, binding=binding
     )
     async with client:
         ignored = await client.post(INTERACTIVE_PATH, content=wrong, headers=_signed_form(wrong))
@@ -7734,12 +7711,6 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
                     .where(tables.turn.c.workspace_id == workspace_id)
                 )
             ).scalar_one() == 1
-
-        if compact:
-            refused = await client.post(
-                INTERACTIVE_PATH, content=outside_dm, headers=_signed_form(outside_dm)
-            )
-            assert refused.json() == {"ok": True, "ignored": True}
 
         admitted = await client.post(INTERACTIVE_PATH, content=right, headers=_signed_form(right))
         assert admitted.json() == {"ok": True}
@@ -7778,7 +7749,7 @@ async def test_a_targeted_question_is_private_and_answers_its_original_conversat
     assert answer.context["authorization_choice"] == "always"
     assert member_message_text(answer.inbound) == "Always allow payroll exports"
     [rewrite] = _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)
-    assert json.loads(rewrite.content)["channel"] == f"D-{target_user}"
+    assert json.loads(rewrite.content)["channel"] == "C5"
 
 
 async def test_dm_answer_submit_claims_the_conversation_for_its_resolved_member(
