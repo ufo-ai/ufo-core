@@ -179,7 +179,11 @@ from ufo.runtime.ext.manifest import (
     UserPromptSubmit,
 )
 from ufo.runtime.ext.source_reader import SourceReader
-from ufo.runtime.ext.surface import member_message_ref, member_message_text
+from ufo.runtime.ext.surface import (
+    is_silence_sentinel,
+    member_message_ref,
+    member_message_text,
+)
 from ufo.runtime.hub import (
     Absorbed,
     Activity,
@@ -1980,6 +1984,8 @@ class TurnEngine:
             injected = prepared.injected
             self._window.messages = messages
             change_paths: dict[str, None] = {}
+            recycled_answer: str | None = None
+            recycled_answer_member_refs: frozenset[UUID] = frozenset()
             while True:
                 (
                     final_messages,
@@ -1999,11 +2005,23 @@ class TurnEngine:
                     change_paths,
                     created,
                 )
-                carried, delivered = self._carried_artifacts(answer)
+                member_refs = frozenset(
+                    ref
+                    for ref, requester in requesters.items()
+                    if requester.admission_source == MEMBER_ADMISSION
+                )
+                terminal_answer = (
+                    recycled_answer
+                    if recycled_answer is not None
+                    and is_silence_sentinel(answer)
+                    and member_refs == recycled_answer_member_refs
+                    else answer
+                )
+                carried, delivered = self._carried_artifacts(terminal_answer)
                 staged = await self._stage_carried_artifacts(carried)
                 await self.hooks.fire(
                     "stop",
-                    Stop(answer=answer),
+                    Stop(answer=terminal_answer),
                     self.turn,
                     self.agent,
                     None,
@@ -2023,10 +2041,14 @@ class TurnEngine:
                     carried=staged,
                 )
                 if frame is None:
+                    recycled_answer = (
+                        terminal_answer if not is_silence_sentinel(terminal_answer) else None
+                    )
+                    recycled_answer_member_refs = member_refs
                     log(
                         "turn.answer_recycled",
                         turn_id=str(self.turn.id),
-                        answer_chars=len(answer),
+                        answer_chars=len(terminal_answer),
                         absorbed=len(absorbed_ids),
                     )
                     messages = (*final_messages, Message(role="assistant", content=answer))
