@@ -291,10 +291,10 @@ class ScheduleStore:
         expires_at: datetime | None = None,
         *,
         paused: bool,
-        post_in_thread: bool,
+        post_in_thread: bool | None = None,
     ) -> ScheduledTask:
-        """Update one exact recurring task without changing its immutable identity — `paused` and
-        `post_in_thread` have no preserving defaults, so every caller states both values.
+        """Update one exact recurring task without changing its immutable identity — `paused` has
+        no preserving default, so every caller states whether the task keeps firing.
 
         What the task ran is not what the task says: `last_run_at` and `last_turn_id` record the
         fires that happened and are never rewritten here, so a member editing the prompt or the
@@ -326,7 +326,11 @@ class ScheduleStore:
                             claimed_by=None,
                             claim_expires_at=None,
                             paused=paused,
-                            post_in_thread=post_in_thread,
+                            post_in_thread=(
+                                expected.post_in_thread
+                                if post_in_thread is None
+                                else post_in_thread
+                            ),
                             updated_at=sa.func.now(),
                         )
                         .returning(*_COLUMNS)

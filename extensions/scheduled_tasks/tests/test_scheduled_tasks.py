@@ -1331,6 +1331,7 @@ async def test_update_preserves_the_original_creator(db: None) -> None:
             when,
             internet_access=False,
             created_by_member_id=creator,
+            post_in_thread=True,
         )
         second = await store.update(
             first,
@@ -1339,14 +1340,15 @@ async def test_update_preserves_the_original_creator(db: None) -> None:
             "v2",
             when,
             paused=False,
-            post_in_thread=first.post_in_thread,
         )
         tasks = await store.list()
     assert first.id == second.id
     assert second.created_by_member_id == creator
     assert second.internet_access is False
+    assert second.post_in_thread is True
     assert tasks[0].created_by_member_id == creator
     assert tasks[0].internet_access is False
+    assert tasks[0].post_in_thread is True
     assert tasks[0].schedule == "0 17 * * 1"
 
 
