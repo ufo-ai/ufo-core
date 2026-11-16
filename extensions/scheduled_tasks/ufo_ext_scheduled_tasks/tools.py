@@ -98,6 +98,15 @@ class ScheduledTaskSpec(BaseModel):
             "the next cron fire. Omitted on update preserves it; a new task defaults to running."
         ),
     )
+    post_in_thread: bool | None = Field(
+        default=None,
+        title="Post in Slack thread",
+        description=(
+            "For a task created in a Slack channel thread, true posts each fire back into that "
+            "thread. False posts at the channel top level. Omitted on update preserves it; a new "
+            "task defaults to false. Other surfaces and Slack direct messages are unchanged."
+        ),
+    )
     run_now: bool | None = Field(
         default=None,
         title="Run now",
@@ -399,6 +408,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                         ),
                         "last_run_status": endings.get(listed.task.id),
                         "paused": listed.task.paused,
+                        "post_in_thread": listed.task.post_in_thread,
                         "owner_email": emails.get(listed.task.created_by_member_id),
                         "origin": listed.surface_label or "Portal",
                         "mine": (
@@ -433,6 +443,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 description=task.description,
                 expires_at=task.expires_at,
                 paused=task.paused,
+                post_in_thread=task.post_in_thread,
             ),
             created_at=task.created_at,
             updated_at=task.updated_at,
@@ -528,6 +539,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 created_by_member_id=acting_member,
                 expires_at=spec.expires_at,
                 paused=paused,
+                post_in_thread=bool(spec.post_in_thread),
                 internet_access=(
                     None
                     if ctx.turn.runtime_config is None
@@ -558,6 +570,9 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
             spec.expires_at if "expires_at" in spec.model_fields_set else existing.expires_at
         )
         paused = existing.paused if spec.paused is None else spec.paused
+        post_in_thread = (
+            existing.post_in_thread if spec.post_in_thread is None else spec.post_in_thread
+        )
         _validate_future_fire(next_run_at, expires_at, paused=paused)
         await scheduler.update(
             expected=existing,
@@ -567,6 +582,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
             next_run_at=next_run_at,
             expires_at=expires_at,
             paused=paused,
+            post_in_thread=post_in_thread,
         )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None:
@@ -596,8 +612,12 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "Apply a manifest to schedule a recurring task for yourself: give a 5-field cron "
         "schedule and the task prompt. The platform materializes a locked-down recurring task "
         "that searches memory, then invokes you on that schedule in the conversation the task "
-        "was created from; re-applying an existing name updates the definition in place and "
-        "never moves where it reports. A task is as visible as the conversation it reports into: "
+        "was created from. For a task created in a Slack channel thread, each fire posts at the "
+        "channel top level by default; set `post_in_thread: true` to post back into the creating "
+        "thread. "
+        "Replies to a top-level fire continue the creating conversation. Re-applying an "
+        "existing name updates the definition in place and never moves its owning conversation. "
+        "A task is as visible as the conversation it reports into: "
         "one reporting into a shared conversation is listed and read by every member, one "
         "reporting into a member's own conversation by that member alone, and a private or "
         "externally-shared channel's tasks by nobody else at all. An admin lists another member's "
@@ -636,6 +656,7 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
             "last_run_at",
             "last_run_status",
             "paused",
+            "post_in_thread",
             "owner_email",
             "origin",
             "mine",

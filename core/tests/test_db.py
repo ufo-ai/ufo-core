@@ -487,7 +487,9 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         if head == core_head:
             continue
         revision = scripts.get_revision(head)
-        assert revision.down_revision is None
+        while revision.down_revision is not None:
+            assert isinstance(revision.down_revision, str)
+            revision = scripts.get_revision(revision.down_revision)
         assert revision.dependencies in core_revisions
     assert {
         core_head,
@@ -495,7 +497,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "research_0001",
         "20260925191145",
         "20260924160318",
-        "scheduled_tasks_0004",
+        "scheduled_tasks_0005",
         "sources_0011",
         "monitors_0004",
         "skill_create_0004",

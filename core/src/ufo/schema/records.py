@@ -528,9 +528,10 @@ class ModelAccountCapability(BaseModel):
 
 class TurnRuntimeConfig(BaseModel):
     """The runtime choices one turn tree pins without changing its deployed runtime, each
-    independently optional: a concrete model, narrowed sandbox internet access, and the digest of a
+    independently optional: a concrete model, narrowed sandbox internet access, the digest of a
     stored environment document the host applies while assembling the turn's prompt, tools, and
-    skills. A stored row loads without any key this release does not know: the image a deploy
+    skills, and a delivery-thread override for surfaces that support it. A stored row loads without
+    any key this release does not know: the image a deploy
     replaces writes rows until its pods drain."""
 
     model_config = ConfigDict(frozen=True, extra="ignore")
@@ -538,6 +539,7 @@ class TurnRuntimeConfig(BaseModel):
     model: str | None = Field(default=None, min_length=1)
     internet_access: Literal[False] | None = None
     environment: str | None = None
+    post_in_thread: bool | None = None
 
     @model_validator(mode="after")
     def _pinned_values(self) -> "TurnRuntimeConfig":

@@ -946,6 +946,7 @@ class Writeback:
     terminal: TerminalFrame
     artifacts: tuple[SharedArtifact, ...]
     speaker_member_id: UUID | None = None
+    post_in_thread: bool | None = None
 
 
 def writeback_says_nothing(writeback: Writeback) -> bool:
@@ -988,6 +989,7 @@ class MidTurnReply:
     text: str
     is_comment: bool = False
     speaker_member_id: UUID | None = None
+    post_in_thread: bool | None = None
 
 
 AMBIENT_REPLY_TIMEOUT_SECONDS = 5.0

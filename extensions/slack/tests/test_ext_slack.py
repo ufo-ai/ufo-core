@@ -118,6 +118,7 @@ from ufo.schema.records import (
     QuestionOption,
     TerminalFrame,
     TerminalStatus,
+    TurnRuntimeConfig,
     mid_turn_reply_id_for,
 )
 from ufo.sdk.audience import (
@@ -3255,6 +3256,7 @@ async def _seed_done_turn(
     speaker_member_id: UUID | None = None,
     private_to: UUID | None = None,
     status: TerminalStatus = "done",
+    runtime_config: TurnRuntimeConfig | None = None,
 ) -> UUID:
     conversation_id, turn_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -3285,6 +3287,9 @@ async def _seed_done_turn(
                 status=status,
                 inbound="ask",
                 speaker_member_id=speaker_member_id,
+                runtime_config=(
+                    None if runtime_config is None else runtime_config.model_dump(mode="json")
+                ),
                 terminal=TerminalFrame(
                     status=status,
                     text=text,
@@ -3633,6 +3638,142 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
         (turn_a, WRITEBACK_DELIVERED),
         (turn_b, WRITEBACK_DELIVERED),
     }
+
+
+@pytest.mark.parametrize(
+    ("post_in_thread", "expected_thread", "expected_alias"),
+    ((False, None, True), (True, "200.0", False)),
+)
+async def test_scheduled_delivery_uses_its_thread_override(
+    db: None,
+    tmp_path,
+    monkeypatch,
+    post_in_thread: bool,
+    expected_thread: str | None,
+    expected_alias: bool,
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        "scheduled update",
+        blob,
+        artifact=False,
+        runtime_config=TurnRuntimeConfig(post_in_thread=post_in_thread),
+    )
+    async with workspace_tx() as connection:
+        conversation_id = await connection.scalar(
+            sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == turn_id)
+        )
+    assert conversation_id is not None
+    await _seed_shared_files(workspace_id, turn_id, blob, (("details.txt", None),))
+
+    await app.state.writeback_poller.drain()
+
+    [post] = _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    body = json.loads(post.content)
+    assert body.get("thread_ts") == expected_thread
+    [shared] = _requests_to(recorder, slack.SLACK_FILES_COMPLETE_UPLOAD)
+    shared_body = json.loads(shared.content)
+    assert shared_body.get("thread_ts") == ("999.100" if not post_in_thread else "200.0")
+    with ws(workspace_id):
+        alias = await slack._aliased_conversation("C5:999.100")
+    assert (alias == conversation_id) is expected_alias
+
+
+async def test_a_scheduled_mid_turn_reply_posts_at_the_channel_top_level(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        "closing",
+        blob,
+        artifact=False,
+        runtime_config=TurnRuntimeConfig(post_in_thread=False),
+    )
+    async with workspace_tx() as connection:
+        conversation_id = await connection.scalar(
+            sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == turn_id)
+        )
+    assert conversation_id is not None
+    await _seed_spoken_reply(workspace_id, turn_id, "Interim update")
+
+    await app.state.mid_turn_reply_poller.drain()
+
+    [post] = _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    body = json.loads(post.content)
+    assert "thread_ts" not in body
+    with ws(workspace_id):
+        assert await slack._aliased_conversation("C5:999.100") == conversation_id
+
+
+async def test_a_reply_to_a_top_level_scheduled_update_reenters_its_conversation(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    scheduled_turn_id = await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        "scheduled update",
+        blob,
+        artifact=False,
+        runtime_config=TurnRuntimeConfig(post_in_thread=False),
+    )
+    async with workspace_tx() as connection:
+        conversation_id = await connection.scalar(
+            sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == scheduled_turn_id)
+        )
+    assert conversation_id is not None
+    await app.state.writeback_poller.drain()
+    body = _event_body(
+        type="message",
+        user=DEFAULT_SLACK_USER,
+        channel="C5",
+        ts="1000.200",
+        thread_ts="999.100",
+        text="stop these updates",
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
+        response = await client.post(
+            EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+        )
+
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(tables.turn.c.id, tables.turn.c.conversation_id, tables.turn.c.inbound)
+                .where(tables.turn.c.workspace_id == workspace_id)
+                .order_by(tables.turn.c.seq)
+            )
+        ).all()
+        aliased_conversation = await connection.scalar(
+            sa.select(tables.conversation.c.id).where(
+                tables.conversation.c.workspace_id == workspace_id,
+                tables.conversation.c.queue_key == "C5:999.100",
+            )
+        )
+    assert len(turns) == 2
+    routed_turn = turns[1]
+    assert routed_turn.conversation_id == conversation_id
+    assert "stop these updates" in routed_turn.inbound
+    assert aliased_conversation is None
+    with ws(workspace_id):
+        assert (
+            await slack._reply_thread(
+                "C5:200.0", routed_turn.id, conversation_id, answers_member=True
+            )
+            == "999.100"
+        )
 
 
 async def test_terminal_reply_uses_failure_text_and_falls_back_when_empty(
@@ -6259,6 +6400,42 @@ async def test_a_long_turn_posts_interim_progress_in_thread_without_terminalizin
     assert all("Rerunning the migration" not in str(record.ufo) for record in emitted)
 
 
+async def test_scheduled_progress_posts_at_the_channel_top_level(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "PROGRESS_BASE_SECONDS", 0.05)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, _, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    conversation_id, turn_id = await _seed_running_turn(
+        workspace_id,
+        "C1:100.5",
+        runtime_config=TurnRuntimeConfig(post_in_thread=False),
+    )
+    with ws(workspace_id):
+        await slack._mirror_thread(
+            conversation_id, slack.MirroredThread(queue_key="C1:100.5", message_ts="100.5")
+        )
+    await _arm_followers(workspace_id, turn_id, hub)
+    task = slack._PROGRESS_TASKS[turn_id]
+
+    await hub.publish(turn_id, Activity(text="checking the update"))
+    deadline = time.monotonic() + 10
+    while not _progress_posts(recorder):
+        assert time.monotonic() < deadline, "the scheduled turn never posted progress"
+        await asyncio.sleep(0.01)
+
+    [post] = _progress_posts(recorder)
+    assert post["channel"] == "C1"
+    assert "thread_ts" not in post
+    with ws(workspace_id):
+        assert await slack._aliased_conversation("C1:999.100") == conversation_id
+
+    await _finish_turn(turn_id, "done")
+    await asyncio.wait_for(task, timeout=10)
+
+
 def _statuses_after_the_first_post(recorder: list[httpx.Request]) -> list[dict[str, object]]:
     """Every status write Slack took after the first in-thread post, in order — the post is what
     blanked the line, so what follows it is what the member is left with."""
@@ -6827,6 +7004,7 @@ async def _seed_running_turn(
     *,
     surface: str = slack.SURFACE_SLACK,
     subagent_profile: str | None = None,
+    runtime_config: TurnRuntimeConfig | None = None,
 ) -> tuple[UUID, UUID]:
     """A conversation and a turn of it still running — what the hook fires under, without the Slack
     request that would ordinarily have opened either."""
@@ -6859,6 +7037,9 @@ async def _seed_running_turn(
                 status="running",
                 inbound="migrate",
                 subagent_profile=subagent_profile,
+                runtime_config=(
+                    None if runtime_config is None else runtime_config.model_dump(mode="json")
+                ),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

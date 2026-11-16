@@ -51,6 +51,7 @@ scheduled_task = sa.Table(
     sa.Column("paused", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("connections", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("internet_access", sa.Boolean, nullable=False, server_default=sa.false()),
+    sa.Column("post_in_thread", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("workspace_id", "agent_id", "name", name="scheduled_task_name"),
@@ -80,6 +81,7 @@ class ScheduledTask:
     updated_at: datetime
     created_by_member_id: UUID | None = None
     internet_access: Literal[False] | None = None
+    post_in_thread: bool = False
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,7 @@ _COLUMNS = (
     scheduled_task.c.claimed_by,
     scheduled_task.c.paused,
     scheduled_task.c.internet_access,
+    scheduled_task.c.post_in_thread,
     scheduled_task.c.created_at,
     scheduled_task.c.updated_at,
 )
@@ -167,6 +170,7 @@ def _task(row: sa.RowMapping) -> ScheduledTask:
         claim_id=row["claimed_by"],
         paused=row["paused"],
         internet_access=None if row["internet_access"] else False,
+        post_in_thread=row["post_in_thread"],
         created_at=_utc(row["created_at"]),
         updated_at=_utc(row["updated_at"]),
     )
@@ -224,6 +228,7 @@ class ScheduleStore:
         created_by_member_id: UUID | None = None,
         expires_at: datetime | None = None,
         paused: bool = False,
+        post_in_thread: bool = False,
     ) -> ScheduledTask:
         """Create one recurring task with immutable executor, reporter, and creator."""
         agent_id = object_agent_id()
@@ -255,6 +260,7 @@ class ScheduleStore:
                             claim_expires_at=None,
                             paused=paused,
                             internet_access=internet_access is not False,
+                            post_in_thread=post_in_thread,
                             created_at=sa.func.now(),
                             updated_at=sa.func.now(),
                         )
@@ -285,9 +291,10 @@ class ScheduleStore:
         expires_at: datetime | None = None,
         *,
         paused: bool,
+        post_in_thread: bool,
     ) -> ScheduledTask:
-        """Update one exact recurring task without changing its immutable identity — `paused` has
-        no preserving default, so every caller states whether the task keeps firing.
+        """Update one exact recurring task without changing its immutable identity — `paused` and
+        `post_in_thread` have no preserving defaults, so every caller states both values.
 
         What the task ran is not what the task says: `last_run_at` and `last_turn_id` record the
         fires that happened and are never rewritten here, so a member editing the prompt or the
@@ -319,6 +326,7 @@ class ScheduleStore:
                             claimed_by=None,
                             claim_expires_at=None,
                             paused=paused,
+                            post_in_thread=post_in_thread,
                             updated_at=sa.func.now(),
                         )
                         .returning(*_COLUMNS)

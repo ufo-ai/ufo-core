@@ -35,6 +35,7 @@ from ufo.schema.records import (
     WRITEBACK_FAILED,
     WRITEBACK_PENDING,
     TerminalFrame,
+    TurnRuntimeConfig,
 )
 
 MAX_WRITEBACK_ERROR_CHARS = 2_048
@@ -369,6 +370,7 @@ class WritebackPoller:
                         tables.turn.c.conversation_id,
                         tables.turn.c.agent_id,
                         tables.turn.c.speaker_member_id,
+                        tables.turn.c.runtime_config,
                         tables.conversation.c.queue_key,
                         tables.conversation.c.surface,
                     )
@@ -420,6 +422,9 @@ class WritebackPoller:
                 for artifact in artifacts
             ),
             speaker_member_id=row.speaker_member_id,
+            post_in_thread=TurnRuntimeConfig.model_validate(
+                row.runtime_config or {}
+            ).post_in_thread,
         )
         return writeback, row.surface
 
@@ -711,6 +716,7 @@ class MidTurnReplyPoller:
                         tables.turn.c.conversation_id,
                         tables.turn.c.agent_id,
                         tables.turn.c.speaker_member_id,
+                        tables.turn.c.runtime_config,
                         tables.conversation.c.queue_key,
                         tables.conversation.c.surface,
                     )
@@ -741,6 +747,9 @@ class MidTurnReplyPoller:
                 text=row.text,
                 is_comment=row.round_index == SURFACE_COMMENT_ROUND_INDEX,
                 speaker_member_id=turn.speaker_member_id,
+                post_in_thread=TurnRuntimeConfig.model_validate(
+                    turn.runtime_config or {}
+                ).post_in_thread,
             ),
         )
 
