@@ -20,6 +20,7 @@ from uuid import UUID
 
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient
+from dbos import _workflow_commands as dbos_workflow_commands
 from dbos import error as dbos_error
 
 from ufo.db import owner_tx
@@ -38,19 +39,9 @@ STRANDED_TURN_GRACE_SECONDS = 300
 DBOS_RETENTION_INITIAL_DELAY_SECONDS = 60
 DBOS_RETENTION_INTERVAL_SECONDS = 3600
 DBOS_RETENTION_DELETE_BATCH_SIZE = 1000
-DBOS_RETENTION_BATCH_PAUSE_SECONDS = 0.1
-DBOS_RETENTION_ROW_BUDGET = 10_000
-DBOS_RETENTION_TIME_BUDGET_SECONDS = 30
-DBOS_RETENTION_ADVISORY_LOCK_ID = 1_437_808_162
 PENDING_WORKFLOW_SCAN_LIMIT = 1000
 CLAIMED_TURN_SCAN_LIMIT = 1000
 ADVANCING_WORKFLOW_STATUSES = ("PENDING", "ENQUEUED", "DELAYED")
-TERMINAL_WORKFLOW_STATUSES = (
-    "SUCCESS",
-    "ERROR",
-    "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
-    "CANCELLED",
-)
 
 
 async def record_fleet_seat(instance_id: UUID) -> None:
@@ -116,7 +107,7 @@ class Heartbeat:
 
 @dataclass(frozen=True)
 class DBOSRetention:
-    client: DBOSClient
+    dbos: DBOS
     retention_days: int = 7
     row_cap: int | None = None
     initial_delay_seconds: float = DBOS_RETENTION_INITIAL_DELAY_SECONDS
@@ -131,96 +122,24 @@ class DBOSRetention:
                 log("instance.dbos_retention_failed", error_class=type(error).__name__)
             await asyncio.sleep(self.interval_seconds)
 
-    async def sweep(self) -> int:
+    async def sweep(self) -> None:
         started = time.monotonic()
-        deleted = 0
-        batches = 0
-        budget_exhausted = False
+        cutoff_ms = int(
+            (datetime.now(UTC) - timedelta(days=self.retention_days)).timestamp() * 1000
+        )
         try:
-            async with owner_tx() as connection:
-                lock_acquired = (
-                    await connection.execute(
-                        sa.text("select pg_try_advisory_lock(:lock_id)"),
-                        {"lock_id": DBOS_RETENTION_ADVISORY_LOCK_ID},
-                    )
-                ).scalar_one()
-                if not lock_acquired:
-                    return 0
-                try:
-                    cutoff = datetime.now(UTC) - timedelta(days=self.retention_days)
-                    pruned, batch_count, budget_exhausted = await self._delete_batches(
-                        started=started,
-                        row_budget=DBOS_RETENTION_ROW_BUDGET,
-                        completed_before=cutoff.isoformat(),
-                    )
-                    deleted += pruned
-                    batches += batch_count
-                    if self.row_cap is not None and not budget_exhausted:
-                        pruned, batch_count, budget_exhausted = await self._delete_batches(
-                            started=started,
-                            row_budget=DBOS_RETENTION_ROW_BUDGET - deleted,
-                            offset=self.row_cap,
-                            sort_desc=True,
-                        )
-                        deleted += pruned
-                        batches += batch_count
-                finally:
-                    await connection.execute(
-                        sa.text("select pg_advisory_unlock(:lock_id)"),
-                        {"lock_id": DBOS_RETENTION_ADVISORY_LOCK_ID},
-                    )
+            await asyncio.to_thread(
+                dbos_workflow_commands.garbage_collect,
+                self.dbos,
+                cutoff_ms,
+                self.row_cap,
+                batch_size=DBOS_RETENTION_DELETE_BATCH_SIZE,
+            )
         finally:
             log(
                 "instance.dbos_retention_sweep",
-                deleted=deleted,
                 duration_ms=round((time.monotonic() - started) * 1000),
-                batches=batches,
-                budget_exhausted=budget_exhausted,
             )
-        return deleted
-
-    async def _delete_batches(
-        self,
-        *,
-        started: float,
-        row_budget: int,
-        completed_before: str | None = None,
-        offset: int | None = None,
-        sort_desc: bool = False,
-    ) -> tuple[int, int, bool]:
-        deleted = 0
-        batches = 0
-        while True:
-            if (
-                deleted >= row_budget
-                or time.monotonic() - started >= DBOS_RETENTION_TIME_BUDGET_SECONDS
-            ):
-                return deleted, batches, True
-            limit = min(DBOS_RETENTION_DELETE_BATCH_SIZE, row_budget - deleted)
-            workflows = await self.client.list_workflows_async(
-                status=list(TERMINAL_WORKFLOW_STATUSES),
-                completed_before=completed_before,
-                offset=offset,
-                sort_desc=sort_desc,
-                limit=limit,
-                load_input=False,
-                load_output=False,
-            )
-            if not workflows:
-                return deleted, batches, False
-            await self.client.delete_workflows_async(
-                [workflow.workflow_id for workflow in workflows]
-            )
-            deleted += len(workflows)
-            batches += 1
-            if len(workflows) < limit:
-                return deleted, batches, False
-            if (
-                deleted >= row_budget
-                or time.monotonic() - started >= DBOS_RETENTION_TIME_BUDGET_SECONDS
-            ):
-                return deleted, batches, True
-            await asyncio.sleep(DBOS_RETENTION_BATCH_PAUSE_SECONDS)
 
 
 @dataclass(frozen=True)

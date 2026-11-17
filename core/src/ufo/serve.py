@@ -555,7 +555,7 @@ def run(fleet: Fleet) -> None:
     app.state.hub = hub
     app.state.dbos = dbos_client
     app.state.dbos_retention = DBOSRetention(
-        client=dbos_client,
+        dbos=dbos,
         retention_days=config.database.dbos_retention_days,
         row_cap=config.database.dbos_retention_row_cap,
     )

@@ -664,6 +664,7 @@ async def record_probe_egress_request(
 
 
 EXPORT_SETTLE_MARGIN_SECONDS = 900
+USAGE_EXPORT_FLOOR_KEY = "usage_export/floor"
 
 
 @dataclass(frozen=True, slots=True)
@@ -886,10 +887,74 @@ async def ack_usage_exports(
     )
 
 
-def metered_workspaces() -> WorkspaceCandidates:
-    """Candidates for a usage-export job: every workspace that has ever metered. Coarse on purpose
-    — the per-tick no-op for a fully exported workspace is one indexed pending read."""
-    return owner_candidates(lambda: sa.select(tables.ledger.c.workspace_id).distinct())
+def metered_workspaces(consumer: str) -> WorkspaceCandidates:
+    """Candidates for a usage-export job: workspaces with an unacknowledged export or exportable
+    ledger growth since this consumer established its floor."""
+
+    def with_unshipped_usage() -> sa.Select[tuple[UUID]]:
+        floor = tables.ext_store.alias("usage_export_floor")
+        floor_epoch = floor.c.value["epoch"].as_float()
+        latest_amount = (
+            sa.select(sa.func.max(tables.ledger_export.c.to_amount))
+            .where(
+                tables.ledger_export.c.consumer == consumer,
+                tables.ledger_export.c.ledger_id == tables.ledger.c.id,
+            )
+            .correlate(tables.ledger)
+            .scalar_subquery()
+        )
+        after_floor = sa.or_(
+            floor.c.workspace_id.is_(None),
+            sa.and_(
+                tables.ledger.c.dimension == TOKENS_DIMENSION,
+                sa.extract("epoch", tables.ledger.c.created_at) >= floor_epoch,
+            ),
+            sa.and_(
+                tables.ledger.c.dimension.in_(
+                    (SANDBOX_TOKENS_DIMENSION, IMAGES_DIMENSION, VIDEOS_DIMENSION)
+                ),
+                sa.extract("epoch", tables.turn.c.updated_at) >= floor_epoch,
+            ),
+        )
+        growth = sa.exists(
+            sa.select(sa.literal(1))
+            .select_from(
+                tables.ledger.outerjoin(
+                    tables.turn, tables.turn.c.id == tables.ledger.c.turn_id
+                ).outerjoin(
+                    floor,
+                    (floor.c.workspace_id == tables.ledger.c.workspace_id)
+                    & (floor.c.extension == consumer)
+                    & (floor.c.key == USAGE_EXPORT_FLOOR_KEY),
+                )
+            )
+            .where(
+                tables.ledger.c.workspace_id == tables.workspace.c.id,
+                after_floor,
+                sa.or_(
+                    tables.ledger.c.dimension == TOKENS_DIMENSION,
+                    tables.ledger.c.dimension.in_(
+                        (SANDBOX_TOKENS_DIMENSION, IMAGES_DIMENSION, VIDEOS_DIMENSION)
+                    )
+                    & tables.turn.c.terminal.is_not(None)
+                    & (
+                        tables.turn.c.updated_at
+                        <= datetime.now(UTC) - timedelta(seconds=EXPORT_SETTLE_MARGIN_SECONDS)
+                    ),
+                ),
+                sa.or_(latest_amount.is_(None), tables.ledger.c.amount > latest_amount),
+            )
+        )
+        pending = sa.exists(
+            sa.select(sa.literal(1)).where(
+                tables.ledger_export.c.workspace_id == tables.workspace.c.id,
+                tables.ledger_export.c.consumer == consumer,
+                tables.ledger_export.c.acked_at.is_(None),
+            )
+        )
+        return sa.select(tables.workspace.c.id).where(sa.or_(pending, growth))
+
+    return owner_candidates(with_unshipped_usage)
 
 
 @dataclass(frozen=True, slots=True)

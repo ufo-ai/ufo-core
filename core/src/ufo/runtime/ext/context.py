@@ -15,7 +15,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -46,6 +46,7 @@ from ufo.harness.sandbox.session import ExecResult, ProbeToken, ProbeTokenCodec
 from ufo.runtime.agent_scope import agent, agent_current
 from ufo.runtime.billing.accounting import (
     UNGATED_LEDGER,
+    USAGE_EXPORT_FLOOR_KEY,
     Ledger,
     OffTurnSpendRefused,
     SpendEvaluator,
@@ -694,6 +695,58 @@ def seated_member_workspaces() -> WorkspaceCandidates:
         )
 
     return owner_candidates(with_a_seated_member)
+
+
+def changed_or_due_seated_member_workspaces(
+    extension: str, cursor_key: str, due_after: timedelta
+) -> WorkspaceCandidates:
+    """Seated workspaces whose member-facing inputs changed after the job's cursor, or whose cursor
+    is old enough for a periodic recheck."""
+
+    def changed_or_due() -> sa.Select[tuple[UUID]]:
+        cursor = tables.ext_store.alias("seated_job_cursor")
+        changed = sa.or_(
+            *(
+                sa.exists(
+                    sa.select(sa.literal(1)).where(
+                        table.c.workspace_id == tables.workspace.c.id,
+                        changed_at > cursor.c.updated_at,
+                    )
+                )
+                for table, changed_at in (
+                    (tables.member, tables.member.c.updated_at),
+                    (tables.turn, tables.turn.c.updated_at),
+                    (tables.inbound_message, tables.inbound_message.c.created_at),
+                    (tables.connection, tables.connection.c.updated_at),
+                    (tables.connector_grant, tables.connector_grant.c.updated_at),
+                )
+            )
+        )
+        return (
+            sa.select(tables.workspace.c.id)
+            .outerjoin(
+                cursor,
+                (cursor.c.workspace_id == tables.workspace.c.id)
+                & (cursor.c.extension == extension)
+                & (cursor.c.key == cursor_key),
+            )
+            .where(
+                sa.exists(
+                    sa.select(sa.literal(1)).where(
+                        tables.member.c.workspace_id == tables.workspace.c.id,
+                        tables.member.c.seated_at.is_not(None),
+                    )
+                ),
+                sa.or_(
+                    cursor.c.workspace_id.is_(None),
+                    cursor.c.updated_at <= datetime.now(UTC) - due_after,
+                    tables.workspace.c.updated_at > cursor.c.updated_at,
+                    changed,
+                ),
+            )
+        )
+
+    return owner_candidates(changed_or_due)
 
 
 def undrawn_surface_member_workspaces(surface: str) -> WorkspaceCandidates:
@@ -1803,6 +1856,7 @@ class ExtensionContext:
         re-declaring the ledger's private schema."""
         if self.key_slot_for is None:
             raise RuntimeError("model key-slot resolver is required for usage exports")
+        await self.store.put_if(USAGE_EXPORT_FLOOR_KEY, {"epoch": floor.timestamp()}, None)
         async with workspace_tx() as connection:
             await mint_usage_exports(
                 connection,

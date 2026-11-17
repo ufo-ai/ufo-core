@@ -37,7 +37,13 @@ from ufo.db import failed_statement, owner_tx, workspace_tx
 from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.o11y import emit_histogram, emit_metric, formatted_stack, log, log_error, warn
 from ufo.harness.sandbox.conversation import ConversationSandbox
-from ufo.product import PRODUCT_CENSUS_JOB, PRODUCT_CENSUS_SCHEDULE, ProductCensus
+from ufo.product import (
+    PRODUCT_CENSUS_CURSOR_KEY,
+    PRODUCT_CENSUS_JOB,
+    PRODUCT_CENSUS_SCHEDULE,
+    ProductCensus,
+    product_census_workspaces,
+)
 from ufo.runtime.access.grants import INDEX_REAP_EXTENSION, INDEX_REAP_KEY_PREFIX
 from ufo.runtime.background_tasks import BACKGROUND_TASKS_JOB, BACKGROUND_TASKS_SCHEDULE
 from ufo.runtime.billing.accounting import (
@@ -67,7 +73,6 @@ from ufo.runtime.ext.context import (
     TurnInvoker,
     agent_is_live,
     context_for,
-    seated_member_workspaces,
     spend_refusal_notice_key,
 )
 from ufo.runtime.ext.manifest import (
@@ -1004,6 +1009,7 @@ def core_jobs(
 
     async def _census_product(context: ExtensionContext) -> None:
         await census.count()
+        await context.store.put(PRODUCT_CENSUS_CURSOR_KEY, True)
 
     async def _roll_job_days(context: ExtensionContext) -> None:
         async with workspace_tx() as connection:
@@ -1104,7 +1110,7 @@ def core_jobs(
             name=PRODUCT_CENSUS_JOB,
             schedule=PRODUCT_CENSUS_SCHEDULE,
             handler=_census_product,
-            candidates=seated_member_workspaces(),
+            candidates=product_census_workspaces(CORE_EXTENSION),
         ),
         JobSpec(
             name=GRAVATAR_JOB,
@@ -1292,10 +1298,11 @@ class JobRunner:
             for workflow in queued
             if workflow.deduplication_id is not None
         }
+        skipped = 0
         for workspace_id in candidates:
             deduplication_id = f"{key}:{workspace_id}"
             if deduplication_id in active_deduplication_ids:
-                warn("jobs.tick_skipped", key=key, workspace_id=str(workspace_id))
+                skipped += 1
                 continue
             with SetEnqueueOptions(deduplication_id=deduplication_id):
                 try:
@@ -1303,9 +1310,11 @@ class JobRunner:
                         JOB_QUEUE_NAME, job_workflow, scheduled_time, key, str(workspace_id)
                     )
                 except dbos_error.DBOSQueueDeduplicatedError:
-                    warn("jobs.tick_skipped", key=key, workspace_id=str(workspace_id))
+                    skipped += 1
                 else:
                     active_deduplication_ids.add(deduplication_id)
+        if skipped:
+            warn("jobs.tick_skipped", key=key, count=skipped)
 
     async def candidates(self, key: str) -> tuple[UUID, ...]:
         spec = self._binding(key).spec

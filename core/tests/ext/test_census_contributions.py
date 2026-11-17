@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -27,14 +27,16 @@ from ufo.product import (
     CORE_STAGES,
     MEMBER_CHATTED_STEP,
     ONBOARDING_STEP_METRIC,
+    PRODUCT_CENSUS_CURSOR_KEY,
     PRODUCT_CENSUS_JOB,
     PRODUCT_STAGE_METRIC,
     SEATED_STAGE,
     WORKSPACE_CREATED_STEP,
     CensusSpec,
     ProductCensus,
+    product_census_workspaces,
 )
-from ufo.runtime.ext.context import CORE_EXTENSION, context_for
+from ufo.runtime.ext.context import CORE_EXTENSION, ScopedStore, context_for
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.jobs import JobRunner
 from ufo.runtime.sources.sync import CorePageFeed, SyncDriver
@@ -212,6 +214,41 @@ def _served_jobs(
         None,
     )
     return launched[0]
+
+
+async def test_product_census_candidates_run_for_changed_or_due_workspaces(db: None) -> None:
+    workspace_id, noter, _chatter, _agent_id = await _workspace()
+    candidates = product_census_workspaces(CORE_EXTENSION)
+    assert workspace_id in await candidates()
+
+    with ws(workspace_id):
+        await ScopedStore(CORE_EXTENSION).put(PRODUCT_CENSUS_CURSOR_KEY, True)
+    assert workspace_id not in await candidates()
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == noter)
+            .values(updated_at=datetime.now(UTC) + timedelta(seconds=1))
+        )
+    assert workspace_id in await candidates()
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == noter)
+            .values(updated_at=sa.func.now())
+        )
+        await connection.execute(
+            sa.update(tables.ext_store)
+            .where(
+                tables.ext_store.c.workspace_id == workspace_id,
+                tables.ext_store.c.extension == CORE_EXTENSION,
+                tables.ext_store.c.key == PRODUCT_CENSUS_CURSOR_KEY,
+            )
+            .values(updated_at=datetime.now(UTC) - timedelta(days=2))
+        )
+    assert workspace_id in await candidates()
 
 
 async def test_a_contributed_stage_and_step_count_by_the_census_rules(

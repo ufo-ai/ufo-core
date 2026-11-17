@@ -47,6 +47,7 @@ import sqlalchemy as sa
 from ufo.db import workspace_tx
 from ufo.harness.o11y import emit_histogram, emit_metric
 from ufo.runtime.access.credentials import MEMBER_SLOT_INFIX
+from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import INTENT_ADMISSION, MEMBER_ADMISSION
@@ -54,6 +55,8 @@ from ufo.schema.records import INTENT_ADMISSION, MEMBER_ADMISSION
 PRODUCT_CENSUS_JOB = "product_census"
 PRODUCT_CENSUS_SECONDS = 600
 PRODUCT_CENSUS_SCHEDULE = "0 */10 * * * *"
+PRODUCT_CENSUS_CURSOR_KEY = "product_census/last_run"
+PRODUCT_CENSUS_DUE = timedelta(days=1)
 PRODUCT_STAGE_METRIC = "product_stage_current"
 PRODUCT_ATTACH_METRIC = "product_attach_current"
 PRODUCT_ACTIVE_MEMBER_2D_7D_METRIC = "product_active_member_2d_7d_total"
@@ -136,6 +139,58 @@ def _member_turn(workspace_id: UUID) -> sa.ColumnElement[bool]:
         tables.turn.c.admission_source == MEMBER_ADMISSION,
         tables.turn.c.parent_turn_id.is_(None),
     )
+
+
+def product_census_workspaces(extension: str) -> WorkspaceCandidates:
+    def changed_or_due() -> sa.Select[tuple[UUID]]:
+        last_run = tables.ext_store.alias("product_census_last_run")
+        now = datetime.now(UTC)
+        changed = sa.or_(
+            *(
+                sa.exists(
+                    sa.select(sa.literal(1)).where(
+                        table.c.workspace_id == tables.workspace.c.id,
+                        changed_at > last_run.c.updated_at,
+                    )
+                )
+                for table, changed_at in (
+                    (tables.member, tables.member.c.updated_at),
+                    (tables.turn, tables.turn.c.updated_at),
+                    (tables.inbound_message, tables.inbound_message.c.created_at),
+                    (tables.connector_grant, tables.connector_grant.c.updated_at),
+                    (tables.surface_installation, tables.surface_installation.c.updated_at),
+                    (tables.surface_address, tables.surface_address.c.updated_at),
+                    (tables.credential, tables.credential.c.updated_at),
+                    (tables.connection, tables.connection.c.updated_at),
+                    (tables.agent, tables.agent.c.updated_at),
+                )
+            )
+        )
+        return (
+            sa.select(tables.workspace.c.id)
+            .outerjoin(
+                last_run,
+                (last_run.c.workspace_id == tables.workspace.c.id)
+                & (last_run.c.extension == extension)
+                & (last_run.c.key == PRODUCT_CENSUS_CURSOR_KEY),
+            )
+            .where(
+                sa.exists(
+                    sa.select(sa.literal(1)).where(
+                        tables.member.c.workspace_id == tables.workspace.c.id,
+                        tables.member.c.seated_at.is_not(None),
+                    )
+                ),
+                sa.or_(
+                    last_run.c.workspace_id.is_(None),
+                    last_run.c.updated_at <= now - PRODUCT_CENSUS_DUE,
+                    tables.workspace.c.updated_at > last_run.c.updated_at,
+                    changed,
+                ),
+            )
+        )
+
+    return owner_candidates(changed_or_due)
 
 
 @dataclass(frozen=True)

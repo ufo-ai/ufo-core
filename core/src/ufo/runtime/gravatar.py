@@ -13,6 +13,7 @@ than against the whole roster on every tick.
 
 import hashlib
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import httpx
@@ -20,7 +21,7 @@ import sqlalchemy as sa
 
 from ufo.harness.o11y import warn
 from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
-from ufo.runtime.ext.context import ExtensionContext
+from ufo.runtime.ext.context import CORE_EXTENSION, ExtensionContext
 from ufo.runtime.member_profiles import PROFILE_PHOTO_MAX_BYTES, next_window
 from ufo.schema import tables
 
@@ -32,6 +33,8 @@ GRAVATAR_SIZE = 256
 GRAVATAR_TIMEOUT_SECONDS = 10.0
 GRAVATAR_MEMBERS_PER_TICK = 20
 GRAVATAR_CURSOR_KEY = "gravatar/cursor"
+GRAVATAR_CHECKED_KEY = "gravatar/checked"
+GRAVATAR_RETRY_AFTER = timedelta(days=7)
 
 
 def gravatar_digest(email: str) -> str:
@@ -41,20 +44,32 @@ def gravatar_digest(email: str) -> str:
 
 
 def unpictured_member_workspaces() -> WorkspaceCandidates:
-    """Workspaces holding a seated member with no picture at all. A workspace whose every member
-    already wears one opens no tick, so the ask stops happening once it has nothing to ask."""
+    """Workspaces with an unpictured member whose address changed since the last full pass, or
+    whose unsuccessful gravatar checks are due for a retry."""
 
-    def with_an_unpictured_member() -> sa.Select[tuple[UUID]]:
+    def with_an_unpictured_member_due() -> sa.Select[tuple[UUID]]:
+        checked = tables.ext_store.alias("gravatar_checked")
         return (
             sa.select(tables.member.c.workspace_id)
+            .outerjoin(
+                checked,
+                (checked.c.workspace_id == tables.member.c.workspace_id)
+                & (checked.c.extension == CORE_EXTENSION)
+                & (checked.c.key == GRAVATAR_CHECKED_KEY),
+            )
             .where(
                 tables.member.c.seated_at.is_not(None),
                 tables.member.c.photo_digest.is_(None),
+                sa.or_(
+                    checked.c.workspace_id.is_(None),
+                    tables.member.c.updated_at > checked.c.updated_at,
+                    checked.c.updated_at <= datetime.now(UTC) - GRAVATAR_RETRY_AFTER,
+                ),
             )
             .distinct()
         )
 
-    return owner_candidates(with_an_unpictured_member)
+    return owner_candidates(with_an_unpictured_member_due)
 
 
 @dataclass(frozen=True)
@@ -77,15 +92,22 @@ class GravatarPrefill:
         if not unpictured:
             return
         held = await ctx.store.get(GRAVATAR_CURSOR_KEY)
-        asked = next_window(
-            unpictured, held if isinstance(held, str) else None, GRAVATAR_MEMBERS_PER_TICK
-        )
+        cursor = held if isinstance(held, str) else None
+        asked = next_window(unpictured, cursor, GRAVATAR_MEMBERS_PER_TICK)
         async with httpx.AsyncClient(timeout=GRAVATAR_TIMEOUT_SECONDS) as client:
             for profile in asked:
                 picture = await self._picture(client, profile.email)
                 if picture is not None:
                     await ctx.profiles.suggest(profile.id, source="gravatar", photo=picture)
         await ctx.store.put(GRAVATAR_CURSOR_KEY, asked[-1].email)
+        cursor_index = next(
+            (index for index, profile in enumerate(unpictured) if profile.email == cursor), None
+        )
+        if len(unpictured) <= GRAVATAR_MEMBERS_PER_TICK or (
+            cursor_index is not None
+            and len(unpictured) - cursor_index - 1 <= GRAVATAR_MEMBERS_PER_TICK
+        ):
+            await ctx.store.put(GRAVATAR_CHECKED_KEY, True)
 
     async def _picture(self, client: httpx.AsyncClient, email: str) -> bytes | None:
         try:
