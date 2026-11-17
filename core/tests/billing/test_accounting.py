@@ -1917,14 +1917,36 @@ async def test_a_resumed_attempt_decides_against_the_key_that_will_serve_it(db: 
     assert resumed_again is False
 
 
-async def test_metered_workspaces_names_only_workspaces_with_ledger_rows(db: None) -> None:
+async def test_metered_workspaces_names_only_workspaces_with_unshipped_usage(db: None) -> None:
+    consumer = "metronome"
     async with workspace_tx() as connection:
         metered, _ = await _seed_turn(connection)
         await _seed_turn(connection)
         await UNGATED_LEDGER.record_workspace_usage(
             connection, metered, "claude-opus-4-8", Usage(input_tokens=10)
         )
-    assert await accounting.metered_workspaces()() == (metered,)
+    candidates = accounting.metered_workspaces(consumer)
+    assert await candidates() == (metered,)
+
+    floor = datetime.now(UTC) - timedelta(days=7)
+    with ws(metered):
+        await ScopedStore(consumer).put(
+            accounting.USAGE_EXPORT_FLOOR_KEY, {"epoch": floor.timestamp()}
+        )
+    async with workspace_tx() as connection:
+        await accounting.mint_usage_exports(connection, metered, consumer, floor, lambda _: None)
+        exports = await accounting.read_pending_usage_exports(connection, metered, consumer, 100)
+    assert await candidates() == (metered,)
+
+    async with workspace_tx() as connection:
+        await accounting.ack_usage_exports(connection, metered, consumer, exports)
+    assert await candidates() == ()
+
+    async with workspace_tx() as connection:
+        await UNGATED_LEDGER.record_workspace_usage(
+            connection, metered, "claude-opus-4-8", Usage(input_tokens=20)
+        )
+    assert await candidates() == (metered,)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

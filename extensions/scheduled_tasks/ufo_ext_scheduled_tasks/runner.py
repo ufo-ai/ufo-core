@@ -106,7 +106,10 @@ class ScheduledTaskRunner:
                 key,
                 as_scheduled=True,
                 fired_by=FiredBy(kind=SCHEDULED_TASK_KIND, name=task.name, title=task.name),
-                runtime_config=TurnRuntimeConfig(internet_access=task.internet_access),
+                runtime_config=TurnRuntimeConfig(
+                    internet_access=task.internet_access,
+                    post_in_thread=task.post_in_thread,
+                ),
                 acting_member_id=task.created_by_member_id,
             )
         except AgentArchived:

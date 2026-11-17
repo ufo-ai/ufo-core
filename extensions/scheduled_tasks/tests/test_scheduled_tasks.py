@@ -93,6 +93,7 @@ def _task_manifest(
     description: str = "",
     expires_at: datetime | None = None,
     run_now: bool | None = None,
+    post_in_thread: bool | None = None,
 ) -> str:
     return yaml.safe_dump(
         {
@@ -104,6 +105,7 @@ def _task_manifest(
                 "description": description,
                 "expires_at": expires_at,
                 **({} if run_now is None else {"run_now": run_now}),
+                **({} if post_in_thread is None else {"post_in_thread": post_in_thread}),
             },
         }
     )
@@ -595,7 +597,9 @@ async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> No
     assert tasks[0].prompt == "check the inbox for investor replies"
     assert tasks[0].conversation_id == conversation_id
     assert tasks[0].agent_id == agent_id
+    assert tasks[0].post_in_thread is False
     assert fetched["spec"]["schedule"] == DAILY_9AM
+    assert fetched["spec"]["post_in_thread"] is False
     assert fetched["status"]["next_run_at"] == tasks[0].next_run_at.isoformat()
     assert fetched["status"]["next_run_at"].endswith("+00:00")
     assert fetched["status"]["last_run_at"] is None
@@ -617,6 +621,34 @@ async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> No
             )
         )
     assert refetched["status"]["last_run_at"] == fired_at.isoformat()
+
+
+async def test_post_in_thread_can_be_enabled_and_an_omitted_update_preserves_it(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
+    apply = _object_tool("object_apply")
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            apply,
+            ctx,
+            manifest=_task_manifest("threaded", DAILY_9AM, "first", post_in_thread=True),
+        )
+        await _dispatch(
+            apply,
+            ctx,
+            manifest=_task_manifest("threaded", DAILY_9AM, "second"),
+        )
+        [preserved] = await _store().list()
+        await _dispatch(
+            apply,
+            ctx,
+            manifest=_task_manifest("threaded", DAILY_9AM, "third", post_in_thread=False),
+        )
+        [disabled] = await _store().list()
+
+    assert preserved.post_in_thread is True
+    assert disabled.post_in_thread is False
 
 
 async def test_applied_task_requires_a_member_requester(db: None) -> None:
@@ -1299,6 +1331,7 @@ async def test_update_preserves_the_original_creator(db: None) -> None:
             when,
             internet_access=False,
             created_by_member_id=creator,
+            post_in_thread=True,
         )
         second = await store.update(
             first,
@@ -1312,8 +1345,10 @@ async def test_update_preserves_the_original_creator(db: None) -> None:
     assert first.id == second.id
     assert second.created_by_member_id == creator
     assert second.internet_access is False
+    assert second.post_in_thread is True
     assert tasks[0].created_by_member_id == creator
     assert tasks[0].internet_access is False
+    assert tasks[0].post_in_thread is True
     assert tasks[0].schedule == "0 17 * * 1"
 
 
@@ -1345,6 +1380,7 @@ async def test_update_preserves_the_marks_of_the_last_fire(db: None) -> None:
             "v2",
             next_fire("0 17 * * 1", ran_at),
             paused=False,
+            post_in_thread=ran.post_in_thread,
         )
         inspection = await store.inspect(edited)
 
@@ -1379,6 +1415,7 @@ async def test_update_cannot_overwrite_a_task_recreated_after_authorization(
         expires_at: datetime | None = None,
         *,
         paused: bool,
+        post_in_thread: bool,
     ) -> ScheduledTask:
         entered.set()
         await release.wait()
@@ -1391,6 +1428,7 @@ async def test_update_cannot_overwrite_a_task_recreated_after_authorization(
             next_run_at,
             expires_at,
             paused=paused,
+            post_in_thread=post_in_thread,
         )
 
     monkeypatch.setattr(ScheduleStore, "update", blocked_update)
@@ -2779,15 +2817,22 @@ async def test_a_fire_acts_as_the_tasks_creator(db: None) -> None:
         await _dispatch(
             _object_tool("object_apply"),
             ctx,
-            manifest=_program_manifest("scoped", schedule=DAILY_9AM, prompt="run", run_now=True),
+            manifest=_program_manifest(
+                "scoped",
+                schedule=DAILY_9AM,
+                prompt="run",
+                run_now=True,
+                post_in_thread=True,
+            ),
         )
         [stored] = await _store().list()
         await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
         [turn] = await _turns(conversation_id)
     assert stored.internet_access is False
+    assert stored.post_in_thread is True
     assert turn["member_id"] == creator
     assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
-        internet_access=False
+        internet_access=False, post_in_thread=True
     )
     fired = replace(
         base,
@@ -2830,7 +2875,7 @@ async def test_a_task_with_inherited_internet_scope_uses_the_agent_policy(db: No
         ).run()
         [turn] = await _turns(conversation_id)
     assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
-        internet_access=None
+        internet_access=None, post_in_thread=False
     )
 
 
@@ -2889,7 +2934,7 @@ async def test_a_workspace_authority_task_fires_with_its_runtime_scope(db: None)
     assert remaining.last_run_at is not None
     assert turn["speaker_member_id"] is None
     assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
-        internet_access=False
+        internet_access=False, post_in_thread=False
     )
     assert dbos.enqueued == [str(turn["id"])]
 

@@ -35,8 +35,11 @@ spec:
   expires_at: "2026-08-11T14:00:00Z"
 ```
 
-Re-applying an existing name updates it in place and re-points reporting to the conversation you
-applied it from. `object_explain` with `kind: scheduled_task` shows the spec schema.
+Re-applying an existing name updates it in place and keeps its original conversation. For a task
+created in a Slack channel thread, each run posts at the channel top level by default. Add
+`post_in_thread: true` to keep each run in the creating thread. Replies to a top-level run continue
+the original conversation, so the member can change or stop the task there. `object_explain` with
+`kind: scheduled_task` shows the spec schema.
 
 ### Running one straight away
 
@@ -146,9 +149,11 @@ Do not recreate a missing scheduled task unless the user explicitly asks.
 
 ## Alerting from scheduled runs
 
-A scheduled task re-invokes you in the same conversation, so your run's reply is the alert — it
-posts to the conversation the task was scheduled in. Reply with the update only when the run
-discovers genuinely new or noteworthy information.
+A scheduled task re-invokes you in its original conversation, so the run's reply is the alert. A
+Slack task created in a channel thread posts at the channel top level unless its spec sets
+`post_in_thread: true`; replies still continue the original conversation. This setting does not
+change direct messages or other surfaces. Reply with the update only when the run discovers
+genuinely new or noteworthy information.
 
 The run's *report* is a different thing from its alert. A run with something to report writes it to
 a markdown file and shares it: that file is the published result, and it is what the radar lists.

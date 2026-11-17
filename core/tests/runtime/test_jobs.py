@@ -209,20 +209,24 @@ async def test_fire_with_empty_candidates_never_invokes_the_handler(db: None) ->
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_tick_does_not_enqueue_an_active_deduplication_id(
-    db: None, monkeypatch: pytest.MonkeyPatch
+    db: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     active = await _workspace()
+    also_active = await _workspace()
     fresh = await _workspace()
     key = f"{CORE_EXTENSION}:probe"
     queried: list[dict[str, object]] = []
     enqueued: list[tuple[object, ...]] = []
 
     async def candidates() -> tuple[UUID, ...]:
-        return active, fresh
+        return active, also_active, fresh
 
     async def list_queued(**filters: object) -> list[SimpleNamespace]:
         queried.append(filters)
-        return [SimpleNamespace(deduplication_id=f"{key}:{active}")]
+        return [
+            SimpleNamespace(deduplication_id=f"{key}:{active}"),
+            SimpleNamespace(deduplication_id=f"{key}:{also_active}"),
+        ]
 
     async def enqueue(*args: object) -> None:
         enqueued.append(args)
@@ -242,7 +246,8 @@ async def test_tick_does_not_enqueue_an_active_deduplication_id(
         client=cast(DBOSClient, SimpleNamespace(list_workflows_async=list_queued)),
     )
 
-    await runner.tick(datetime.now(UTC), key)
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        await runner.tick(datetime.now(UTC), key)
 
     assert queried == [
         {
@@ -256,6 +261,7 @@ async def test_tick_does_not_enqueue_an_active_deduplication_id(
     assert len(enqueued) == 1
     assert enqueued[0][0] == jobs_module.JOB_QUEUE_NAME
     assert enqueued[0][3:] == (key, str(fresh))
+    assert _skips(caplog, "jobs.tick_skipped", key=key, count=2)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1020,7 +1026,9 @@ class _HeldJob:
         assert await asyncio.to_thread(self.milestones[count - 1].wait, FIRE_TIMEOUT_SECONDS)
 
 
-def _skips(caplog: pytest.LogCaptureFixture, event: str, **fields: str) -> list[logging.LogRecord]:
+def _skips(
+    caplog: pytest.LogCaptureFixture, event: str, **fields: object
+) -> list[logging.LogRecord]:
     return [
         record for record in caplog.records if record.getMessage() == event and record.ufo == fields
     ]
@@ -1030,7 +1038,7 @@ def _skips(caplog: pytest.LogCaptureFixture, event: str, **fields: str) -> list[
 async def test_tick_skips_while_predecessor_runs_and_resumes_after_terminal(
     db: None, dbos_launched: object, caplog: pytest.LogCaptureFixture
 ) -> None:
-    workspace_id = await _workspace()
+    await _workspace()
     key = f"{CORE_EXTENSION}:slow"
     job = _HeldJob()
     spec = JobSpec(
@@ -1045,7 +1053,7 @@ async def test_tick_skips_while_predecessor_runs_and_resumes_after_terminal(
             assert job.started == 1
             job.release.set()
             await job.await_started(2)
-        assert _skips(caplog, "jobs.tick_skipped", key=key, workspace_id=str(workspace_id))
+        assert _skips(caplog, "jobs.tick_skipped", key=key, count=1)
     finally:
         job.release.set()
         DBOS.delete_schedule(key)

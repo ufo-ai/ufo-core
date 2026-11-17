@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -12,6 +12,7 @@ from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.runtime.ext.context import CORE_EXTENSION, MemberProfileWrites, ScopedStore
 from ufo.runtime.gravatar import (
+    GRAVATAR_CHECKED_KEY,
     GRAVATAR_MEMBERS_PER_TICK,
     GravatarPrefill,
     gravatar_digest,
@@ -107,6 +108,7 @@ async def test_gravatar_holding_no_picture_leaves_the_member_undrawn(
     assert held is not None
     assert held.photo_digest is None
     assert held.photo_source is None
+    assert workspace_id not in await unpictured_member_workspaces()()
 
 
 async def test_a_picture_the_member_set_is_never_asked_about(
@@ -159,6 +161,18 @@ async def test_only_a_workspace_with_an_unpictured_member_opens_a_tick(
 ) -> None:
     workspace_id, (rae_id,) = await _seed(RAE)
     candidates = unpictured_member_workspaces()
+    assert workspace_id in await candidates()
+
+    with ws(workspace_id):
+        await ScopedStore(CORE_EXTENSION).put(GRAVATAR_CHECKED_KEY, True)
+    assert workspace_id not in await candidates()
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == rae_id)
+            .values(updated_at=datetime.now(UTC) + timedelta(seconds=1))
+        )
     assert workspace_id in await candidates()
 
     with ws(workspace_id):

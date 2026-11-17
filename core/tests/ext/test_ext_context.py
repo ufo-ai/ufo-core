@@ -73,6 +73,7 @@ from ufo.runtime.ext.context import (
     ScopedStore,
     TurnOutcome,
     UndeclaredCredentialSlot,
+    changed_or_due_seated_member_workspaces,
     context_for,
     spend_refusal_notice_key,
 )
@@ -120,6 +121,55 @@ async def _workspace() -> UUID:
             )
         )
     return workspace_id
+
+
+async def test_changed_or_due_seated_workspaces_follow_inputs_and_due_time(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@example.com",
+                seated_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    candidates = changed_or_due_seated_member_workspaces(
+        "web", "setup_goals/last_run", timedelta(days=1)
+    )
+    assert await candidates() == (workspace_id,)
+
+    with ws(workspace_id):
+        await ScopedStore("web").put("setup_goals/last_run", True)
+    assert await candidates() == ()
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == member_id)
+            .values(updated_at=datetime.now(UTC) + timedelta(seconds=1))
+        )
+    assert await candidates() == (workspace_id,)
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == member_id)
+            .values(updated_at=sa.func.now())
+        )
+        await connection.execute(
+            sa.update(tables.ext_store)
+            .where(
+                tables.ext_store.c.workspace_id == workspace_id,
+                tables.ext_store.c.extension == "web",
+                tables.ext_store.c.key == "setup_goals/last_run",
+            )
+            .values(updated_at=datetime.now(UTC) - timedelta(days=2))
+        )
+    assert await candidates() == (workspace_id,)
 
 
 def _store() -> CredentialStore:

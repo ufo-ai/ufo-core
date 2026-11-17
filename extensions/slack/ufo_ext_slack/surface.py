@@ -19,15 +19,16 @@ existing member links, and a same-domain teammate joins as a new member — only
 onboards through the CLI.
 
 Everything the agent says lands as a threaded reply to the member message it answers, in a DM as in
-a channel: a channel conversation is its thread and its key carries the root, while a DM
-conversation is the channel and each member message founds a thread of its own, so admission records
-which Slack message a message ref names (`_anchor_dm_thread`) and every delivery reads its parent
-back from there (`_reply_thread`). A turn answering a member message this surface never saw — a
-portal message on a Slack thread, a queued message core founded a turn of its own on — is anchored
-by nothing, so it pins the thread the conversation's mirror names once at turn start
-(`_pin_turn_thread`) and answers there, its shared files with it, however far the mirror moves while
-the turn runs. A reply that answers no member message — a scheduled run, an alert-woken turn —
-posts at the DM top level.
+a channel. A scheduled run may instead post at a channel's top level and found a new thread. A
+channel conversation normally carries its root in its key, while a DM conversation is the channel
+and each member message founds a thread of its own. Admission records which Slack message a message
+ref names (`_anchor_dm_thread`) and every delivery reads its parent back from there
+(`_reply_thread`). This also routes a reply in a scheduled run's new thread back into its original
+conversation. A turn answering a member message this surface never saw — a portal message on a
+Slack thread, a queued message core founded a turn of its own on — is anchored by nothing, so it
+pins the thread the conversation's mirror names once at turn start (`_pin_turn_thread`) and answers
+there, its shared files with it, however far the mirror moves while the turn runs. A reply that
+answers no member message posts at the DM top level.
 
 While the turn runs, a per-turn status task tails its live frames off the hub and keeps the
 thread's native status (`assistant.threads.setStatus`) current — "Thinking…", each tool call's
@@ -110,7 +111,15 @@ import logging
 import random
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -602,6 +611,7 @@ SLACK_CONVERSATIONS_PAGE_SIZE = 200
 SLACK_CONVERSATIONS_MAX_PAGES = 5
 SLACK_REPLY_PROGRESS_PREFIX = "reply_progress/"
 SLACK_THREAD_PREFIX = "thread/"
+SLACK_CONVERSATION_ALIAS_PREFIX = "conversation_alias/"
 SLACK_DM_ANCHOR_PREFIX = "dm_anchor/"
 SLACK_REPLY_METADATA_EVENT = "ufo_reply_part"
 SLACK_REPLY_RECONCILE_WINDOW_SECONDS = 7_200
@@ -1003,6 +1013,7 @@ class Inbound:
     body: str
     files: tuple[InboundFile, ...]
     conversation_id: UUID | None
+    routed: bool = False
 
 
 def verify_slack_signature(
@@ -1935,7 +1946,12 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
         return Response("Slack channel audience is unavailable", status_code=503)
     if inbound is None:
         return JSONResponse({"ok": True, "ignored": True})
-    if inbound.addressed or inbound.files or await _folds_into_live_turn(ctx, bot_token, inbound):
+    if (
+        inbound.addressed
+        or inbound.routed
+        or inbound.files
+        or await _folds_into_live_turn(ctx, bot_token, inbound)
+    ):
         await _admit_inbound(ctx, bot_token, inbound, identity)
         return JSONResponse({"ok": True})
     _decide_ambient_in_background(ctx, bot_token, inbound, identity)
@@ -1982,9 +1998,13 @@ async def _admit_inbound(
     )
     member_id = await _resolve_member(ctx, inbound.slack_user_id, inbound.is_dm, sender)
     audience = conversation_audience(member_id) if inbound.audience is None else inbound.audience
-    conversation_id = await ctx.conversation_for(
-        inbound.queue_key, audience, label=inbound.surface_label
-    )
+    if inbound.routed:
+        conversation_id = inbound.conversation_id
+        assert conversation_id is not None
+    else:
+        conversation_id = await ctx.conversation_for(
+            inbound.queue_key, audience, label=inbound.surface_label
+        )
     if inbound.conversation_id is None and not inbound.is_dm and inbound.surface_label is not None:
         await ctx.retitle_conversation(conversation_id, inbound.surface_label)
     thread = MirroredThread(queue_key=inbound.queue_key, message_ts=inbound.reply_root)
@@ -2004,7 +2024,7 @@ async def _admit_inbound(
         speaker_member_id=member_id,
     )
     await ctx.attach_member_files(admitted.turn_id, downloaded.keys, member_id=member_id)
-    if inbound.is_dm:
+    if inbound.is_dm or inbound.routed:
         await _anchor_dm_thread(admitted, inbound.reply_root)
     if admitted.opened_run:
         _arm_followers(
@@ -2133,6 +2153,10 @@ async def _to_inbound(
     ts = _string_field(event, "ts")
     queue_key = slack_thread_key(channel, root_ts or ts, is_dm)
     conversation_id = None if is_dm else await _participating_conversation(ctx, queue_key)
+    routed = False
+    if conversation_id is None and not is_dm:
+        conversation_id = await _aliased_conversation(queue_key)
+        routed = conversation_id is not None
     if not addressed and conversation_id is None:
         return None
     origin = _channel_origin(
@@ -2159,7 +2183,35 @@ async def _to_inbound(
         body=str(event.get("text") or ""),
         files=files,
         conversation_id=conversation_id,
+        routed=routed,
     )
+
+
+async def _aliased_conversation(queue_key: str) -> UUID | None:
+    value = await ScopedStore(SLACK_EXTENSION).get(f"{SLACK_CONVERSATION_ALIAS_PREFIX}{queue_key}")
+    if not isinstance(value, str):
+        return None
+    try:
+        return UUID(value)
+    except ValueError:
+        return None
+
+
+async def _record_top_level_conversation(
+    queue_key: str,
+    conversation_id: UUID,
+    post_in_thread: bool | None,
+    thread_ts: str | None,
+    message_timestamps: Iterable[str],
+) -> None:
+    channel, separator, _ = queue_key.partition(":")
+    if post_in_thread is not False or thread_ts is not None or not separator:
+        return
+    store = ScopedStore(SLACK_EXTENSION)
+    for message_ts in message_timestamps:
+        await store.put(
+            f"{SLACK_CONVERSATION_ALIAS_PREFIX}{channel}:{message_ts}", str(conversation_id)
+        )
 
 
 async def _participating_conversation(ctx: SurfaceContext, queue_key: str) -> UUID | None:
@@ -2911,7 +2963,7 @@ def _dm_anchor_key(turn_id: UUID, message_ref: UUID | None = None) -> str:
 
 
 async def _anchor_dm_thread(admitted: Admitted, message_ts: str) -> None:
-    """A DM's queue key names the channel alone, so the member message's ts is recorded here."""
+    """Record the Slack message that a DM or routed reply answers."""
     await ScopedStore(SLACK_EXTENSION).put(
         _dm_anchor_key(admitted.turn_id, admitted.arrival_id), message_ts
     )
@@ -2935,18 +2987,19 @@ async def _reply_thread(
     conversation_id: UUID,
     answers_member: bool,
     message_ref: UUID | None = None,
+    post_in_thread: bool | None = None,
 ) -> str | None:
     """A turn on a message this surface never saw (a portal message, one core founded from the
     queue) has no anchor and uses the thread pinned at its first post."""
-    root_ts = queue_key.partition(":")[2]
-    if root_ts:
-        return root_ts
     store = ScopedStore(SLACK_EXTENSION)
     anchor = await store.get(_dm_anchor_key(turn_id, message_ref))
     if anchor is None and message_ref is not None:
         anchor = await store.get(_dm_anchor_key(turn_id))
     if isinstance(anchor, str) and anchor:
         return anchor
+    root_ts = queue_key.partition(":")[2]
+    if root_ts:
+        return root_ts if post_in_thread is not False else None
     if not answers_member:
         return None
     mirrored = await store.get(_thread_mirror_key(conversation_id))
@@ -3369,6 +3422,7 @@ class ThreadProgress:
     cadence: ProgressCadence
     started_at: datetime
     armed_at: datetime
+    post_in_thread: bool | None = None
 
     async def run(self) -> None:
         bot_token = await self.ctx.credential(SLACK_BOT_TOKEN_SLOT)
@@ -3439,11 +3493,13 @@ class ThreadProgress:
         spend: Meter | None,
         first: bool,
     ) -> bool:
-        channel = self.thread.queue_key.partition(":")[0]
-        thread_ts = self.thread.anchor()
+        channel, separator, _ = self.thread.queue_key.partition(":")
+        thread_ts = (
+            self.thread.anchor() if self.post_in_thread is not False or not separator else None
+        )
         metadata = await self._footer(bot_token, channel, spend) if first else None
         try:
-            await _slack_ok(
+            payload = await _slack_ok(
                 lambda: client.post(
                     SLACK_CHAT_POST_MESSAGE_URL,
                     content=slack_reply_body(channel, thread_ts, text, metadata),
@@ -3461,6 +3517,13 @@ class ThreadProgress:
                 error=repr(error),
             )
             return False
+        await _record_top_level_conversation(
+            self.thread.queue_key,
+            self.conversation_id,
+            self.post_in_thread,
+            thread_ts,
+            (_posted_message_ts(payload),),
+        )
         log(
             "slack.thread_progress.posted",
             turn=str(self.turn_id),
@@ -3497,6 +3560,7 @@ def _track_progress(
     conversation_id: UUID,
     thread: MirroredThread,
     started_at: datetime,
+    post_in_thread: bool | None,
 ) -> None:
     """The turn's claim is the fleet-wide guard; this dict knows only this process."""
     if turn_id in _PROGRESS_TASKS:
@@ -3511,6 +3575,7 @@ def _track_progress(
         ),
         started_at=started_at,
         armed_at=datetime.now(UTC),
+        post_in_thread=post_in_thread,
     )
     task = asyncio.create_task(_run_progress(progress))
     _PROGRESS_TASKS[turn_id] = task
@@ -3539,6 +3604,7 @@ class FollowedTurn:
     id: UUID
     conversation_id: UUID
     started_at: datetime | None = None
+    post_in_thread: bool | None = None
 
 
 def _arm_followers(ctx: FollowerContext, turn: FollowedTurn, thread: MirroredThread) -> None:
@@ -3546,7 +3612,14 @@ def _arm_followers(ctx: FollowerContext, turn: FollowedTurn, thread: MirroredThr
     frames would post nothing."""
     _track_status(ctx, turn.id, thread)
     if turn.started_at is not None:
-        _track_progress(ctx, turn.id, turn.conversation_id, thread, turn.started_at)
+        _track_progress(
+            ctx,
+            turn.id,
+            turn.conversation_id,
+            thread,
+            turn.started_at,
+            turn.post_in_thread,
+        )
 
 
 @dataclass(frozen=True)
@@ -3622,7 +3695,14 @@ async def follow_turn(ctx: HookContext) -> HookOutcome:
         return None
     _arm_followers(
         _HookFollowerContext(ext=ctx.ext),
-        FollowedTurn(id=turn.id, conversation_id=turn.conversation_id, started_at=turn.created_at),
+        FollowedTurn(
+            id=turn.id,
+            conversation_id=turn.conversation_id,
+            started_at=turn.created_at,
+            post_in_thread=(
+                None if turn.runtime_config is None else turn.runtime_config.post_in_thread
+            ),
+        ),
         thread,
     )
     return None
@@ -4843,6 +4923,7 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
         writeback.turn_id,
         writeback.conversation_id,
         writeback.speaker_member_id is not None,
+        post_in_thread=writeback.post_in_thread,
     )
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     store = ScopedStore(SLACK_EXTENSION)
@@ -4851,6 +4932,13 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
     if progress.complete:
         if not progress.deliveries:
             raise SlackApiError("Completed Slack reply has no deliveries")
+        await _record_top_level_conversation(
+            writeback.queue_key,
+            writeback.conversation_id,
+            writeback.post_in_thread,
+            thread,
+            (delivery.ts for delivery in progress.deliveries if ":private:" not in delivery.id),
+        )
         return f"{channel}:{progress.deliveries[0].ts}"
     linked = await _reply_with_links(ctx, writeback)
     question = writeback.terminal.question
@@ -4966,6 +5054,13 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
         progress, stored, first_ts = await writer.run(targets)
     if first_ts is None:
         raise SlackApiError("Slack response missing ts")
+    await _record_top_level_conversation(
+        writeback.queue_key,
+        writeback.conversation_id,
+        writeback.post_in_thread,
+        thread,
+        (delivery.ts for delivery in progress.deliveries if ":private:" not in delivery.id),
+    )
     await _checkpoint_slack_reply(
         store,
         progress_key,
@@ -5005,12 +5100,20 @@ async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
         reply.conversation_id,
         reply.speaker_member_id is not None or reply.is_comment,
         reply.message_ref,
+        post_in_thread=reply.post_in_thread,
     )
     progress_key = _slack_reply_progress_key(reply.turn_id, reply.id)
     progress, stored = await _slack_reply_progress(store, progress_key)
     if progress.complete:
         if not progress.deliveries:
             raise SlackApiError("Completed Slack reply has no deliveries")
+        await _record_top_level_conversation(
+            reply.queue_key,
+            reply.conversation_id,
+            reply.post_in_thread,
+            thread,
+            (delivery.ts for delivery in progress.deliveries),
+        )
         return f"{channel}:{progress.deliveries[0].ts}"
     progress, stored, text = await _reply_mentions_mapped(
         ctx,
@@ -5078,6 +5181,13 @@ async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
                 first_ts = ts
     if first_ts is None:
         raise SlackApiError("Slack response missing ts")
+    await _record_top_level_conversation(
+        reply.queue_key,
+        reply.conversation_id,
+        reply.post_in_thread,
+        thread,
+        (delivery.ts for delivery in progress.deliveries),
+    )
     await _checkpoint_slack_reply(
         store,
         progress_key,
@@ -5168,9 +5278,9 @@ async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> N
     event loop, then share them as one message holding every file in share order — a turn that
     shared four files posts one message with four attachments, never four messages. An over-cap
     file is delivered as a link in `post`, not here, and so is the write-up the closing reply
-    carried. The message lands in the same thread the reply
-    did — the member's own message, never the bot reply's ts, which Slack forbids as a parent. Best
-    effort: a file Slack refuses is logged and left out of the share, so the rest still arrive
+    carried. The message lands in the same thread the reply did. A channel-level scheduled reply
+    founds that thread; other replies keep the member message as their parent. Best effort: a file
+    Slack refuses is logged and left out of the share, so the rest still arrive
     together, and an upload never re-posts the reply or blocks its siblings.
 
     Every record the turn made is dropped once the share is done (`_drop_turn_reply_records`),
@@ -5184,13 +5294,17 @@ async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> N
         if a.role == "file" and a.size_bytes <= SLACK_UPLOAD_MAX_BYTES
     )
     if inline:
-        thread = await _reply_thread(
-            writeback.queue_key,
-            writeback.turn_id,
-            writeback.conversation_id,
-            writeback.speaker_member_id is not None,
-        )
-        channel = writeback.queue_key.partition(":")[0]
+        channel, separator, _ = writeback.queue_key.partition(":")
+        if writeback.post_in_thread is False and separator:
+            thread = reply_ref.partition(":")[2] or None
+        else:
+            thread = await _reply_thread(
+                writeback.queue_key,
+                writeback.turn_id,
+                writeback.conversation_id,
+                writeback.speaker_member_id is not None,
+                post_in_thread=writeback.post_in_thread,
+            )
         bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
         timeout = httpx.Timeout(
             SLACK_UPLOAD_READ_TIMEOUT_SECONDS, write=SLACK_UPLOAD_WRITE_TIMEOUT_SECONDS
