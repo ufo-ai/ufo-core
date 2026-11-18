@@ -1,5 +1,4 @@
 import asyncio
-import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -13,6 +12,7 @@ from ufo.runtime import runtime_instance
 from ufo.runtime.runtime_instance import (
     STALE_AFTER_SECONDS,
     STRANDED_TURN_GRACE_SECONDS,
+    TERMINAL_WORKFLOW_STATUSES,
     CancelReconciler,
     DBOSRetention,
     ExecutorRecovery,
@@ -190,40 +190,103 @@ class _RecordingClient:
         ]
 
 
-async def test_dbos_retention_uses_dbos_garbage_collection_off_the_event_loop(
-    monkeypatch: pytest.MonkeyPatch,
+@dataclass
+class _RetentionClient:
+    listed: list[dict[str, object]] = field(default_factory=list)
+    deleted: list[list[str]] = field(default_factory=list)
+
+    async def list_workflows_async(self, **filters: object) -> list[SimpleNamespace]:
+        self.listed.append(filters)
+        if filters["completed_before"] is not None:
+            return [SimpleNamespace(workflow_id="expired-success")]
+        return [SimpleNamespace(workflow_id="over-cap")]
+
+    async def delete_workflows_async(self, workflow_ids: list[str]) -> None:
+        self.deleted.append(workflow_ids)
+
+
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
+async def test_dbos_retention_deletes_only_terminal_workflows_past_age_or_cap(
+    db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    dbos = object()
+    client = _RetentionClient()
     events: list[tuple[str, dict[str, object]]] = []
-    calls: list[tuple[object, int, int | None, int]] = []
-    main_thread = threading.get_ident()
-    worker_thread = 0
-
-    def collect(
-        held_dbos: object,
-        cutoff_epoch_timestamp_ms: int,
-        rows_threshold: int | None,
-        *,
-        batch_size: int,
-    ) -> None:
-        nonlocal worker_thread
-        worker_thread = threading.get_ident()
-        calls.append((held_dbos, cutoff_epoch_timestamp_ms, rows_threshold, batch_size))
-
-    monkeypatch.setattr(runtime_instance.dbos_workflow_commands, "garbage_collect", collect)
     monkeypatch.setattr(
         runtime_instance, "log", lambda event, **fields: events.append((event, fields))
     )
-    before = int((datetime.now(UTC) - timedelta(days=7, seconds=1)).timestamp() * 1000)
+    before = datetime.now(UTC) - timedelta(days=7, seconds=1)
 
-    await DBOSRetention(dbos=dbos, retention_days=7, row_cap=50).sweep()  # type: ignore[arg-type]
+    deleted = await DBOSRetention(client=client, retention_days=7, row_cap=50).sweep()  # type: ignore[arg-type]
 
-    after = int((datetime.now(UTC) - timedelta(days=7)).timestamp() * 1000)
-    assert calls == [(dbos, calls[0][1], 50, 1000)]
-    assert before <= calls[0][1] <= after
-    assert worker_thread != main_thread
+    after = datetime.now(UTC) - timedelta(days=7)
+    assert deleted == 2
+    assert client.deleted == [["expired-success"], ["over-cap"]]
+    assert len(client.listed) == 2
+    age, cap = client.listed
+    assert age["status"] == list(TERMINAL_WORKFLOW_STATUSES)
+    assert before <= datetime.fromisoformat(str(age["completed_before"])) <= after
+    assert age["offset"] is None
+    assert age["sort_desc"] is False
+    assert age["limit"] == 1000
+    assert cap["status"] == list(TERMINAL_WORKFLOW_STATUSES)
+    assert cap["completed_before"] is None
+    assert cap["offset"] == 50
+    assert cap["sort_desc"] is True
+    assert cap["limit"] == 1000
+    assert all(call["load_input"] is False for call in client.listed)
+    assert all(call["load_output"] is False for call in client.listed)
     assert events[0][0] == "instance.dbos_retention_sweep"
+    assert events[0][1]["deleted"] == 2
+    assert events[0][1]["batches"] == 2
+    assert events[0][1]["budget_exhausted"] is False
     assert isinstance(events[0][1]["duration_ms"], int)
+
+
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
+async def test_dbos_retention_skips_when_another_process_holds_the_lock(db: None) -> None:
+    client = _RetentionClient()
+    async with workspace_tx() as connection:
+        acquired = (
+            await connection.execute(
+                sa.text("select pg_try_advisory_lock(:lock_id)"),
+                {"lock_id": runtime_instance.DBOS_RETENTION_ADVISORY_LOCK_ID},
+            )
+        ).scalar_one()
+        assert acquired
+        try:
+            deleted = await DBOSRetention(client=client).sweep()  # type: ignore[arg-type]
+        finally:
+            await connection.execute(
+                sa.text("select pg_advisory_unlock(:lock_id)"),
+                {"lock_id": runtime_instance.DBOS_RETENTION_ADVISORY_LOCK_ID},
+            )
+    assert deleted == 0
+    assert client.listed == []
+    assert client.deleted == []
+
+
+async def test_dbos_retention_stops_at_the_row_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _RetentionClient()
+
+    async def full_batch(**filters: object) -> list[SimpleNamespace]:
+        client.listed.append(filters)
+        return [SimpleNamespace(workflow_id=f"expired-{len(client.listed)}")]
+
+    monkeypatch.setattr(client, "list_workflows_async", full_batch)
+    monkeypatch.setattr(runtime_instance, "DBOS_RETENTION_DELETE_BATCH_SIZE", 1)
+    monkeypatch.setattr(runtime_instance, "DBOS_RETENTION_ROW_BUDGET", 2)
+    monkeypatch.setattr(runtime_instance, "DBOS_RETENTION_BATCH_PAUSE_SECONDS", 0)
+
+    result = await DBOSRetention(client=client)._delete_batches(  # type: ignore[arg-type]
+        started=runtime_instance.time.monotonic(),
+        row_budget=2,
+        completed_before=datetime.now(UTC).isoformat(),
+    )
+
+    assert result == (2, 2, True)
+    assert len(client.listed) == 2
 
 
 async def test_dbos_retention_loop_survives_an_unexpected_error(
@@ -239,13 +302,13 @@ async def test_dbos_retention_loop_survives_an_unexpected_error(
         sleeps.append(delay)
         await real_sleep(0)
 
-    async def sweep(self: DBOSRetention) -> None:
+    async def sweep(self: DBOSRetention) -> int:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise ValueError("unexpected")
         recovered.set()
-        return None
+        return 0
 
     monkeypatch.setattr(runtime_instance.asyncio, "sleep", sleep)
     monkeypatch.setattr(DBOSRetention, "sweep", sweep)
@@ -258,7 +321,7 @@ async def test_dbos_retention_loop_survives_an_unexpected_error(
             else None
         ),
     )
-    task = asyncio.create_task(DBOSRetention(dbos=object()).run())  # type: ignore[arg-type]
+    task = asyncio.create_task(DBOSRetention(client=_RetentionClient()).run())  # type: ignore[arg-type]
     await recovered.wait()
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
