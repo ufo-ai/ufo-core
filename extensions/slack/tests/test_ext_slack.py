@@ -3935,21 +3935,22 @@ async def test_an_oversize_file_is_linked_while_the_rest_ride_the_one_message(
     assert reserved == ["first.txt", "second.txt"]
 
 
+@pytest.mark.parametrize("reply_text", ("the answer\n\nplan.md", "the answer"))
 async def test_a_file_the_reply_carried_is_a_link_under_the_answer_and_no_upload(
-    db: None, tmp_path, monkeypatch
+    db: None, tmp_path, monkeypatch, reply_text: str
 ) -> None:
     """The write-up a closing reply carried is a link right under the answer and never an upload, so
     the thread gains no second message for it."""
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
-    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "the answer", blob, artifact=False)
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", reply_text, blob, artifact=False)
     shared_at = datetime.now(UTC)
     await _seed_shared_files(
         workspace_id,
         turn_id,
         blob,
-        (("plan.md", "Open the plan"),),
+        (("plan.md", "plan.md"),),
         role="details",
         shared_at=shared_at,
     )
@@ -3967,7 +3968,7 @@ async def test_a_file_the_reply_carried_is_a_link_under_the_answer_and_no_upload
     assert len(posts) == 1
     body = json.loads(posts[0].content)
     assert slack.SLACK_OVERSIZE_HEADING not in body["text"]
-    match = re.match(r"the answer\n\n\[Open the plan\]\((https://[^)]+)\)$", body["text"])
+    match = re.match(r"the answer\n\n\[plan\.md\]\((https://[^)]+)\)$", body["text"])
     assert match is not None, body["text"]
     assert match.group(1).startswith(f"{PUBLIC_BASE_URL}/artifacts/")
     assert body["unfurl_links"] is False and body["unfurl_media"] is False

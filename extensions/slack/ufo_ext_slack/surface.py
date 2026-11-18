@@ -4393,11 +4393,15 @@ async def _reply_with_links(ctx: SurfaceContext, writeback: Writeback) -> str:
     """This text rides a Block Kit `markdown` block, which reads standard Markdown, so Slack's
     `<url|label>` form would print verbatim."""
     text = _reply_text(writeback)
-    carried = [
-        await _details_link_line(ctx, writeback.conversation_id, artifact)
-        for artifact in writeback.artifacts
-        if artifact.role == "details"
-    ]
+    carried = []
+    for artifact in writeback.artifacts:
+        if artifact.role != "details":
+            continue
+        details_link = await _details_link_line(ctx, writeback.conversation_id, artifact)
+        if artifact.subject and artifact.subject in text:
+            text = text.replace(artifact.subject, details_link, 1)
+        else:
+            carried.append(details_link)
     if carried:
         text = f"{text}\n\n" + "\n".join(carried)
     if writeback.terminal.credential_request is not None:
