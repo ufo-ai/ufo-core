@@ -843,6 +843,78 @@ async def test_the_carried_report_links_the_portal_and_falls_back_to_the_downloa
     )
 
 
+async def test_carried_reports_link_separate_occurrences_of_the_same_subject() -> None:
+    conversation_id, first_id, second_id = uuid4(), uuid4(), uuid4()
+    writeback = Writeback(
+        turn_id=uuid4(),
+        conversation_id=conversation_id,
+        agent_id=uuid4(),
+        queue_key="C1:1.0",
+        terminal=TerminalFrame(status="done", text="Compare results with results."),
+        artifacts=(
+            SharedArtifact(
+                id=first_id,
+                blob_key=f"artifacts/{first_id}/first.md",
+                filename="first.md",
+                subject="results",
+                media_type="text/markdown",
+                size_bytes=3,
+                role="details",
+            ),
+            SharedArtifact(
+                id=second_id,
+                blob_key=f"artifacts/{second_id}/second.md",
+                filename="second.md",
+                subject="results",
+                media_type="text/markdown",
+                size_bytes=3,
+                role="details",
+            ),
+        ),
+    )
+
+    assert await _reply_with_links(_PortalCtx(None), writeback) == (
+        f"Compare [results](https://ufo.example.test/artifacts/{first_id}/first.md) with "
+        f"[results](https://ufo.example.test/artifacts/{second_id}/second.md)."
+    )
+
+
+async def test_carried_reports_do_not_link_overlapping_subjects_inside_links() -> None:
+    conversation_id, plan_id, summary_id = uuid4(), uuid4(), uuid4()
+    writeback = Writeback(
+        turn_id=uuid4(),
+        conversation_id=conversation_id,
+        agent_id=uuid4(),
+        queue_key="C1:1.0",
+        terminal=TerminalFrame(status="done", text="Read the plan."),
+        artifacts=(
+            SharedArtifact(
+                id=plan_id,
+                blob_key=f"artifacts/{plan_id}/plan.md",
+                filename="plan.md",
+                subject="the plan",
+                media_type="text/markdown",
+                size_bytes=3,
+                role="details",
+            ),
+            SharedArtifact(
+                id=summary_id,
+                blob_key=f"artifacts/{summary_id}/summary.md",
+                filename="summary.md",
+                subject="plan",
+                media_type="text/markdown",
+                size_bytes=3,
+                role="details",
+            ),
+        ),
+    )
+
+    assert await _reply_with_links(_PortalCtx(None), writeback) == (
+        f"Read [the plan](https://ufo.example.test/artifacts/{plan_id}/plan.md).\n\n"
+        f"[plan](https://ufo.example.test/artifacts/{summary_id}/summary.md)"
+    )
+
+
 async def test_slack_writeback_links_the_portal_for_a_credential_request() -> None:
     """Slack collects no secret, so it hands the member a link to the one screen that fills a slot
     whatever raised it."""

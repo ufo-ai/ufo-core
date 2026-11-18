@@ -4398,10 +4398,26 @@ async def _reply_with_links(ctx: SurfaceContext, writeback: Writeback) -> str:
         if artifact.role != "details":
             continue
         details_link = await _details_link_line(ctx, writeback.conversation_id, artifact)
-        if artifact.subject and artifact.subject in text:
-            text = text.replace(artifact.subject, details_link, 1)
-        else:
+        subject_match = None
+        if artifact.subject:
+            link_spans = tuple(
+                (match.start(), match.end()) for match in re.finditer(MARKDOWN_LINK_PATTERN, text)
+            )
+            subject_match = next(
+                (
+                    match
+                    for match in re.finditer(re.escape(artifact.subject), text)
+                    if all(
+                        match.end() <= link_start or match.start() >= link_end
+                        for link_start, link_end in link_spans
+                    )
+                ),
+                None,
+            )
+        if subject_match is None:
             carried.append(details_link)
+        else:
+            text = f"{text[: subject_match.start()]}{details_link}{text[subject_match.end() :]}"
     if carried:
         text = f"{text}\n\n" + "\n".join(carried)
     if writeback.terminal.credential_request is not None:
