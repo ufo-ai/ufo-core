@@ -3670,10 +3670,9 @@ async def follow_turn(ctx: HookContext) -> HookOutcome:
     when it starts executing; the status is thread state, so the two arms converge on one line and
     the per-turn task each follower keeps holds this process to one of each.
 
-    A turn answering a member is pinned to the mirror's thread here, which is what a turn no Slack
-    request admitted — a portal message, a queued message core founded a turn on — has instead of an
-    admission of this surface's own: its execution is where that turn first reaches Slack, so the
-    thread is fixed before the next inbound can move the mirror.
+    A turn without a Slack request pins its mirrored channel thread here before progress can post,
+    so terminal delivery stays there if the mirror moves. A member turn core founded from a portal
+    or queued message pins its mirrored DM message too.
 
     A subagent turn holds its own conversation on the subagent surface and no Slack thread, so it
     ends before any read. Everything else costs one indexed read of the thread mirror, which is
@@ -3686,6 +3685,7 @@ async def follow_turn(ctx: HookContext) -> HookOutcome:
     turn = ctx.turn
     if turn is None or turn.subagent_profile is not None:
         return None
+    post_in_thread = None if turn.runtime_config is None else turn.runtime_config.post_in_thread
     try:
         async with asyncio.timeout(THREAD_MIRROR_BUDGET_SECONDS):
             row = await ctx.ext.store.get(_thread_mirror_key(turn.conversation_id))
@@ -3694,6 +3694,12 @@ async def follow_turn(ctx: HookContext) -> HookOutcome:
             thread = MirroredThread.read(row)
             if ctx.speaker_member_id is not None:
                 await _pin_turn_thread(ctx.ext.store, turn.id, thread)
+            elif post_in_thread is not False:
+                channel, separator, root_ts = thread.queue_key.partition(":")
+                if root_ts:
+                    pinned = await _pin_turn_thread(ctx.ext.store, turn.id, thread)
+                    if pinned is not None:
+                        thread = MirroredThread(queue_key=f"{channel}{separator}{pinned}")
     except Exception as error:
         log(
             "slack.thread_followers.unarmed",
@@ -3707,9 +3713,7 @@ async def follow_turn(ctx: HookContext) -> HookOutcome:
             id=turn.id,
             conversation_id=turn.conversation_id,
             started_at=turn.created_at,
-            post_in_thread=(
-                None if turn.runtime_config is None else turn.runtime_config.post_in_thread
-            ),
+            post_in_thread=post_in_thread,
         ),
         thread,
     )
