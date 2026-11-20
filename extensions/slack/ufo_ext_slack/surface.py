@@ -2973,7 +2973,7 @@ async def _pin_turn_thread(store: ScopedStore, turn_id: UUID, thread: MirroredTh
     """Reading the mirror at each delivery posted under whatever message arrived last, and a retried
     reply posted twice."""
     anchor = thread.anchor()
-    if thread.queue_key.partition(":")[2] or anchor is None:
+    if anchor is None:
         return None
     if await store.put_if(_dm_anchor_key(turn_id), anchor, expected=None):
         return anchor
@@ -2997,9 +2997,17 @@ async def _reply_thread(
         anchor = await store.get(_dm_anchor_key(turn_id))
     if isinstance(anchor, str) and anchor:
         return anchor
-    root_ts = queue_key.partition(":")[2]
+    channel, _, root_ts = queue_key.partition(":")
+    if root_ts and post_in_thread is False:
+        return None
     if root_ts:
-        return root_ts if post_in_thread is not False else None
+        mirrored = await store.get(_thread_mirror_key(conversation_id))
+        if mirrored is not None:
+            thread = MirroredThread.read(mirrored)
+            mirrored_channel, _, mirrored_root = thread.queue_key.partition(":")
+            if mirrored_channel == channel and mirrored_root and mirrored_root != root_ts:
+                return await _pin_turn_thread(store, turn_id, thread)
+        return root_ts
     if not answers_member:
         return None
     mirrored = await store.get(_thread_mirror_key(conversation_id))
