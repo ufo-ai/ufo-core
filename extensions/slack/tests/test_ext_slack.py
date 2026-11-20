@@ -6455,6 +6455,48 @@ async def test_a_long_turn_posts_interim_progress_in_thread_without_terminalizin
     assert all("Rerunning the migration" not in str(record.ufo) for record in emitted)
 
 
+async def test_a_fired_turn_keeps_its_starting_thread_when_the_mirror_moves(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "PROGRESS_BASE_SECONDS", 0.05)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    app, _, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    conversation_id, turn_id = await _seed_running_turn(workspace_id, "C1:200.0")
+    with ws(workspace_id):
+        await slack._mirror_thread(conversation_id, slack.MirroredThread(queue_key="C1:300.0"))
+    await _arm_followers(workspace_id, turn_id, hub)
+    task = slack._PROGRESS_TASKS[turn_id]
+
+    await hub.publish(turn_id, Activity(text="checking the update"))
+    deadline = time.monotonic() + 10
+    while not _progress_posts(recorder):
+        assert time.monotonic() < deadline, "the fired turn never posted progress"
+        await asyncio.sleep(0.01)
+
+    with ws(workspace_id):
+        await slack._mirror_thread(conversation_id, slack.MirroredThread(queue_key="C1:400.0"))
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.writeback).values(
+                turn_id=turn_id,
+                workspace_id=workspace_id,
+                status=WRITEBACK_PENDING,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await _finish_turn(turn_id, "update complete")
+    await asyncio.wait_for(task, timeout=10)
+    await app.state.writeback_poller.drain()
+
+    posts = _progress_posts(recorder)
+    assert posts[0]["thread_ts"] == "300.0"
+    assert posts[-1]["text"] == "update complete"
+    assert posts[-1]["thread_ts"] == "300.0"
+
+
 async def test_scheduled_progress_posts_at_the_channel_top_level(
     db: None, tmp_path, monkeypatch
 ) -> None:
