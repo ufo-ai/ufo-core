@@ -149,11 +149,20 @@ async def test_missing_conversation_network_is_created(
 
     monkeypatch.setattr(docker_ext, "_docker", fake_docker)
 
-    await DockerCarrier()._ensure_network("ufo-sandbox-c1")
+    carrier = DockerCarrier()
+    await carrier._ensure_network("ufo-sandbox-c1", Path("/tmp"))
 
     assert calls == [
         ("network", "ls", "-q", "--filter", "name=^ufo-sandbox-c1$"),
-        ("network", "create", "ufo-sandbox-c1"),
+        (
+            "network",
+            "create",
+            "ufo-sandbox-c1",
+            "--label",
+            f"{docker_ext.ROOT_LABEL}={docker_ext.sha256(b'/tmp').hexdigest()}",
+            "--label",
+            f"{docker_ext.OWNER_LABEL}={carrier._owner}",
+        ),
     ]
 
 
@@ -168,7 +177,7 @@ async def test_conversation_network_failure_is_reported(
     monkeypatch.setattr(docker_ext, "_docker", fake_docker)
 
     with pytest.raises(RuntimeError, match=f"network {failed_command} failed"):
-        await DockerCarrier()._ensure_network("ufo-sandbox-c1")
+        await DockerCarrier()._ensure_network("ufo-sandbox-c1", Path("/tmp"))
 
 
 async def test_failed_create_removes_the_conversation_network(
@@ -243,7 +252,9 @@ async def test_write_streams_the_content_over_stdin_and_never_on_the_command_lin
 
     monkeypatch.setattr(docker_ext, "_docker", record_docker)
     carrier = DockerCarrier()
-    handle = SandboxHandle(conversation_id=uuid4(), container_id="cid1")
+    handle = SandboxHandle(
+        conversation_id=uuid4(), container_id="cid1", workspace_host_path="/tmp/ws"
+    )
     content = b"x" * (2 * 1024 * 1024)
 
     await carrier.write(handle, "/workspace/notes/report.txt", content)
@@ -274,7 +285,9 @@ async def test_write_raises_with_the_container_error_on_a_nonzero_exit(
 
     monkeypatch.setattr(docker_ext, "_docker", failing_docker)
     carrier = DockerCarrier()
-    handle = SandboxHandle(conversation_id=uuid4(), container_id="cid1")
+    handle = SandboxHandle(
+        conversation_id=uuid4(), container_id="cid1", workspace_host_path="/tmp/ws"
+    )
 
     with pytest.raises(OSError, match="No space left on device"):
         await carrier.write(handle, "/workspace/x", b"payload")
@@ -568,7 +581,7 @@ async def test_concurrent_network_creates_converge_like_the_container_race(
     handle = await carrier.create(_reclaim_spec(conversation))
 
     assert handle.container_id
-    assert ("network", "create", network) in daemon.calls
+    assert any(argv[:3] == ("network", "create", network) for argv in daemon.calls)
 
 
 async def test_a_name_race_loser_installs_the_ca_before_answering(
@@ -820,10 +833,6 @@ async def test_the_scan_admits_only_exact_uuid_container_names(
     assert imposter in daemon.running
 
 
-def _scan_ps(argv: tuple[str, ...]) -> bool:
-    return argv[0] == "ps" and "--format" in argv
-
-
 def _scan_network_ls(argv: tuple[str, ...]) -> bool:
     return argv[:2] == ("network", "ls") and "--format" in argv
 
@@ -839,7 +848,6 @@ def _resolve_exited(argv: tuple[str, ...]) -> bool:
 @pytest.mark.parametrize(
     ("fails", "message"),
     [
-        (_scan_ps, "docker ps failed"),
         (_scan_network_ls, "docker network ls failed"),
         (_resolve_any_state, "docker ps failed"),
         (_resolve_exited, "docker ps failed"),
