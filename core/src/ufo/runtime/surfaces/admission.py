@@ -124,6 +124,7 @@ class _SupersededByMember(Exception):
 
 
 ARCHIVED_REFUSAL_MESSAGE = "This app is archived. Restore it from Applications to use it again."
+WORKSPACE_SUSPENDED_MESSAGE = "This workspace is suspended. Contact support for access."
 
 
 @dataclass(frozen=True)
@@ -987,16 +988,15 @@ class Admission:
             )
         seats = Seats(workspace_id)
         parked_seated = await seats.all_seated(connection, list(parked_members))
-        fold_admitted = (
-            live_turn is not None
-            and not archived
-            and (
-                await seats.all_seated(connection, (inbound.speaker_member_id,))
-                if inbound.speaker_member_id is not None
-                else not member_admission
-            )
-            and parked_seated
+        fold_refusal = await self._admission_refusal(
+            connection,
+            workspace_id,
+            inbound.speaker_member_id,
+            archived,
+            member_admission,
+            holds_work_already_done,
         )
+        fold_admitted = live_turn is not None and fold_refusal is None and parked_seated
         fold_caps = (
             None
             if not fold_admitted
@@ -1261,6 +1261,15 @@ class Admission:
         member_admission: bool,
         holds_work_already_done: bool,
     ) -> tuple[TurnStatus, TerminalFrame | None] | None:
+        suspended = (
+            await connection.execute(
+                sa.select(tables.workspace.c.suspended_at).where(
+                    tables.workspace.c.id == workspace_id
+                )
+            )
+        ).scalar_one_or_none()
+        if suspended is not None:
+            return CANCELLED, TerminalFrame(status=CANCELLED, text=WORKSPACE_SUSPENDED_MESSAGE)
         if archived:
             return CANCELLED, TerminalFrame(status=CANCELLED, text=ARCHIVED_REFUSAL_MESSAGE)
         if speaker_member_id is None and member_admission:
