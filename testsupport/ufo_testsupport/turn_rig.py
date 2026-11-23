@@ -198,7 +198,7 @@ EXHAUST_PROFILE = SubagentProfile(
 )
 
 
-PINNED_MODEL = "gpt-5.4"
+PINNED_MODEL = "gpt-6.2-astra"
 
 
 PINNED_PROFILE = SubagentProfile(
@@ -435,7 +435,7 @@ STANDIN_REGISTRY = ModelRegistry(
         for spec in CORE_MODEL_SPECS
     },
     pricing=CORE_PRICING,
-    auto_model="claude-opus-4-8",
+    auto_model="claude-opus-5-5",
 )
 
 
@@ -595,7 +595,7 @@ async def surface(
     yield Turns(hub=hub, admission=admission)
 
 
-async def _bootstrap(model: str = "claude-opus-4-8", reasoning: ReasoningEffort = "low") -> Seed:
+async def _bootstrap(model: str = "claude-opus-5-5", reasoning: ReasoningEffort = "low") -> Seed:
     workspace_id, member_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(

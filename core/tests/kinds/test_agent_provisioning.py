@@ -46,7 +46,7 @@ from ufo.schema.records import (
 )
 
 OWNER_EMAIL = "owner@example.com"
-DEFAULT_MODEL = "claude-opus-4-8"
+DEFAULT_MODEL = "claude-opus-5-5"
 OTHER_EXTENSION = "other"
 MEMBER_PROMPT = "A prompt this workspace wrote for itself."
 

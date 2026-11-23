@@ -162,7 +162,7 @@ async def _write_note(workspace_id: UUID, member_id: UUID, tmp_path: Path) -> No
             inbound="note this",
             created_at=datetime(2026, 9, 24, tzinfo=UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=None,
         speaker_member_id=member_id,
         audience=conversation_audience(None),

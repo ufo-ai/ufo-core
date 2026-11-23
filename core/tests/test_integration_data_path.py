@@ -110,7 +110,7 @@ async def _seed_billable(connection: AsyncConnection) -> tuple[UUID, UUID, UUID,
             workspace_id=workspace_id,
             name="assistant",
             prompt="p",
-            model="claude-opus-4-8",
+            model="claude-opus-5-5",
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
@@ -314,7 +314,7 @@ async def test_metered_sandbox_tokens_breach_a_member_cap_and_park(db: None) -> 
             connection, workspace_id, conversation_id, agent_id, speaker_member_id=member_id
         )
         await UNGATED_LEDGER.record_sandbox_tokens(
-            connection, workspace_id, turn_id, "claude-opus-4-8", HEAVY_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", HEAVY_USAGE
         )
         decision = await evaluator.decide(connection, 0)
     assert decision.outcome == "park"

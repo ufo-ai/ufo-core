@@ -790,7 +790,7 @@ STANDIN_REGISTRY = ModelRegistry(
         for spec in CORE_MODEL_SPECS
     },
     pricing=CORE_PRICING,
-    auto_model="claude-opus-4-8",
+    auto_model="claude-opus-5-5",
 )
 
 
@@ -842,7 +842,7 @@ async def _seed_workspace() -> UUID:
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=True,
                 visibility="workspace",
                 created_at=sa.func.now(),
@@ -946,7 +946,7 @@ async def _ufo_client(
         "",
         None,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -993,7 +993,7 @@ async def shared_ufo(
         "",
         None,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -1043,10 +1043,10 @@ async def test_a_runtime_config_that_cannot_run_or_would_widen_is_refused(
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     refused = (
         {"x-ufo-model": "no-such-model"},
-        {"x-ufo-model": "claude-sonnet-5", "x-ufo-internet": "on"},
+        {"x-ufo-model": "claude-sonnet-5-5", "x-ufo-internet": "on"},
         {"x-ufo-environment": "http://127.0.0.1:9"},
         {"x-ufo-environment": "not-a-digest"},
-        {"x-ufo-model": "claude-sonnet-5", "x-ufo-environment": "http://127.0.0.1:9"},
+        {"x-ufo-model": "claude-sonnet-5-5", "x-ufo-environment": "http://127.0.0.1:9"},
     )
 
     for headers in refused:
@@ -1626,7 +1626,7 @@ async def ufo_delivering_artifacts(
         ARTIFACT_SECRET,
         ARTIFACT_BASE_URL,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -1896,7 +1896,7 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
         "",
         None,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -2746,7 +2746,7 @@ async def _seed_agent(
                 workspace_id=workspace_id,
                 name=name,
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=False,
                 visibility=visibility,
                 owner_member_id=owner_member_id,

@@ -22,7 +22,7 @@ from ufo.schema import tables
 from ufo.schema.records import Usage, ledger_id_for
 
 LEDGER = Ledger(gates=(SampleGate(GateDeploy(public_base_url=None, home_surface=None)),))
-MODEL = "claude-opus-4-8"
+MODEL = "claude-opus-5-5"
 DOLLAR = 1_000_000
 
 pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

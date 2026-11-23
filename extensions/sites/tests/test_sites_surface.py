@@ -270,7 +270,7 @@ async def test_a_shipped_app_page_opened_outside_the_portal_unfurls_as_the_gener
                 workspace_id=workspace_id,
                 name=SITE,
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 provisioned_by=f"app_{SITE}",
                 provisioned_name=SITE,
                 provisioned_version="1",

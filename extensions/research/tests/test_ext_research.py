@@ -129,7 +129,7 @@ def _context(provider: SearchProvider | None) -> ToolContext:
             inbound="research this",
             created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=_no_spawn,
         speaker_member_id=None,
         audience=conversation_audience(None),
@@ -260,7 +260,7 @@ def test_deep_research_lifts_its_round_budget_above_the_default() -> None:
 
 def test_deep_research_runs_on_sonnet_5_5_and_research_stays_on_terra() -> None:
     assert DEEP_RESEARCH_PROFILE.models == ("claude-sonnet-5-5",)
-    assert RESEARCH_PROFILE.models == ("gpt-5.6-terra",)
+    assert RESEARCH_PROFILE.models == ("gpt-6.1-terra",)
 
 
 def test_research_skills_parse_and_index() -> None:

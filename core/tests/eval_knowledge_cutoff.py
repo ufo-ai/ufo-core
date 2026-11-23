@@ -22,7 +22,7 @@ from ufo.runtime.prompts.render import (
     render_template,
 )
 
-EVAL_MODEL = "claude-opus-4-8"
+EVAL_MODEL = "claude-opus-5-5"
 AGENT_PROMPT = "You are the workspace assistant."
 CONTEXT_TAG = "<context>\ntime: Friday 2026-07-10 14:00 PDT\n</context>\n"
 ANSWER_MAX_TOKENS = 6000

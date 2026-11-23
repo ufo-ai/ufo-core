@@ -45,7 +45,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 STREAM_TIMEOUT_SECONDS = 120
-LIVE_MODEL = "claude-opus-4-8"
+LIVE_MODEL = "claude-opus-5-5"
 LIVE_PROMPT = "Reply with exactly the single word: pong. Do not use any tools."
 
 

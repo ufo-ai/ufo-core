@@ -463,7 +463,7 @@ def _turn_context(
         sandbox=None,
         blob=None,
         turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=None,
         speaker_member_id=member_id,
         audience=conversation_audience(member_id),
@@ -501,7 +501,7 @@ async def _member_agent(workspace_id: UUID) -> tuple[UUID, UUID]:
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -518,7 +518,7 @@ async def _agent(workspace_id: UUID, name: str) -> UUID:
                 workspace_id=workspace_id,
                 name=name,
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

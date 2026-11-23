@@ -7,9 +7,8 @@ reaches for — and their prompts are the ported instructions verbatim.
 `deep_research` lifts the round budget to the main ceiling for multi-source work; `wide_research`
 (in delegation.py) fans the same `research` profile over a list of entities.
 
-`research` runs on `gpt-5.6-terra` at high reasoning: the Artificial Analysis Intelligence Index
-scores it 57 at $0.34 per task against `claude-sonnet-5`'s 48 at $1.22, so the focused child gets
-the better answer for a third of the cost. `deep_research` runs on `claude-sonnet-5-5`."""
+`research` runs on `gpt-6.1-terra` at high reasoning. `deep_research` runs on
+`claude-sonnet-5-5`."""
 
 from pathlib import Path
 from typing import Literal
@@ -23,7 +22,7 @@ from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_
 RESEARCH_PROFILE_NAME = "research"
 DEEP_RESEARCH_PROFILE_NAME = "deep_research"
 DEEP_RESEARCH_ROUND_LIMIT = 200
-RESEARCH_MODEL = "gpt-5.6-terra"
+RESEARCH_MODEL = "gpt-6.1-terra"
 RESEARCH_REASONING: Literal["high"] = "high"
 DEEP_RESEARCH_MODEL = "claude-sonnet-5-5"
 RESEARCH_TOOL_NAMES = (

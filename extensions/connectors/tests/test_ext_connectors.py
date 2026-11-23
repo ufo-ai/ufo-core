@@ -261,7 +261,7 @@ def _ctx(
             inbound="use a connector",
             created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8", is_main=is_main),
+        agent=Agent(prompt="p", model="claude-opus-5-5", is_main=is_main),
         spawn=None,
         speaker_member_id=None,
         audience=conversation_audience(None),

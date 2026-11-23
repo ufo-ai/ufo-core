@@ -28,7 +28,7 @@
       },
       {
         "event": "terminal",
-        "data": "{\"status\":\"done\",\"text\":\"It shipped Tuesday.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":0,\"model\":\"claude-opus-4-8\",\"reasoning\":null,\"environment\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
+        "data": "{\"status\":\"done\",\"text\":\"It shipped Tuesday.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":0,\"model\":\"claude-opus-5-5\",\"reasoning\":null,\"environment\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
       }
     ],
     "record": {
@@ -73,7 +73,7 @@
           "tokens": 12,
           "cost_micro_usd": 110,
           "cache_percent": 0,
-          "model": "claude-opus-4-8",
+          "model": "claude-opus-5-5",
           "created": []
         },
         "at": "2026-09-15T12:00:00Z"
@@ -105,7 +105,7 @@
       },
       {
         "event": "terminal",
-        "data": "{\"status\":\"done\",\"text\":\"It shipped Tuesday.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":0,\"model\":\"claude-opus-4-8\",\"reasoning\":null,\"environment\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
+        "data": "{\"status\":\"done\",\"text\":\"It shipped Tuesday.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":0,\"model\":\"claude-opus-5-5\",\"reasoning\":null,\"environment\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
       }
     ],
     "record": {
@@ -162,7 +162,7 @@
           "tokens": 12,
           "cost_micro_usd": 110,
           "cache_percent": 0,
-          "model": "claude-opus-4-8",
+          "model": "claude-opus-5-5",
           "created": []
         },
         "at": "2026-09-15T12:00:00Z"
@@ -202,7 +202,7 @@
       },
       {
         "event": "terminal",
-        "data": "{\"status\":\"done\",\"text\":\"2\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":0,\"cost_micro_usd\":0,\"cache_percent\":0,\"model\":\"claude-opus-4-8\",\"reasoning\":null,\"environment\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
+        "data": "{\"status\":\"done\",\"text\":\"2\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":0,\"cost_micro_usd\":0,\"cache_percent\":0,\"model\":\"claude-opus-5-5\",\"reasoning\":null,\"environment\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
       }
     ],
     "record": {
@@ -243,7 +243,7 @@
           "tokens": 0,
           "cost_micro_usd": 0,
           "cache_percent": 0,
-          "model": "claude-opus-4-8",
+          "model": "claude-opus-5-5",
           "created": []
         },
         "at": "2026-09-15T12:00:00Z"
@@ -324,7 +324,7 @@
       },
       {
         "event": "terminal",
-        "data": "{\"status\":\"done\",\"text\":\"It shipped Tuesday.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":0,\"model\":\"claude-opus-4-8\",\"reasoning\":null,\"environment\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
+        "data": "{\"status\":\"done\",\"text\":\"It shipped Tuesday.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":0,\"model\":\"claude-opus-5-5\",\"reasoning\":null,\"environment\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
       }
     ],
     "record": {
@@ -373,7 +373,7 @@
           "tokens": 12,
           "cost_micro_usd": 110,
           "cache_percent": 0,
-          "model": "claude-opus-4-8",
+          "model": "claude-opus-5-5",
           "created": []
         },
         "at": "2026-09-15T12:00:00Z"

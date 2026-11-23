@@ -28,7 +28,7 @@ async def _workspace_with_agent() -> tuple[UUID, UUID]:
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=True,
                 visibility="workspace",
                 created_at=sa.func.now(),

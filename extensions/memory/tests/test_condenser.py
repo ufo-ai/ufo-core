@@ -131,7 +131,7 @@ pytestmark = [
 ]
 
 WHEN = datetime.now(UTC) - timedelta(days=1)
-AUTO_MODEL = "claude-opus-4-8"
+AUTO_MODEL = "claude-opus-5-5"
 CONSOLIDATE_MODEL_JOB = f"memory:{memory_manifest.CONSOLIDATE_JOB}"
 REBUILD_TOOL = "rebuild_page_facts"
 DERIVE_MODEL_JOB = "core:page_change:memory:derive_facts"

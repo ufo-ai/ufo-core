@@ -87,7 +87,7 @@ def _context(
         sandbox=_NoSandbox(),
         blob=FilesystemBlobStore(root=tmp_path),
         turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=spawn,
         speaker_member_id=member_id,
         audience=conversation_audience(None),

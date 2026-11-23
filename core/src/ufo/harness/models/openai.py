@@ -2,7 +2,7 @@
 
 The api surface a model is called on is a fact of its `ModelSpec` (`spec.api_surface`), not a guess
 from its id: a model that rejects `tools` + `reasoning_effort` together on `/v1/chat/completions`
-(the `gpt-5.6-terra` case) declares `api_surface="responses"` and this client renders the
+(the `gpt-6.1-terra` case) declares `api_surface="responses"` and this client renders the
 legal Responses request. One client class serves both surfaces so an OpenAI-compatible extension
 (Bedrock Mantle, OpenRouter) reuses it by handing its own spec and base_url.
 

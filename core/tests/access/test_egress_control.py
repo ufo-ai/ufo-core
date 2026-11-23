@@ -164,7 +164,7 @@ async def _seed_turn(
             workspace_id=workspace_id,
             name="assistant",
             prompt="p",
-            model="claude-opus-4-8",
+            model="claude-opus-5-5",
             internet_access_allowed=internet_access_allowed,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
@@ -220,7 +220,7 @@ async def _seed_member(connection: AsyncConnection, workspace_id: UUID) -> UUID:
 
 
 async def test_turn_runtime_config_can_disable_but_not_enable_public_egress(db: None) -> None:
-    runtime_config = TurnRuntimeConfig(model="claude-opus-4-8", internet_access=False)
+    runtime_config = TurnRuntimeConfig(model="claude-opus-5-5", internet_access=False)
     async with workspace_tx() as connection:
         narrowed = await _seed_turn(connection, runtime_config=runtime_config)
     resolver = PerAgentRules(base=(), grants=None, internet=(InternetRule(),))
@@ -229,7 +229,7 @@ async def test_turn_runtime_config_can_disable_but_not_enable_public_egress(db: 
 
     assert InternetRule() not in rules
     with pytest.raises(ValueError, match="False"):
-        TurnRuntimeConfig.model_validate({"model": "claude-opus-4-8", "internet_access": True})
+        TurnRuntimeConfig.model_validate({"model": "claude-opus-5-5", "internet_access": True})
 
 
 async def test_a_probe_preserves_a_narrowed_internet_scope(db: None) -> None:
@@ -757,14 +757,14 @@ async def test_meter_writes_the_egress_probe_and_token_ledger_rows(db: None) -> 
                         "kind": "tokens",
                         "workspace_id": str(workspace_id),
                         "turn_id": str(turn_id),
-                        "model": "claude-opus-4-8",
+                        "model": "claude-opus-5-5",
                         "usage": usage,
                     },
                     {
                         "kind": "tokens",
                         "workspace_id": str(workspace_id),
                         "turn_id": str(turn_id),
-                        "model": "claude-opus-4-8",
+                        "model": "claude-opus-5-5",
                         "usage": usage,
                     },
                 ]
@@ -836,24 +836,24 @@ async def test_meter_folds_unpriced_cache_write_30m_into_input(monkeypatch, db: 
                         "kind": "tokens",
                         "workspace_id": str(workspace_id),
                         "turn_id": str(turn_id),
-                        "model": "gpt-5.6-terra",
+                        "model": "gpt-6.1-terra",
                         "usage": usage,
                     },
                     {
                         "kind": "tokens",
                         "workspace_id": str(workspace_id),
                         "turn_id": str(turn_id),
-                        "model": "claude-opus-4-8",
+                        "model": "claude-opus-5-5",
                         "usage": usage,
                     },
                 ]
             },
         )
     assert response.json() == {}
-    assert captured["gpt-5.6-terra"].cache_write_30m_tokens == 5000
-    assert captured["gpt-5.6-terra"].input_tokens == 1000
-    assert captured["claude-opus-4-8"].cache_write_30m_tokens == 0
-    assert captured["claude-opus-4-8"].input_tokens == 6000
+    assert captured["gpt-6.1-terra"].cache_write_30m_tokens == 5000
+    assert captured["gpt-6.1-terra"].input_tokens == 1000
+    assert captured["claude-opus-5-5"].cache_write_30m_tokens == 0
+    assert captured["claude-opus-5-5"].input_tokens == 6000
 
 
 async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(

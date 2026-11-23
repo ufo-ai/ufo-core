@@ -94,7 +94,7 @@ async def _fire(
         event,
         payload,
         turn,
-        Agent(prompt="p", model="claude-opus-5"),
+        Agent(prompt="p", model="claude-opus-5-5"),
         None,
         sandbox,
     )

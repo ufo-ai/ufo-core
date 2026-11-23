@@ -968,7 +968,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         candidates: tuple[str, ...]
         if profile is None:
             candidates = (
-                pinned_model if pinned_model is not None else runtime.registry.resolve(agent.model),
+                runtime.registry.resolve(pinned_model if pinned_model is not None else agent.model),
             )
         else:
             candidates = _subagent_models(profile, agent, runtime, pinned_model, document_model)

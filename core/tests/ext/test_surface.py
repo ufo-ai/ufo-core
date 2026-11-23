@@ -307,7 +307,7 @@ async def _seed(
                 name="assistant",
                 icon=MAIN_AGENT_ICON,
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -369,9 +369,22 @@ def _context(
         _home_surface="web",
         _ingress_public_url="https://sites.example.test",
         _deploy_sandbox_internet=False,
-        _models=("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        _models=("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         _ambient_reply=UNREACHED_AMBIENT_REPLY,
     )
+
+
+def test_runtime_config_resolves_retired_models_before_validation(tmp_path: Path) -> None:
+    context = replace(
+        _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _resolve_model=lambda model: {
+            "claude-opus-4-8": "claude-opus-5-5",
+        }.get(model, model),
+    )
+
+    context.validate_runtime_config(TurnRuntimeConfig(model="claude-opus-4-8"))
+    with pytest.raises(ValueError, match="unknown model: missing-model"):
+        context.validate_runtime_config(TurnRuntimeConfig(model="missing-model"))
 
 
 async def _seed_turn(
@@ -743,7 +756,7 @@ async def test_agent_model_reads_the_setting_of_an_archived_agent_too(db: None, 
         )
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
 
-    assert await context.agent_model(agent_id) == "claude-opus-4-8"
+    assert await context.agent_model(agent_id) == "claude-opus-5-5"
     assert await context.agent_model(archived) == AUTO_MODEL
     assert archived not in {agent.id for agent in await context.list_agents()}
     assert await context.agent_model(uuid4()) is None
@@ -838,7 +851,7 @@ async def _seed_agent(workspace_id: UUID, name: str) -> UUID:
                 workspace_id=workspace_id,
                 name=name,
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1114,7 +1127,7 @@ async def test_conversation_for_binds_an_explicit_agent(db: None, tmp_path) -> N
                 workspace_id=workspace_id,
                 name="helpdesk",
                 prompt="be helpful",
-                model="claude-sonnet-5",
+                model="claude-sonnet-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1689,12 +1702,12 @@ async def test_a_refused_deploy_classifier_retries_on_the_surface_agents_model(
     with ws(workspace_id), caplog.at_level(logging.INFO, logger="ufo"):
         assert not await context.ambient_reply_wanted(message, ())
 
-    assert selected == ["claude-opus-4-8"]
+    assert selected == ["claude-opus-5-5"]
     decided = [
         r.__dict__["ufo"] for r in caplog.records if r.getMessage() == "surface.ambient_reply"
     ]
     assert [(entry["model"], entry["decision"]) for entry in decided] == [
-        ("claude-opus-4-8", "NO_REPLY")
+        ("claude-opus-5-5", "NO_REPLY")
     ]
 
 
@@ -2943,7 +2956,7 @@ async def _turn_row(
     stamp = moment or datetime.now(UTC)
     terminal = (
         TerminalFrame(
-            status=status, text="answer", tokens=7, cost_micro_usd=42, model="claude-opus-4-8"
+            status=status, text="answer", tokens=7, cost_micro_usd=42, model="claude-opus-5-5"
         ).model_dump(mode="json")
         if status in ("done", "failed", "cancelled")
         else None
@@ -3034,7 +3047,7 @@ async def test_list_conversations_orders_by_activity_and_scopes_to_the_workspace
     assert by_id[busy].last_turn_at == datetime(2026, 7, 3, tzinfo=UTC)
     assert by_id[busy].member_email is None
     assert by_id[busy].opening_message == "ask 1"
-    assert by_id[busy].model == "claude-opus-4-8"
+    assert by_id[busy].model == "claude-opus-5-5"
     assert by_id[quiet].turn_count == 0
     assert by_id[quiet].last_turn_at is None
     assert by_id[quiet].member_email == "bee@example.com"
@@ -3188,7 +3201,7 @@ async def _seed_agent_row(workspace_id: UUID, name: str) -> UUID:
                 workspace_id=workspace_id,
                 name=name,
                 prompt="be operational",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -3958,7 +3971,7 @@ async def test_a_surface_reads_what_the_gates_alone_decide_now(db: None, tmp_pat
     )
     async with workspace_tx() as connection:
         await UNGATED_LEDGER.record_workspace_usage(
-            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=1_000)
+            connection, workspace_id, "claude-opus-5-5", Usage(input_tokens=1_000)
         )
         await connection.execute(
             sa.insert(tables.spend_cap).values(

@@ -154,7 +154,7 @@ async def _seed(audience: Audience = SHARED_AUDIENCE) -> tuple[UUID, UUID, UUID,
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -253,7 +253,7 @@ async def _tool_ctx(
             created_at=datetime(2026, 8, 14, tzinfo=UTC),
             member_id=acting_member_id,
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=_unavailable_spawn,
         speaker_member_id=speaker_member_id,
         requesting_message_ref=(

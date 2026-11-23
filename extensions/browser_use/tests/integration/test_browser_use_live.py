@@ -79,7 +79,7 @@ async def test_a_real_run_returns_a_result_and_a_live_view(
             inbound="hi",
             created_at=datetime.now(UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=None,
         speaker_member_id=None,
         audience=conversation_audience(None),

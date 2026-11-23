@@ -109,7 +109,7 @@ async def _agent(
             workspace_id=workspace_id,
             name=name,
             prompt="p",
-            model="claude-opus-4-8",
+            model="claude-opus-5-5",
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
@@ -200,7 +200,7 @@ async def _bill(
             prompt_tokens=10,
             input_tokens=10,
             priced_micro_usd=priced_micro_usd,
-            model="claude-opus-4-8",
+            model="claude-opus-5-5",
             created_at=stamp,
             updated_at=sa.func.now(),
         )
@@ -279,7 +279,7 @@ async def test_workspace_cap_counts_extension_spend(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, _ = await _seed(connection)
         await UNGATED_LEDGER.record_workspace_usage(
-            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=1000)
+            connection, workspace_id, "claude-opus-5-5", Usage(input_tokens=1000)
         )
         await _set_cap(connection, workspace_id, "workspace", None, 3600, 1000, "park")
         decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
@@ -292,7 +292,7 @@ async def test_member_cap_ignores_extension_spend(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, _ = await _seed(connection)
         await UNGATED_LEDGER.record_workspace_usage(
-            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=1000)
+            connection, workspace_id, "claude-opus-5-5", Usage(input_tokens=1000)
         )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 1000, "reject")
         decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
@@ -393,7 +393,7 @@ async def test_sandbox_tokens_count_toward_a_cap(db: None) -> None:
             connection,
             workspace_id,
             turn_id,
-            "claude-opus-4-8",
+            "claude-opus-5-5",
             Usage(input_tokens=1000, output_tokens=2000),
         )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")

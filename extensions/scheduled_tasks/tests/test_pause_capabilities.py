@@ -47,7 +47,7 @@ async def test_pause_generation_preserves_only_capabilities_written_by_its_arm(d
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

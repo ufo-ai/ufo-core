@@ -39,7 +39,7 @@ READY_POLL_S = 0.1
 
 FRAMES: tuple[LiveFrame, ...] = (
     TextDelta(text="hello"),
-    Terminal(frame=TerminalFrame(status="done", text="answer", model="claude-opus-4-8")),
+    Terminal(frame=TerminalFrame(status="done", text="answer", model="claude-opus-5-5")),
     Parked(message="over a spend cap"),
     CostTick(cost_micro_usd=110, tokens=10),
     Activity(text="Listing the workspace."),

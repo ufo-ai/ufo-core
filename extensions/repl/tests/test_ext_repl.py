@@ -147,7 +147,7 @@ async def _seeded_turn() -> Turn:
                 workspace_id=turn.workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -195,7 +195,7 @@ def _context(
         sandbox=sandbox,
         blob=FilesystemBlobStore(root=tmp_path),
         turn=turn or _turn(),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
         audience=conversation_audience(None),

@@ -70,7 +70,7 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn, Usage
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.credentials import CredentialValueInvalid
-from ufo.sdk.models import ModelRetryAfter, ModelStreamInterrupted
+from ufo.sdk.models import ModelPrice, ModelRetryAfter, ModelStreamInterrupted
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -85,7 +85,7 @@ VIDEO_JOB = "vid-01JB7"
 
 SESSION = "9a5b0c2e-conversation"
 REQUEST = ModelRequest(
-    model="google/gemini-2.5-pro",
+    model="google/gemini-4-neon",
     system="be terse",
     messages=(Message(role="user", content="hi"),),
     max_tokens=64,
@@ -93,9 +93,9 @@ REQUEST = ModelRequest(
     session_id=SESSION,
 )
 
-GEMINI_FLASH_REQUEST = REQUEST.model_copy(update={"model": "google/gemini-3.7-flash"})
+GEMINI_NEON_REQUEST = REQUEST.model_copy(update={"model": "google/gemini-4-neon"})
 FABLE_SPEC = next(
-    spec for spec in openrouter.OPENROUTER_MODEL_SPECS if spec.id == "anthropic/claude-fable-5.1"
+    spec for spec in openrouter.OPENROUTER_MODEL_SPECS if spec.id == "anthropic/claude-fable-5.2"
 )
 FABLE_REQUEST = REQUEST.model_copy(update={"model": FABLE_SPEC.id})
 
@@ -233,11 +233,11 @@ def test_forced_tool_choice_compels_the_named_tool() -> None:
     assert kwargs["parallel_tool_calls"] is False
 
 
-def test_fable_5_1_is_offered_the_named_tool_alone_without_a_forced_choice() -> None:
+def test_fable_5_2_is_offered_the_named_tool_alone_without_a_forced_choice() -> None:
     fable = next(
         spec
         for spec in openrouter.OPENROUTER_MODEL_SPECS
-        if spec.id == "anthropic/claude-fable-5.1"
+        if spec.id == "anthropic/claude-fable-5.2"
     )
     finish = ToolSchema(name="finish", description="Return the result.", input_schema={})
     request = REQUEST.model_copy(
@@ -264,26 +264,33 @@ def test_fable_5_1_is_offered_the_named_tool_alone_without_a_forced_choice() -> 
 
 
 def test_openrouter_slug_maps_bare_ids_and_passes_slugs_through() -> None:
-    assert openrouter.openrouter_slug("google/gemini-2.5-pro") == "google/gemini-2.5-pro"
-    assert openrouter.openrouter_slug("gpt-5.4") == "openai/gpt-5.4"
-    assert openrouter.openrouter_slug("claude-opus-4-8") == "anthropic/claude-opus-4-8"
+    assert openrouter.openrouter_slug("google/gemini-4-neon") == "google/gemini-4-neon"
+    assert openrouter.openrouter_slug("gpt-6.2-astra") == "openai/gpt-6.2-astra"
+    assert openrouter.openrouter_slug("claude-opus-5-5") == "anthropic/claude-opus-5-5"
     assert openrouter.openrouter_slug("grok-2") == "grok-2"
 
 
-def test_manifest_registers_fable_5_1() -> None:
+def test_manifest_registers_fable_5_2() -> None:
     by_id = {spec.id: spec for spec in openrouter.manifest().models}
-    fable = by_id["anthropic/claude-fable-5.1"]
+    fable = by_id["anthropic/claude-fable-5.2"]
     assert fable.provider == "openrouter"
     assert fable.api_surface == "chat"
-    assert fable.price.input == 10_000_000
-    assert fable.price.output == 50_000_000
-    assert fable.price.cache_read == 250_000
-    assert fable.price.cache_write_5m == 12_500_000
-    assert by_id["anthropic/claude-fable-5"].price.cache_read == 1_000_000
-    assert by_id["anthropic/claude-fable-5"].price.cache_write_5m == 12_500_000
+    assert fable.price == ModelPrice(8_000_000, 40_000_000, 200_000, 10_000_000, 16_000_000)
     assert fable.context_window == 1_000_000
-    assert fable.knowledge_cutoff == "2026-01"
+    assert fable.knowledge_cutoff == "2026-06"
     assert fable.reasoning.supported
+    assert not fable.reasoning.can_disable
+    assert not fable.forced_tool_choice
+
+
+def test_manifest_registers_current_openrouter_model_families() -> None:
+    by_id = {spec.id: spec for spec in openrouter.manifest().models}
+    assert by_id["google/gemini-4-neon"].price == ModelPrice(3_000_000, 15_000_000, 150_000, 0, 0)
+    assert by_id["moonshotai/kimi-k3.1-pro"].context_window == 1_048_576
+    assert by_id["openai/gpt-6.2-astra"].price.input == 8_000_000
+    assert by_id["openai/gpt-6.2-sol"].price.input == 2_000_000
+    assert by_id["openai/gpt-6.1-terra"].price.input == 1_000_000
+    assert by_id["openai/gpt-6-luna"].price.input == 100_000
 
 
 def test_manifest_registers_grok_4_7_at_the_rate_its_window_holds() -> None:
@@ -346,12 +353,12 @@ async def test_complete_streams_text_then_usage_without_an_auto_reasoning_budget
     assert events[:2] == [ModelStreamStart(), TextDelta(text="ok")]
     assert events[-1] == Usage(input_tokens=3, output_tokens=2)
     kwargs = create.calls[0]
-    assert kwargs["model"] == "google/gemini-2.5-pro"
+    assert kwargs["model"] == "google/gemini-4-neon"
     assert kwargs["extra_body"] == {"session_id": SESSION}
     assert kwargs["stream_options"] == {"include_usage": True}
 
 
-async def test_gemini_flash_abort_retries_immediately_once(
+async def test_gemini_neon_abort_retries_immediately_once(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -371,7 +378,7 @@ async def test_gemini_flash_abort_retries_immediately_once(
     )
 
     with caplog.at_level(logging.INFO):
-        events = [event async for event in _client(create).complete(GEMINI_FLASH_REQUEST)]
+        events = [event async for event in _client(create).complete(GEMINI_NEON_REQUEST)]
 
     assert events == [
         ModelStreamStart(),
@@ -382,7 +389,7 @@ async def test_gemini_flash_abort_retries_immediately_once(
     assert emitted == [
         (
             "model_provider_retry_total",
-            {"provider": "openrouter", "model": "google/gemini-3.7-flash", "kind": "abort"},
+            {"provider": "openrouter", "model": "google/gemini-4-neon", "kind": "abort"},
         )
     ]
     retry = next(
@@ -390,23 +397,23 @@ async def test_gemini_flash_abort_retries_immediately_once(
     )
     assert retry.ufo == {
         "provider": "openrouter",
-        "model": "google/gemini-3.7-flash",
+        "model": "google/gemini-4-neon",
         "attempt": 1,
     }
 
 
-async def test_second_gemini_flash_abort_interrupts_the_round() -> None:
+async def test_second_gemini_neon_abort_interrupts_the_round() -> None:
     create = ScriptedCreate(_api_error(), _api_error())
 
     with pytest.raises(ModelStreamInterrupted) as raised:
-        async for _ in _client(create).complete(GEMINI_FLASH_REQUEST):
+        async for _ in _client(create).complete(GEMINI_NEON_REQUEST):
             pass
 
     assert raised.value.kind == "stream_error"
     assert len(create.calls) == 2
 
 
-async def test_gemini_flash_abort_after_text_interrupts_the_round() -> None:
+async def test_gemini_neon_abort_after_text_interrupts_the_round() -> None:
     create = ScriptedCreate(
         [_chunk(content="partial"), _api_error()],
         [_chunk(content="wrong"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
@@ -414,7 +421,7 @@ async def test_gemini_flash_abort_after_text_interrupts_the_round() -> None:
     events = []
 
     with pytest.raises(ModelStreamInterrupted) as raised:
-        async for event in _client(create).complete(GEMINI_FLASH_REQUEST):
+        async for event in _client(create).complete(GEMINI_NEON_REQUEST):
             events.append(event)
 
     assert raised.value.kind == "stream_error"
@@ -422,7 +429,7 @@ async def test_gemini_flash_abort_after_text_interrupts_the_round() -> None:
     assert len(create.calls) == 1
 
 
-async def test_gemini_flash_abort_after_tool_call_start_interrupts_the_round() -> None:
+async def test_gemini_neon_abort_after_tool_call_start_interrupts_the_round() -> None:
     create = ScriptedCreate(
         [
             ChatCompletionChunk(
@@ -456,7 +463,7 @@ async def test_gemini_flash_abort_after_tool_call_start_interrupts_the_round() -
     events = []
 
     with pytest.raises(ModelStreamInterrupted) as raised:
-        async for event in _client(create).complete(GEMINI_FLASH_REQUEST):
+        async for event in _client(create).complete(GEMINI_NEON_REQUEST):
             events.append(event)
 
     assert raised.value.kind == "stream_error"
@@ -472,7 +479,7 @@ async def test_a_status_error_keeps_raising_raw() -> None:
     )
 
     with pytest.raises(type(error)) as raised:
-        async for _ in _client(create).complete(GEMINI_FLASH_REQUEST):
+        async for _ in _client(create).complete(GEMINI_NEON_REQUEST):
             pass
 
     assert raised.value is error
@@ -534,7 +541,7 @@ async def test_a_peer_disconnect_mid_stream_interrupts_the_round() -> None:
     assert len(create.calls) == 1
 
 
-async def test_cancelled_gemini_flash_stream_does_not_retry() -> None:
+async def test_cancelled_gemini_neon_stream_does_not_retry() -> None:
     error = asyncio.CancelledError()
     create = ScriptedCreate(
         error,
@@ -542,20 +549,20 @@ async def test_cancelled_gemini_flash_stream_does_not_retry() -> None:
     )
 
     with pytest.raises(asyncio.CancelledError) as raised:
-        async for _ in _client(create).complete(GEMINI_FLASH_REQUEST):
+        async for _ in _client(create).complete(GEMINI_NEON_REQUEST):
             pass
 
     assert raised.value is error
     assert len(create.calls) == 1
 
 
-async def test_gemini_flash_abort_preserves_attempt_usage_in_order() -> None:
+async def test_gemini_neon_abort_preserves_attempt_usage_in_order() -> None:
     create = ScriptedCreate(
         [_chunk(usage=_usage(7, 0)), _api_error()],
         [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(11, 3))],
     )
 
-    events = [event async for event in _client(create).complete(GEMINI_FLASH_REQUEST)]
+    events = [event async for event in _client(create).complete(GEMINI_NEON_REQUEST)]
 
     assert [event for event in events if isinstance(event, Usage)] == [
         Usage(input_tokens=7, output_tokens=0),
@@ -569,7 +576,7 @@ async def test_status_retry_keeps_its_existing_path() -> None:
         [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(2, 1))],
     )
 
-    events = [event async for event in _client(create).complete(GEMINI_FLASH_REQUEST)]
+    events = [event async for event in _client(create).complete(GEMINI_NEON_REQUEST)]
 
     assert len(create.calls) == 2
     assert events == [
@@ -1620,7 +1627,7 @@ async def test_a_refusing_upstream_leaves_the_rest_of_the_turn() -> None:
     assert create.calls[2]["extra_body"]["provider"] == {**GLM_FLASH_ROUTING, "ignore": ["Morph"]}
 
 
-async def test_the_gemini_flash_abort_retry_keeps_its_identical_call() -> None:
+async def test_the_gemini_neon_abort_retry_keeps_its_identical_call() -> None:
     """The abort is the model's own no-output fault, not a wedged route: it clears on an immediate
     identical retry, so it is the one mid-stream fault that leaves no upstream behind."""
     create = ScriptedCreate(
@@ -1628,7 +1635,7 @@ async def test_the_gemini_flash_abort_retry_keeps_its_identical_call() -> None:
         [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(2, 1))],
     )
 
-    events = [event async for event in _client(create).complete(GEMINI_FLASH_REQUEST)]
+    events = [event async for event in _client(create).complete(GEMINI_NEON_REQUEST)]
 
     assert TextDelta(text="ok") in events
     assert create.calls[0] == create.calls[1]
@@ -1667,7 +1674,7 @@ def test_google_tool_results_survive_json_parser_value_refusal() -> None:
         Message(role="assistant", content=(ToolUseBlock(id="c1", name="inspect", input={}),)),
         Message(role="user", content=(ToolResultBlock(tool_use_id="c1", content=result),)),
     )
-    request = REQUEST.model_copy(update={"model": "google/gemini-3.7-flash", "messages": messages})
+    request = REQUEST.model_copy(update={"model": "google/gemini-4-neon", "messages": messages})
 
     rendered = _client(ScriptedCreate([]))._create_kwargs(request, frozenset())["messages"]
 
@@ -1695,7 +1702,7 @@ def test_google_error_results_and_dynamic_references_are_text_enveloped() -> Non
             ),
         ),
     )
-    request = REQUEST.model_copy(update={"model": "google/gemini-3.7-flash", "messages": messages})
+    request = REQUEST.model_copy(update={"model": "google/gemini-4-neon", "messages": messages})
 
     rendered = _client(ScriptedCreate([]))._create_kwargs(request, frozenset())["messages"]
 
@@ -1711,9 +1718,9 @@ def test_non_google_and_reference_free_tool_results_keep_the_standard_shape() ->
         Message(role="assistant", content=(ToolUseBlock(id="c1", name="add", input={}),)),
         Message(role="user", content=(ToolResultBlock(tool_use_id="c1", content=result),)),
     )
-    google = REQUEST.model_copy(update={"model": "google/gemini-3.7-flash", "messages": messages})
+    google = REQUEST.model_copy(update={"model": "google/gemini-4-neon", "messages": messages})
     anthropic = REQUEST.model_copy(
-        update={"model": "anthropic/claude-fable-5", "messages": messages}
+        update={"model": "anthropic/claude-fable-5.2", "messages": messages}
     )
     client = _client(ScriptedCreate([]))
     assert client._create_kwargs(google, frozenset())["messages"][-1]["content"] == result
@@ -1792,14 +1799,14 @@ async def test_registry_rejects_a_non_ascii_openrouter_key(
         with pytest.raises(
             CredentialValueInvalid,
             match=(
-                r"model 'google/gemini-2\.5-pro' key contains non-ASCII characters: "
+                r"model 'google/gemini-4-neon' key contains non-ASCII characters: "
                 rf"env UFO_{openrouter.OPENROUTER_API_KEY_ENV} "
                 rf"\(or {openrouter.OPENROUTER_API_KEY_ENV}\) or the workspace's "
                 rf"{openrouter.OPENROUTER_KEY_SLOT!r} BYOK slot holds a value "
                 r"the provider wire cannot carry\."
             ),
         ):
-            await registry.client_for("google/gemini-2.5-pro")
+            await registry.client_for("google/gemini-4-neon")
 
 
 @dataclass
@@ -1863,7 +1870,7 @@ async def _keyed_turn(stored: bool = False) -> tuple[UUID, UUID]:
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1915,7 +1922,7 @@ def _context(workspace_id: UUID, turn_id: UUID, sandbox: _Sandbox, tmp_path: Pat
             inbound="draw me a poster",
             created_at=datetime(2026, 8, 6, tzinfo=UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=None,
         speaker_member_id=None,
         audience=conversation_audience(None),

@@ -28,7 +28,7 @@ OTHER = "U2"
 class RecordingModel:
     answer: str = "NO_REPLY"
     requests: list[ModelRequest] = field(default_factory=list)
-    model: str = "gpt-5.6-luna"
+    model: str = "gpt-6-luna"
 
     async def complete(self, request: ModelRequest) -> str:
         self.requests.append(request)
@@ -61,7 +61,7 @@ async def test_the_thread_arrives_as_fenced_json_naming_who_spoke_every_message(
 
     assert decision == "NO_REPLY"
     [request] = model.requests
-    assert request.model == "gpt-5.6-luna"
+    assert request.model == "gpt-6-luna"
     assert request.system == AMBIENT_REPLY_SYSTEM
     assert request.max_tokens == AMBIENT_REPLY_MAX_TOKENS
     assert request.reasoning == "low"

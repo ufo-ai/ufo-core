@@ -228,7 +228,7 @@ PROOF_REGISTRY = ModelRegistry(
         for spec in CORE_MODEL_SPECS
     },
     pricing=CORE_PRICING,
-    auto_model="claude-opus-4-8",
+    auto_model="claude-opus-5-5",
 )
 
 
@@ -303,7 +303,7 @@ async def _bootstrap_workspace() -> UUID:
                 workspace_id=workspace_id,
                 name=DEFAULT_AGENT_NAME,
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -416,7 +416,7 @@ def terminal_server(
             "",
             None,
             None,
-            ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+            ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
             ambient_reply=UNREACHED_AMBIENT_REPLY,
             skills=EMPTY_SKILL_REGISTRY,
             member_skill_listing=no_member_skills,

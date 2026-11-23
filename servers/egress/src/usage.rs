@@ -503,7 +503,7 @@ mod tests {
     const JSON_HEAD: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n";
 
     const ANTHROPIC_SSE_BODY: &[u8] = b"event: message_start\r\n\
-data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"claude-opus-4-8\",\"usage\":{\"input_tokens\":1000,\"cache_read_input_tokens\":3000,\"cache_creation_input_tokens\":4000,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":4000},\"output_tokens\":1}}}\r\n\r\n\
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":1000,\"cache_read_input_tokens\":3000,\"cache_creation_input_tokens\":4000,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":4000},\"output_tokens\":1}}}\r\n\r\n\
 event: content_block_delta\r\n\
 data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\r\n\r\n\
 event: message_delta\r\n\
@@ -511,19 +511,19 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usa
 event: message_stop\r\n\
 data: {\"type\":\"message_stop\"}\r\n\r\n";
 
-    const OPENAI_SSE_BODY: &[u8] = b"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":null}\n\n\
-data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.4\",\"choices\":[],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000,\"total_tokens\":2000000}}\n\n\
+    const OPENAI_SSE_BODY: &[u8] = b"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-6.2-astra\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":null}\n\n\
+data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-6.2-astra\",\"choices\":[],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000,\"total_tokens\":2000000}}\n\n\
 data: [DONE]\n\n";
 
-    const ANTHROPIC_JSON: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"id\":\"msg\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-4-8\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":1000,\"cache_read_input_tokens\":3000,\"cache_creation_input_tokens\":4000,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":4000},\"output_tokens\":2000}}";
+    const ANTHROPIC_JSON: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"id\":\"msg\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5-5\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":1000,\"cache_read_input_tokens\":3000,\"cache_creation_input_tokens\":4000,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":4000},\"output_tokens\":2000}}";
 
-    const OPENAI_JSON: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"id\":\"c\",\"object\":\"chat.completion\",\"model\":\"gpt-5.4\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000,\"total_tokens\":2000000}}";
+    const OPENAI_JSON: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"id\":\"c\",\"object\":\"chat.completion\",\"model\":\"gpt-6.2-astra\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000,\"total_tokens\":2000000}}";
 
-    const OPENAI_CACHED_JSON: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"id\":\"c\",\"object\":\"chat.completion\",\"model\":\"gpt-5.5\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":100000,\"completion_tokens\":500,\"total_tokens\":100500,\"prompt_tokens_details\":{\"cached_tokens\":90000}}}";
+    const OPENAI_CACHED_JSON: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"id\":\"c\",\"object\":\"chat.completion\",\"model\":\"gpt-6.2-astra\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":100000,\"completion_tokens\":500,\"total_tokens\":100500,\"prompt_tokens_details\":{\"cached_tokens\":90000}}}";
 
-    const OPENAI_RESPONSES_JSON: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"id\":\"resp\",\"object\":\"response\",\"model\":\"gpt-5.6-terra\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}],\"usage\":{\"input_tokens\":100000,\"input_tokens_details\":{\"cached_tokens\":90000},\"output_tokens\":500,\"output_tokens_details\":{\"reasoning_tokens\":100},\"total_tokens\":100500}}";
+    const OPENAI_RESPONSES_JSON: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"id\":\"resp\",\"object\":\"response\",\"model\":\"gpt-6.1-terra\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}],\"usage\":{\"input_tokens\":100000,\"input_tokens_details\":{\"cached_tokens\":90000},\"output_tokens\":500,\"output_tokens_details\":{\"reasoning_tokens\":100},\"total_tokens\":100500}}";
 
-    const OPENAI_OVER_CACHED_JSON: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"id\":\"c\",\"object\":\"chat.completion\",\"model\":\"gpt-5.5\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":100000,\"completion_tokens\":500,\"total_tokens\":100500,\"prompt_tokens_details\":{\"cached_tokens\":100001}}}";
+    const OPENAI_OVER_CACHED_JSON: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"id\":\"c\",\"object\":\"chat.completion\",\"model\":\"gpt-6.2-astra\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":100000,\"completion_tokens\":500,\"total_tokens\":100500,\"prompt_tokens_details\":{\"cached_tokens\":100001}}}";
 
     fn full_anthropic() -> Usage {
         Usage {
@@ -563,7 +563,7 @@ data: [DONE]\n\n";
     fn sse_usage_parses_an_anthropic_stream() {
         assert_eq!(
             feed_all(ANTHROPIC_HOST, &sse(ANTHROPIC_SSE_BODY)),
-            Some(("claude-opus-4-8".to_string(), full_anthropic()))
+            Some(("claude-opus-5-5".to_string(), full_anthropic()))
         );
     }
 
@@ -571,7 +571,7 @@ data: [DONE]\n\n";
     fn sse_usage_reassembles_across_chunk_boundaries() {
         assert_eq!(
             feed_split(ANTHROPIC_HOST, &sse(ANTHROPIC_SSE_BODY), 1),
-            Some(("claude-opus-4-8".to_string(), full_anthropic()))
+            Some(("claude-opus-5-5".to_string(), full_anthropic()))
         );
     }
 
@@ -580,7 +580,7 @@ data: [DONE]\n\n";
         assert_eq!(
             feed_all(OPENAI_HOST, &sse(OPENAI_SSE_BODY)),
             Some((
-                "gpt-5.4".to_string(),
+                "gpt-6.2-astra".to_string(),
                 Usage {
                     input_tokens: 1_000_000,
                     output_tokens: 1_000_000,
@@ -600,7 +600,7 @@ data: [DONE]\n\n";
     fn json_body_usage_parses_an_anthropic_response() {
         assert_eq!(
             feed_all(ANTHROPIC_HOST, ANTHROPIC_JSON),
-            Some(("claude-opus-4-8".to_string(), full_anthropic()))
+            Some(("claude-opus-5-5".to_string(), full_anthropic()))
         );
     }
 
@@ -609,7 +609,7 @@ data: [DONE]\n\n";
         assert_eq!(
             feed_all(OPENAI_HOST, OPENAI_JSON),
             Some((
-                "gpt-5.4".to_string(),
+                "gpt-6.2-astra".to_string(),
                 Usage {
                     input_tokens: 1_000_000,
                     output_tokens: 1_000_000,
@@ -623,7 +623,7 @@ data: [DONE]\n\n";
     fn json_body_usage_reassembles_across_chunk_boundaries() {
         assert_eq!(
             feed_split(ANTHROPIC_HOST, ANTHROPIC_JSON, 7),
-            Some(("claude-opus-4-8".to_string(), full_anthropic()))
+            Some(("claude-opus-5-5".to_string(), full_anthropic()))
         );
     }
 
@@ -632,7 +632,7 @@ data: [DONE]\n\n";
         assert_eq!(
             feed_all(OPENAI_HOST, OPENAI_CACHED_JSON),
             Some((
-                "gpt-5.5".to_string(),
+                "gpt-6.2-astra".to_string(),
                 Usage {
                     input_tokens: 10_000,
                     output_tokens: 500,
@@ -648,7 +648,7 @@ data: [DONE]\n\n";
         assert_eq!(
             feed_all(OPENAI_HOST, OPENAI_RESPONSES_JSON),
             Some((
-                "gpt-5.6-terra".to_string(),
+                "gpt-6.1-terra".to_string(),
                 Usage {
                     input_tokens: 10_000,
                     output_tokens: 500,
@@ -663,11 +663,11 @@ data: [DONE]\n\n";
     fn openai_cache_write_tokens_are_carried_out_of_input_ungated() {
         // prompt 100000 = 90000 cached + 5000 cache-write + 5000 fresh input; core decides whether
         // to price the 30m tier or fold it back.
-        let body = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"id\":\"c\",\"object\":\"chat.completion\",\"model\":\"gpt-5.5\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":100000,\"completion_tokens\":500,\"total_tokens\":100500,\"prompt_tokens_details\":{\"cached_tokens\":90000,\"cache_write_tokens\":5000}}}";
+        let body = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"id\":\"c\",\"object\":\"chat.completion\",\"model\":\"gpt-6.2-astra\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":100000,\"completion_tokens\":500,\"total_tokens\":100500,\"prompt_tokens_details\":{\"cached_tokens\":90000,\"cache_write_tokens\":5000}}}";
         assert_eq!(
             feed_all(OPENAI_HOST, body),
             Some((
-                "gpt-5.5".to_string(),
+                "gpt-6.2-astra".to_string(),
                 Usage {
                     input_tokens: 5_000,
                     output_tokens: 500,
@@ -683,11 +683,11 @@ data: [DONE]\n\n";
     fn anthropic_undifferentiated_cache_creation_bills_at_the_1h_tier() {
         // With no cache_creation breakdown, a bare cache_creation_input_tokens is the 1h write tier
         // (Anthropic's default), not 5m — the billing the deleted Python proxy was corrected to.
-        let body = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"type\":\"message\",\"model\":\"claude-opus-4-8\",\"usage\":{\"input_tokens\":1000,\"cache_creation_input_tokens\":4000,\"output_tokens\":2000}}";
+        let body = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"type\":\"message\",\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":1000,\"cache_creation_input_tokens\":4000,\"output_tokens\":2000}}";
         assert_eq!(
             feed_all(ANTHROPIC_HOST, body),
             Some((
-                "claude-opus-4-8".to_string(),
+                "claude-opus-5-5".to_string(),
                 Usage {
                     input_tokens: 1000,
                     output_tokens: 2000,
@@ -703,7 +703,7 @@ data: [DONE]\n\n";
         assert_eq!(
             feed_all(OPENAI_HOST, OPENAI_OVER_CACHED_JSON),
             Some((
-                "gpt-5.5".to_string(),
+                "gpt-6.2-astra".to_string(),
                 Usage {
                     input_tokens: 0,
                     output_tokens: 500,
@@ -716,7 +716,7 @@ data: [DONE]\n\n";
 
     #[test]
     fn a_usage_object_the_parser_cannot_read_is_not_billed() {
-        let body = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"model\":\"gpt-5.5\",\"usage\":{\"tokens_read\":100000,\"tokens_written\":500}}";
+        let body = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"model\":\"gpt-6.2-astra\",\"usage\":{\"tokens_read\":100000,\"tokens_written\":500}}";
         assert_eq!(feed_all(OPENAI_HOST, body), None);
     }
 
@@ -735,7 +735,7 @@ data: [DONE]\n\n";
         framed.extend_from_slice(b"0\r\n\r\n");
         assert_eq!(
             feed_split(ANTHROPIC_HOST, &framed, 7),
-            Some(("claude-opus-4-8".to_string(), full_anthropic()))
+            Some(("claude-opus-5-5".to_string(), full_anthropic()))
         );
     }
 
@@ -753,7 +753,7 @@ data: [DONE]\n\n";
         assert_eq!(
             feed_split(OPENAI_HOST, &response, 7),
             Some((
-                "gpt-5.4".to_string(),
+                "gpt-6.2-astra".to_string(),
                 Usage {
                     input_tokens: 1_000_000,
                     output_tokens: 1_000_000,
@@ -785,14 +785,14 @@ data: [DONE]\n\n";
         use flate2::Compression;
         // A completion whose decompressed body exceeds the buffer cap: inflating it whole would
         // drop the bill, streaming consumes each line so the trailing usage still meters.
-        let filler = b"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.4\",\
+        let filler = b"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-6.2-astra\",\
 \"choices\":[{\"delta\":{\"content\":\"lorem ipsum dolor sit amet consectetur\"}}],\"usage\":null}\n\n";
         let mut body = Vec::new();
         while body.len() < MAX_SSE_BUFFER_BYTES + MAX_SSE_BUFFER_BYTES / 2 {
             body.extend_from_slice(filler);
         }
         body.extend_from_slice(
-            b"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.4\",\
+            b"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-6.2-astra\",\
 \"choices\":[],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000,\
 \"total_tokens\":2000000}}\n\ndata: [DONE]\n\n",
         );
@@ -807,7 +807,7 @@ data: [DONE]\n\n";
         assert_eq!(
             feed_split(OPENAI_HOST, &response, 4096),
             Some((
-                "gpt-5.4".to_string(),
+                "gpt-6.2-astra".to_string(),
                 Usage {
                     input_tokens: 1_000_000,
                     output_tokens: 1_000_000,

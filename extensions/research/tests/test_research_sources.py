@@ -31,7 +31,7 @@ pytestmark = [
 ]
 
 NOW = datetime(2026, 8, 6, tzinfo=UTC)
-MODEL = "claude-opus-4-8"
+MODEL = "claude-opus-5-5"
 
 
 class _SearchProvider:

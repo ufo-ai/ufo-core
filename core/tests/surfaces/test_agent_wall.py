@@ -66,7 +66,7 @@ async def _workspace_with_two_agents() -> tuple[UUID, UUID, UUID]:
                     workspace_id=workspace_id,
                     name=name,
                     prompt="be brief",
-                    model="claude-opus-4-8",
+                    model="claude-opus-5-5",
                     is_main=is_main,
                     created_at=created_at,
                     updated_at=created_at,
@@ -105,7 +105,7 @@ def _context(workspace_id: UUID, surface: str) -> SurfaceContext:
         _home_surface=None,
         _ingress_public_url=None,
         _deploy_sandbox_internet=False,
-        _models=("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        _models=("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         _ambient_reply=UNREACHED_AMBIENT_REPLY,
     )
 

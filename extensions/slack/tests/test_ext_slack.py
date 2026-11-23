@@ -539,7 +539,7 @@ async def _seed(*, member_email: str | None = DEFAULT_MEMBER_EMAIL) -> tuple[UUI
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -605,7 +605,7 @@ async def _mount_transport(
         ARTIFACT_SECRET,
         public_base_url,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=ambient_reply,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -727,7 +727,7 @@ async def test_manifest_workspace_verifies_with_its_own_signing_slot(
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -765,7 +765,7 @@ async def _mount(
     )
 
 
-FOOTER_LABEL = "$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
+FOOTER_LABEL = "$0.001234 (1,234 tokens, 42% cached) · claude-opus-5-5-[high]"
 
 
 async def _debug_footer(
@@ -836,7 +836,7 @@ async def test_raw_request_body_is_cached_exactly() -> None:
 
 
 def test_block_kit_reply_body_renders_markdown_and_bounds_each_part() -> None:
-    metadata = "$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
+    metadata = "$0.001234 (1,234 tokens, 42% cached) · claude-opus-5-5-[high]"
     body = json.loads(slack.slack_reply_body("C5", "200.0", "hi **there**", metadata))
     assert body["channel"] == "C5"
     assert body["thread_ts"] == "200.0"
@@ -1130,7 +1130,7 @@ async def test_shared_handshake_echoes_without_binding_a_workspace(
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -1197,7 +1197,7 @@ async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeyp
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -1262,7 +1262,7 @@ async def test_oauth_callback_declined_carries_no_workspace_and_reflects_no_erro
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -1299,7 +1299,7 @@ async def test_oauth_callback_refuses_a_team_bound_elsewhere(
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -1334,7 +1334,7 @@ async def test_oauth_callback_refuses_a_tampered_state(db: None, tmp_path, monke
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -1379,7 +1379,7 @@ async def test_oauth_callback_reports_a_rejected_code(db: None, tmp_path, monkey
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -1431,7 +1431,7 @@ async def test_an_install_with_no_app_id_lands_and_says_to_close_the_tab(
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -1469,7 +1469,7 @@ async def test_shared_oauth_callback_binds_the_sealed_workspace(
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -2360,7 +2360,7 @@ async def test_a_reply_onto_a_turn_whose_cap_broke_faces_the_decision(
                     prompt_tokens=5_000,
                     input_tokens=5_000,
                     priced_micro_usd=5_000,
-                    model="claude-opus-4-8",
+                    model="claude-opus-5-5",
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -3300,7 +3300,7 @@ async def _seed_done_turn(
                     tokens=1_234,
                     cost_micro_usd=1_234,
                     cache_percent=42,
-                    model="claude-opus-4-8",
+                    model="claude-opus-5-5",
                     reasoning="high",
                     question=question,
                     connect_request=connect_request,
@@ -3413,7 +3413,7 @@ async def test_shared_slack_rejects_an_unknown_installation_without_binding(
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -3484,7 +3484,7 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -3844,7 +3844,7 @@ async def test_terminal_reply_uses_failure_text_and_falls_back_when_empty(
     await _seed_done_turn(
         workspace_id,
         "C9:200.0",
-        "Anthropic (claude-opus-4-8) declined this request.",
+        "Anthropic (claude-opus-5-5) declined this request.",
         blob,
         artifact=False,
         status="failed",
@@ -3860,7 +3860,7 @@ async def test_terminal_reply_uses_failure_text_and_falls_back_when_empty(
         "C6": slack.SLACK_EMPTY_REPLY_TEXT,
         "C7": slack.SLACK_TURN_FAILED_TEXT,
         "C8": slack.SLACK_TURN_CANCELLED_TEXT,
-        "C9": "Anthropic (claude-opus-4-8) declined this request.",
+        "C9": "Anthropic (claude-opus-5-5) declined this request.",
     }
 
 
@@ -8252,7 +8252,7 @@ EXCERPT_ECHO_REGISTRY = ModelRegistry(
         for spec in CORE_MODEL_SPECS
     },
     pricing=CORE_PRICING,
-    auto_model="claude-opus-4-8",
+    auto_model="claude-opus-5-5",
 )
 
 

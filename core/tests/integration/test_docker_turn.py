@@ -53,7 +53,7 @@ MARKER = "sandbox-lives-42"
 
 
 class _ActivityModel:
-    model = "gpt-5.6-luna"
+    model = "gpt-6-luna"
 
     async def complete(self, _request: ModelRequest) -> str:
         return "Working on the request."
@@ -127,7 +127,7 @@ async def _seed_turn(conversation_id: UUID) -> Turn:
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -180,7 +180,7 @@ async def test_turn_execs_bash_in_a_live_container(
     serving = serving_model(model)
     engine = TurnEngine(
         turn=turn,
-        agent=Agent(prompt="run the marker", model="claude-opus-4-8"),
+        agent=Agent(prompt="run the marker", model="claude-opus-5-5"),
         byok=False,
         system_prompt=rendered_prompt("run the marker"),
         serving=serving,

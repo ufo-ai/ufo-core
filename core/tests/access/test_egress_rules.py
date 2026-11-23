@@ -72,7 +72,7 @@ async def test_artifact_store_rules_admit_nothing_for_the_filesystem_backend(
 
 
 def test_derive_scopes_injects_and_meters_anthropic_via_x_api_key() -> None:
-    rules = derive_model_rules("claude-opus-4-8", "sk-real-abc")
+    rules = derive_model_rules("claude-opus-5-5", "sk-real-abc")
     scope = next(r for r in rules if isinstance(r, ScopeRule))
     injection = next(r for r in rules if isinstance(r, InjectionRule))
     meter = next(r for r in rules if isinstance(r, MeterRule))
@@ -85,7 +85,7 @@ def test_derive_scopes_injects_and_meters_anthropic_via_x_api_key() -> None:
 
 
 def test_only_the_provider_host_is_allowed() -> None:
-    rules = derive_model_rules("gpt-5.4", "sk-x")
+    rules = derive_model_rules("gpt-6.2-astra", "sk-x")
     scope = next(r for r in rules if isinstance(r, ScopeRule))
     assert "example.com" not in scope.allowed_hosts
     assert scope.allowed_hosts == frozenset({OPENAI_HOST})

@@ -16,14 +16,14 @@ def test_documents_manifest_registers_the_writing_profile() -> None:
     manifest = documents.manifest()
     assert [profile.name for profile in manifest.subagents] == ["writing"]
     profile = manifest.subagents[0]
-    assert profile.models == ("gpt-5.6-terra",)
+    assert profile.models == ("gpt-6.1-terra",)
     assert profile.input_model.model_validate({"objective": "tighten it"}).objective == "tighten it"
     assert profile.output_model.model_validate({"result": "drafted"}).result == "drafted"
 
 
 def test_the_pinned_model_is_registered_and_called_on_the_surface_that_takes_tools() -> None:
     """The profile hands the child tools, so the pinned id has to be one whose spec declares the
-    Responses surface: gpt-5.6-terra rejects tools plus reasoning on chat completions (#568)."""
+    Responses surface: gpt-6.1-terra rejects tools plus reasoning on chat completions (#568)."""
     spec = {spec.id: spec for spec in CORE_MODEL_SPECS}[subagent.WRITING_MODEL]
     assert spec.api_surface == "responses"
 

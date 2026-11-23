@@ -160,7 +160,7 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID]:
                 workspace_id=workspace_id,
                 name="Operator",
                 prompt="p",
-                model="gpt-5.6-terra",
+                model="gpt-6.1-terra",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1202,7 +1202,7 @@ async def test_standing_scope_is_isolated_by_member_and_agent(db: None) -> None:
                 workspace_id=workspace_id,
                 name="Other",
                 prompt="p",
-                model="gpt-5.6-terra",
+                model="gpt-6.1-terra",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

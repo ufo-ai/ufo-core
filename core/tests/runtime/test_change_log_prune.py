@@ -36,7 +36,7 @@ async def _conversation(workspace_id: UUID) -> tuple[UUID, UUID]:
                 workspace_id=workspace_id,
                 name=f"agent-{agent_id.hex[:8]}",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

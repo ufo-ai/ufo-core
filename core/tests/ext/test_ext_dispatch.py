@@ -47,7 +47,7 @@ EXTENSION = "sample"
 
 
 class _ActivityModel:
-    model = "gpt-5.6-luna"
+    model = "gpt-6-luna"
 
     async def complete(self, _request: ModelRequest) -> str:
         return "Working on the request."
@@ -194,7 +194,7 @@ async def _seed_turn() -> Turn:
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -249,7 +249,7 @@ def _engine(
     handle = SandboxHandle(conversation_id=turn.conversation_id, container_id="test")
     return TurnEngine(
         turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         byok=False,
         system_prompt=rendered_prompt("p"),
         serving=serving_model(model),

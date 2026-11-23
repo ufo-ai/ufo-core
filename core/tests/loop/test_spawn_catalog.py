@@ -137,7 +137,7 @@ async def test_a_profile_with_a_model_route_shadows_their_agent(db: None) -> Non
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     init_workspace_credentials(store)
     registry = SubagentRegistry(
-        (replace(_profile("coding"), models=("claude-opus-5", "z-ai/glm-5.3")),)
+        (replace(_profile("coding"), models=("claude-opus-5-5", "z-ai/glm-5.3")),)
     )
 
     with ws(workspace_id):
@@ -220,7 +220,7 @@ async def test_a_profile_with_a_model_route_is_listed_whether_or_not_they_connec
     registry = SubagentRegistry(
         (
             _profile("research"),
-            replace(_profile("coding"), models=("claude-opus-5", "z-ai/glm-5.3")),
+            replace(_profile("coding"), models=("claude-opus-5-5", "z-ai/glm-5.3")),
         )
     )
 
@@ -285,10 +285,10 @@ async def test_the_provider_a_member_connected_is_the_one_they_are_read_as(db: N
 def test_a_profile_model_route_preserves_priority_order() -> None:
     profile = replace(
         _profile("coding"),
-        models=("claude-opus-5", "gpt-5.6-sol", "z-ai/glm-5.3"),
+        models=("claude-opus-5-5", "gpt-6.2-sol", "z-ai/glm-5.3"),
     )
 
-    assert profile.models == ("claude-opus-5", "gpt-5.6-sol", "z-ai/glm-5.3")
+    assert profile.models == ("claude-opus-5-5", "gpt-6.2-sol", "z-ai/glm-5.3")
 
 
 def test_the_shipped_coding_profile_prefers_connected_accounts_then_glm() -> None:
@@ -297,7 +297,7 @@ def test_the_shipped_coding_profile_prefers_connected_accounts_then_glm() -> Non
         == CODING_MODELS
         == (
             "claude-opus-5-5",
-            "gpt-5.6-sol",
+            "gpt-6.2-sol",
             "z-ai/glm-5.3",
         )
     )

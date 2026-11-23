@@ -92,7 +92,7 @@ REWRITTEN_COMMAND = "echo modified"
 
 
 class _ActivityModel:
-    model = "gpt-5.6-luna"
+    model = "gpt-6-luna"
 
     async def complete(self, _request: ModelRequest) -> str:
         return "Working on the request."
@@ -126,7 +126,7 @@ async def _fire(chain: HookChain, event: str, payload: object) -> hooks_module.H
         event,
         payload,
         turn,
-        Agent(prompt="p", model="claude-opus-4-8"),
+        Agent(prompt="p", model="claude-opus-5-5"),
         None,
     )
 
@@ -156,7 +156,7 @@ async def test_a_hook_reads_the_frames_and_the_end_of_the_turn_it_fires_under(db
             "user_prompt_submit",
             UserPromptSubmit(text="hi"),
             turn,
-            Agent(prompt="p", model="claude-opus-4-8"),
+            Agent(prompt="p", model="claude-opus-5-5"),
             None,
         )
         assert resolution.denied is None
@@ -482,7 +482,7 @@ async def _seed_turn(workspace_id: UUID) -> Turn:
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -536,7 +536,7 @@ def _engine(
 ) -> TurnEngine:
     blob = FilesystemBlobStore(root=tmp_path)
     handle = SandboxHandle(conversation_id=turn.conversation_id, container_id="test")
-    agent = Agent(prompt="p", model="claude-opus-4-8")
+    agent = Agent(prompt="p", model="claude-opus-5-5")
     return TurnEngine(
         turn=turn,
         agent=agent,

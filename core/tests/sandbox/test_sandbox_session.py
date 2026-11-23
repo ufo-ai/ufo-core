@@ -429,7 +429,7 @@ async def _seeded_turn() -> Turn:
                 workspace_id=turn.workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -500,7 +500,7 @@ def _tool_ctx(
             inbound="hi",
             created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=_no_spawn,
         speaker_member_id=None,
         audience=conversation_audience(None),

@@ -69,7 +69,7 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID, UUID]:
                 workspace_id=workspace_id,
                 name="Operator",
                 prompt="p",
-                model="gpt-5.6-terra",
+                model="gpt-6.1-terra",
                 created_at=now,
                 updated_at=now,
             )
@@ -224,7 +224,7 @@ def _context(workspace_id: UUID, agent_id: UUID, member_id: UUID) -> ToolContext
             inbound="show my permissions",
             created_at=datetime(2026, 9, 13, tzinfo=UTC),
         ),
-        agent=Agent(name="Operator", prompt="p", model="gpt-5.6-terra"),
+        agent=Agent(name="Operator", prompt="p", model="gpt-6.1-terra"),
         spawn=_unavailable_spawn,
         speaker_member_id=member_id,
         audience=conversation_audience(member_id),
