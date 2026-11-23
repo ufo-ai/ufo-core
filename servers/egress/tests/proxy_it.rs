@@ -643,6 +643,34 @@ async fn a_pinned_scope_with_an_injection_rule_mitms_the_vetted_address_alone() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_credential_refusal_answers_the_actionable_message_inside_tls() {
+    let message = "GitHub connection must be reconnected to grant the new permissions; ask the member to reconnect with connect_account";
+    let rules = format!(
+        r#"[{{"kind":"refusal","host":"api.github.com","message":{}}}]"#,
+        serde_json::to_string(message).unwrap()
+    );
+    let proxy = start_proxy(ControlState::new(&rules)).await;
+    let auth = basic(&run_token());
+    let (sock, head) = connect(&proxy, "api.github.com:443", Some(&auth)).await;
+    assert_eq!(
+        status_of(&head),
+        200,
+        "credential refusal did not establish its TLS error channel: {head}"
+    );
+
+    let request = b"GET /user HTTP/1.1\r\nhost: api.github.com\r\n\r\n";
+    let response = mitm_request(&proxy, sock, "api.github.com", request).await;
+    assert!(
+        response.starts_with("HTTP/1.1 403"),
+        "credential refusal did not answer 403: {response}"
+    );
+    assert!(
+        response.contains(message),
+        "credential refusal lost its reconnect guidance: {response}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_internet_rule_refuses_a_private_destination() {
     let rules = r#"[{"kind":"internet"}]"#;
     let proxy = start_proxy(ControlState::new(rules)).await;

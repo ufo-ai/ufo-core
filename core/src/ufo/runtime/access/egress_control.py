@@ -28,6 +28,7 @@ from ufo.runtime.access.egress_rules import (
     InjectionRule,
     InternetRule,
     MeterRule,
+    RefusalRule,
     ResidentialRule,
     Rule,
     ScopeRule,
@@ -65,6 +66,8 @@ def rule_json(rule: Rule) -> dict[str, object]:
             }
         case MeterRule(host=host, dimension=dimension):
             return {"kind": "meter", "host": host, "dimension": dimension}
+        case RefusalRule(host=host, message=message):
+            return {"kind": "refusal", "host": host, "message": message}
         case ServiceRule(host=host, daemon_prefix=daemon_prefix):
             return {"kind": "service", "host": host, "daemon_prefix": daemon_prefix or None}
         case ResidentialRule(host=host):

@@ -98,15 +98,11 @@ class PipedreamBroker:
                 )
             response = await client.run_action(slug, account.external_user_id, configured)
         except PipedreamError as error:
-            raise (
-                _reconnect_error(error, provider) if _stale_account(error, account_id) else error
-            ) from error
+            raise _classified_account_error(error, provider, account_id) from error
         action_error = response.get("error")
         if action_error:
             failed = PipedreamError(502, json.dumps(action_error))
-            raise (
-                _reconnect_error(failed, provider) if _stale_account(failed, account_id) else failed
-            )
+            raise _classified_account_error(failed, provider, account_id)
         return response
 
     def file_outputs(self, response: dict[str, object]) -> tuple[BrokerFile, ...]:
@@ -152,9 +148,9 @@ class PipedreamBroker:
         try:
             connected = await client.workspace_account(account, workspace_id)
         except PipedreamError as error:
-            if error.status != NOT_FOUND:
-                raise
-            raise GrantUnusable(f"{error.body} — {stale_grant_guidance(provider)}") from error
+            if error.status == NOT_FOUND:
+                raise GrantUnusable(f"{error.body} — {stale_grant_guidance(provider)}") from error
+            raise _classified_account_error(error, provider, account) from error
         if connected.app != spec.app:
             raise PipedreamError(
                 409,
@@ -165,6 +161,7 @@ class PipedreamBroker:
                 client=client,
                 account_id=account,
                 external_user_id=connected.external_user_id,
+                provider=provider,
                 inner=client.transport or httpx.AsyncHTTPTransport(),
             )
         )
@@ -204,8 +201,19 @@ def _stale_account(error: PipedreamError, account_id: str) -> bool:
     return "external user not found" in body or (account_id.lower() in body and "not found" in body)
 
 
-def _reconnect_error(error: PipedreamError, provider: str) -> PipedreamError:
-    return PipedreamError(error.status, f"{error.body} — {stale_grant_guidance(provider)}")
+def _classified_account_error(error: PipedreamError, provider: str, account_id: str) -> Exception:
+    body = error.body.lower()
+    github_rejected_grant = (error.status == 401 and "bad credentials" in body) or (
+        "refusing to allow an oauth app to create or update workflow" in body
+        and "without `workflow` scope" in body
+    )
+    if provider == "github" and (
+        github_rejected_grant or pipedream.oauth_grant_needs_reconnect(error, account_id)
+    ):
+        return pipedream.github_grant_unusable(error.body)
+    if _stale_account(error, account_id):
+        return PipedreamError(error.status, f"{error.body} — {stale_grant_guidance(provider)}")
+    return error
 
 
 def _spec(provider: str) -> ConnectorSpec:

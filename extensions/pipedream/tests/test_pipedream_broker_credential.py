@@ -21,6 +21,7 @@ from ufo_ext_pipedream.broker import PipedreamBroker
 from ufo.sdk.connectors import GrantUnusable
 
 ACCOUNT = "apn_gmail_1"
+GITHUB_BASE = "https://api.github.com"
 GMAIL_BASE = "https://gmail.googleapis.com"
 HISTORY_PATH = "/gmail/v1/users/me/history"
 
@@ -34,7 +35,9 @@ def _pipedream_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 def _handler(
-    owner: str, upstream: Callable[[str, httpx.Request], httpx.Response]
+    owner: str,
+    upstream: Callable[[str, httpx.Request], httpx.Response],
+    app: str = "gmail",
 ) -> Callable[[httpx.Request], httpx.Response]:
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -49,7 +52,7 @@ def _handler(
                         "id": ACCOUNT,
                         "external_id": owner,
                         "healthy": True,
-                        "app": {"name_slug": "gmail"},
+                        "app": {"name_slug": app},
                     }
                 },
             )
@@ -69,12 +72,13 @@ def _install(
     monkeypatch: pytest.MonkeyPatch,
     owner: str,
     upstream: Callable[[str, httpx.Request], httpx.Response],
+    app: str = "gmail",
 ) -> None:
     client = pipedream.PipedreamClient(
         client_id=f"cid_{uuid4().hex}",
         client_secret="s",
         project_id="proj_test",
-        transport=httpx.MockTransport(_handler(owner, upstream)),
+        transport=httpx.MockTransport(_handler(owner, upstream, app)),
     )
     monkeypatch.setattr(pipedream, "pipedream_client", lambda: client)
 
@@ -130,6 +134,33 @@ async def test_pipedream_broker_yields_a_transport_that_proxies_provider_http(
         )
     assert response.status_code == 200
     assert response.json() == page
+
+
+async def test_github_proxy_classifies_a_missing_scope_as_a_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = uuid4()
+    owner = _owner(workspace_id)
+
+    def upstream(target: str, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            headers={
+                "x-oauth-scopes": "repo",
+                "x-accepted-oauth-scopes": "repo, workflow",
+            },
+            json={"message": "Resource not accessible"},
+        )
+
+    _install(monkeypatch, owner, upstream, app="github")
+    credential = await PipedreamBroker().credential(workspace_id, "github", ACCOUNT)
+    assert credential.transport is not None
+
+    with pytest.raises(GrantUnusable, match="GitHub connection must be reconnected") as raised:
+        async with httpx.AsyncClient(base_url=GITHUB_BASE, transport=credential.transport) as http:
+            await http.get("/user")
+    assert raised.value.awaits_grant
+    assert "connect_account" in str(raised.value)
 
 
 async def test_pipedream_broker_proxies_a_workspace_owned_account(

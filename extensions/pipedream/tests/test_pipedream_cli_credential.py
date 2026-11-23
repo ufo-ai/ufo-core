@@ -14,11 +14,13 @@ import ufo_ext_pipedream.client as pipedream
 import ufo_ext_pipedream.manifest as pipedream_manifest
 from ufo_ext_pipedream.provider import PipedreamOAuthProvider
 from ufo_ext_pipedream.token import (
+    GITHUB_REQUIRED_SCOPES,
     GITHUB_USER_URL,
     GithubAccount,
     PipedreamGrantSecret,
     account_identity,
     cli_credential,
+    github_reconnect_reason,
 )
 
 from ufo.host.ext.loader import connector_clis
@@ -48,6 +50,7 @@ def _handler(
     reads: list[tuple[str, httpx.QueryParams]] | None = None,
     github_user: object = None,
     github_status: int = 200,
+    github_headers: dict[str, str] | None = None,
     bearers: list[str] | None = None,
     label: str | None = None,
 ) -> Callable[[httpx.Request], httpx.Response]:
@@ -57,7 +60,7 @@ def _handler(
         if str(request.url) == GITHUB_USER_URL:
             if bearers is not None:
                 bearers.append(request.headers.get("authorization", ""))
-            return httpx.Response(github_status, json=github_user)
+            return httpx.Response(github_status, headers=github_headers, json=github_user)
         if path == "/v1/oauth/token":
             return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
         if request.method == "GET" and "/accounts/" in path:
@@ -150,9 +153,31 @@ async def test_account_token_refuses_an_unhealthy_account_as_a_reconnect(
 ) -> None:
     workspace_id = uuid4()
     _install(monkeypatch, _handler(_owner(workspace_id), healthy=False))
-    with pytest.raises(GrantUnusable, match="reconnect the account") as raised:
+    with pytest.raises(GrantUnusable, match="GitHub connection must be reconnected") as raised:
         await pipedream.pipedream_client().account_token(ACCOUNT, workspace_id)
+    assert raised.value.awaits_grant
+    assert "connect_account" in str(raised.value)
     assert not isinstance(raised.value, pipedream.PipedreamError)
+
+
+async def test_account_token_classifies_a_pipedream_refresh_failure_as_a_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
+        return httpx.Response(
+            400,
+            json={"error": "invalid_grant: failed to refresh token after OAuth app scopes changed"},
+        )
+
+    _install(monkeypatch, handler)
+    with pytest.raises(GrantUnusable, match="GitHub connection must be reconnected") as raised:
+        await pipedream.pipedream_client().account_token(ACCOUNT, workspace_id)
+    assert raised.value.awaits_grant
+    assert "connect_account" in str(raised.value)
 
 
 async def test_account_token_fails_loud_when_pipedream_releases_no_token(
@@ -172,7 +197,15 @@ async def test_grant_secret_reads_each_account_once_within_the_cache_window(
 ) -> None:
     workspace_id = uuid4()
     reads: list[tuple[str, httpx.QueryParams]] = []
-    _install(monkeypatch, _handler(_owner(workspace_id), reads=reads))
+    _install(
+        monkeypatch,
+        _handler(
+            _owner(workspace_id),
+            reads=reads,
+            github_user=PROFILE,
+            github_headers={"x-oauth-scopes": "repo, workflow"},
+        ),
+    )
     secret = PipedreamGrantSecret()
 
     first = await secret.secret(workspace_id, ACCOUNT)
@@ -186,6 +219,64 @@ async def test_grant_secret_reads_each_account_once_within_the_cache_window(
 GITHUB_SPEC = pipedream.CONNECTORS["github"]
 GMAIL_SPEC = pipedream.CONNECTORS["gmail"]
 PROFILE = {"id": 12345, "login": "alexg-ufo", "name": "Alex Graveley"}
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "body", "reason"),
+    [
+        (401, {}, '{"message":"Bad credentials"}', "401 Bad credentials"),
+        (
+            403,
+            {
+                "x-oauth-scopes": "repo",
+                "x-accepted-oauth-scopes": "repo, workflow",
+            },
+            '{"message":"Resource not accessible"}',
+            "missing from the grant: workflow",
+        ),
+        (
+            403,
+            {},
+            "refusing to allow an OAuth App to create or update workflow "
+            ".github/workflows/ci.yml without `workflow` scope",
+            "lacks the workflow scope",
+        ),
+    ],
+)
+def test_github_failure_signatures_require_reconnect(
+    status: int, headers: dict[str, str], body: str, reason: str
+) -> None:
+    response = httpx.Response(status, headers=headers, text=body)
+    assert reason in (github_reconnect_reason(response) or "")
+
+
+def test_a_healthy_github_grant_is_untouched() -> None:
+    response = httpx.Response(
+        200,
+        headers={"x-oauth-scopes": "admin:repo_hook, repo, workflow"},
+        json=PROFILE,
+    )
+    assert github_reconnect_reason(response, required_scopes=GITHUB_REQUIRED_SCOPES) is None
+
+
+async def test_grant_secret_prompts_before_using_an_old_scope_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = uuid4()
+    _install(
+        monkeypatch,
+        _handler(
+            _owner(workspace_id),
+            github_user=PROFILE,
+            github_headers={"x-oauth-scopes": "admin:repo_hook, repo"},
+        ),
+    )
+
+    with pytest.raises(GrantUnusable, match="missing required OAuth scopes: workflow") as raised:
+        await PipedreamGrantSecret().secret(workspace_id, ACCOUNT)
+    assert raised.value.awaits_grant
+    assert "GitHub connection must be reconnected" in str(raised.value)
+    assert "connect_account" in str(raised.value)
 
 
 async def test_account_identity_is_the_accounts_own_noreply_address(
@@ -235,6 +326,25 @@ async def test_account_identity_raises_when_github_refuses_the_read(
     with pytest.raises(pipedream.PipedreamError, match="refused the identity read") as raised:
         await account_identity(GITHUB_SPEC, ACCOUNT, workspace_id)
     assert raised.value.status == 401
+
+
+async def test_account_identity_classifies_bad_credentials_as_a_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = uuid4()
+    _install(
+        monkeypatch,
+        _handler(
+            _owner(workspace_id),
+            github_user={"message": "Bad credentials"},
+            github_status=401,
+        ),
+    )
+
+    with pytest.raises(GrantUnusable, match="GitHub connection must be reconnected") as raised:
+        await account_identity(GITHUB_SPEC, ACCOUNT, workspace_id)
+    assert raised.value.awaits_grant
+    assert "connect_account" in str(raised.value)
 
 
 async def test_account_identity_raises_on_an_answer_naming_no_account(

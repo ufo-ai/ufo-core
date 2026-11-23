@@ -87,7 +87,9 @@ class ComposioBroker:
             )
         except composio.ComposioError as error:
             if _stale_account(error, account_id):
-                raise _reconnect_error(error, provider) from error
+                raise composio.ComposioError(
+                    error.status, f"{error.body} — {stale_grant_guidance(provider)}"
+                ) from error
             if error.status != NOT_FOUND:
                 raise
             raise await self._slug_miss(client, provider, slug, error) from error
@@ -199,10 +201,6 @@ def _stale_account(error: composio.ComposioError, account_id: str) -> bool:
     return ("connected account" in body and "not found" in body) or (
         account_id.lower() in body and "not found" in body
     )
-
-
-def _reconnect_error(error: composio.ComposioError, provider: str) -> composio.ComposioError:
-    return composio.ComposioError(error.status, f"{error.body} — {stale_grant_guidance(provider)}")
 
 
 def _discovered_tools(rows: tuple[dict[str, object], ...]) -> tuple[BrokerTool, ...]:

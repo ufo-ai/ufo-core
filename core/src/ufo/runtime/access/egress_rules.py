@@ -13,7 +13,7 @@ from uuid import UUID
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.harness.o11y import warn
 from ufo.harness.sandbox.session import SENTINEL_MODEL_KEY
-from ufo.runtime.access.connectors import CliCredential
+from ufo.runtime.access.connectors import CliCredential, GrantUnusable
 from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore, credential_host
 from ufo.runtime.access.grants import Grant, cli_accounts, grant_sentinel
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
@@ -68,6 +68,14 @@ class InjectionRule:
 
 
 @dataclass(frozen=True)
+class RefusalRule:
+    """Refuse one host with a member-actionable credential error."""
+
+    host: str
+    message: str
+
+
+@dataclass(frozen=True)
 class ServiceRule:
     """Admit `host`'s CONNECT and relay its TLS-terminated requests to the local daemon that owns
     that host, which serves them on the sandbox's behalf.
@@ -109,7 +117,15 @@ class ResidentialRule:
     host: str
 
 
-Rule = ScopeRule | InternetRule | InjectionRule | MeterRule | ServiceRule | ResidentialRule
+Rule = (
+    ScopeRule
+    | InternetRule
+    | InjectionRule
+    | MeterRule
+    | RefusalRule
+    | ServiceRule
+    | ResidentialRule
+)
 
 
 def provider_host(model: str) -> str:
@@ -282,6 +298,7 @@ async def derive_cli_rules(
     credential slot's fault withholds one slot."""
     rules: list[Rule] = []
     git_hosts: dict[str, list[InjectionRule]] = {}
+    refusals: dict[str, str] = {}
     usable = {
         (provider, account)
         for provider in clis
@@ -303,6 +320,10 @@ async def derive_cli_rules(
                 error_class=type(error).__name__,
                 error=str(error),
             )
+            if isinstance(error, GrantUnusable):
+                refusals.setdefault(grant.host, str(error))
+                if cli.git is not None:
+                    refusals.setdefault(cli.git.host, str(error))
             continue
         sentinel = grant_sentinel(grant.account_id)
         rules.append(
@@ -317,6 +338,12 @@ async def derive_cli_rules(
         rules.append(ScopeRule(allowed_hosts=frozenset({host})))
         rules.extend(injections)
         rules.append(MeterRule(host=host, dimension=REQUEST_METER_DIMENSION))
+    injected_hosts = {rule.host for rule in rules if isinstance(rule, InjectionRule)}
+    rules.extend(
+        RefusalRule(host=host, message=message)
+        for host, message in sorted(refusals.items())
+        if host not in injected_hosts
+    )
     return tuple(rules)
 
 

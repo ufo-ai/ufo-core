@@ -347,6 +347,40 @@ async def test_run_action_refuses_an_oversized_payload(monkeypatch: pytest.Monke
         )
 
 
+async def test_github_tool_refresh_failure_tells_the_agent_to_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        async def action_definition(self, slug: str) -> dict[str, object]:
+            return {
+                "data": {
+                    "key": slug,
+                    "configurable_props": [{"name": "github", "type": "app"}],
+                }
+            }
+
+        async def workspace_account(
+            self, account_id: str, workspace_id: UUID
+        ) -> pipedream.ConnectedAccount:
+            return pipedream.ConnectedAccount(account_id, "github", "ufo_ws")
+
+        async def run_action(
+            self, slug: str, external_user_id: str, arguments: dict[str, object]
+        ) -> dict[str, object]:
+            raise pipedream.PipedreamError(
+                400, "invalid_grant: OAuth app scopes changed and token refresh failed"
+            )
+
+    monkeypatch.setattr(pipedream, "pipedream_client", Client)
+
+    with pytest.raises(GrantUnusable, match="GitHub connection must be reconnected") as raised:
+        await PipedreamBroker().execute(
+            uuid4(), "github", "github-test-action", {}, PIPEDREAM_ACCOUNT, None
+        )
+    assert raised.value.awaits_grant
+    assert "connect_account" in str(raised.value)
+
+
 def test_authorize_url_points_the_browser_at_the_oauth_bridge() -> None:
     oauth = provider.PipedreamOAuthProvider(provider=PROVIDER, host=PROVIDER_HOST, app="gmail")
     url = oauth.authorize_url("SEALED", EXPECTED_REDIRECT_URI)
