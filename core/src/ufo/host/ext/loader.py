@@ -61,7 +61,11 @@ from ufo.host.kinds.surface_kind import (
     registered_surfaces,
 )
 from ufo.host.kinds.turns import TURN_OBJECT
-from ufo.host.kinds.workspace_kind import WORKSPACE_OBJECT
+from ufo.host.kinds.workspace_kind import (
+    SET_SUSPENSION_TOOL_DEF,
+    WORKSPACE_OBJECT,
+    workspace_suspension_enabled,
+)
 from ufo.host.tools.builtins import BUILTIN_ACTIONS, BUILTIN_TOOLS
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
@@ -722,10 +726,11 @@ def core_actions(manifests: tuple[Manifest, ...]) -> tuple[ToolDef, ...]:
             "two extensions declare member_added: "
             + ", ".join(sorted(manifest.name for manifest in listeners))
         )
-    return (
-        add_member_action(listeners[0].member_added if listeners else None),
-        *BUILTIN_ACTIONS,
-    )
+    actions: list[ToolDef] = [add_member_action(listeners[0].member_added if listeners else None)]
+    actions.extend(BUILTIN_ACTIONS)
+    if workspace_suspension_enabled():
+        actions.append(SET_SUSPENSION_TOOL_DEF)
+    return tuple(actions)
 
 
 def frame_admissible(

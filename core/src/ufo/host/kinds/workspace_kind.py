@@ -1,18 +1,18 @@
-"""The `workspace` object kind: who this workspace answers, and whether its members add teammates.
+"""The `workspace` object kind: its membership settings and access state.
 
-One `workspace` row is one instance, named by its id. The one authored field is `members_can_add`,
-which a speaking admin on the main agent applies. Everything else it reports is derived: the member
-count and the seated count come from the member rows, and nothing bounds either — the workspace
-pays one flat fee and its members are unlimited. Seating one member, or unseating them to remove
-their access, is the `member` kind's admin-gated apply.
+One `workspace` row is one instance, named by its id. The one member-authored field is
+`members_can_add`, which a speaking admin on the main agent applies. Member and seat counts are
+derived from the member rows. The suspension action is deploy-gated and limited to a speaking fleet
+operator; it can address any workspace id and blocks every new turn while that workspace remains
+suspended.
 
 Status names who holds a seat, under the roster's own rule: a member asking the main agent in an
-internal conversation reads every colleague, and a child agent answers the speaker's own row
-alone, exactly as the `member` kind does.
+internal conversation reads every colleague, and a child agent answers the speaker's own row alone.
 
 The loader binds it with no extension context, so the handlers read the ambient workspace
 directly."""
 
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.db import workspace_tx
 from ufo.runtime.ext.json_value import JsonValue
+from ufo.runtime.ext.operator import installed_operator
 from ufo.runtime.objects import (
     AdminRequired,
     ObjectDetail,
@@ -34,9 +35,10 @@ from ufo.runtime.objects import (
     object_page,
 )
 from ufo.runtime.seats import SeatEntry, Seats, member_is_admin
-from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.tools.context import TextContent, ToolContext, ToolResult
+from ufo.runtime.tools.registry import ActionPresentation, ObjectBinding, ToolDef
 from ufo.runtime.turns.audience import FOREIGN_AUDIENCE_PREFIX
-from ufo.runtime.workspace import ws_current
+from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
 
 WORKSPACE_KIND = "workspace"
@@ -48,6 +50,8 @@ WORKSPACE_ROOM = (
     "a workspace's settings are changed in an internal conversation, never in a channel shared "
     "with another organization"
 )
+WORKSPACE_SUSPENSION_ENABLED_ENV = "UFO_WORKSPACE_SUSPENSION_ENABLED"
+SUSPENSION_ACTION = "set_suspension"
 
 
 class WorkspaceSpec(BaseModel):
@@ -69,8 +73,86 @@ class WorkspaceShape:
     members: int
     seated: int
     roster: tuple[SeatEntry, ...]
+    suspended_at: datetime | None
+    suspended_by_email: str | None
+    suspension_reason: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class SetSuspensionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    suspended: bool = Field(description="True suspends the workspace; false restores access.")
+    reason: str = Field(min_length=1, description="Why the workspace state must change.")
+
+
+def workspace_suspension_enabled() -> bool:
+    return os.environ.get(WORKSPACE_SUSPENSION_ENABLED_ENV) == "1"
+
+
+async def suspension_operator_email(ctx: ToolContext) -> str | None:
+    if not workspace_suspension_enabled() or ctx.speaker_member_id is None:
+        return None
+    workspace_id = ws_current().workspace_id
+    async with workspace_tx() as connection:
+        email = (
+            await connection.execute(
+                sa.select(tables.member.c.email).where(
+                    tables.member.c.workspace_id == workspace_id,
+                    tables.member.c.id == ctx.speaker_member_id,
+                )
+            )
+        ).scalar_one_or_none()
+    if email is None:
+        return None
+    grant = await installed_operator().rule.admit(workspace_id, email)
+    return email if grant is not None and grant.reach == "fleet" else None
+
+
+async def set_suspension(ctx: ToolContext, args: SetSuspensionInput) -> ToolResult:
+    operator_email = await suspension_operator_email(ctx)
+    if operator_email is None:
+        raise ValueError("workspace suspension is not available to this member")
+    if ctx.target is None or ctx.target.name is None:
+        raise ValueError("workspace suspension requires a workspace target")
+    workspace_id = UUID(ctx.target.name)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            update = sa.update(tables.workspace).where(tables.workspace.c.id == workspace_id)
+            if args.suspended:
+                update = update.values(
+                    suspended_at=sa.func.now(),
+                    suspended_by_email=operator_email,
+                    suspension_reason=args.reason,
+                    updated_at=sa.func.now(),
+                )
+            else:
+                update = update.values(
+                    suspended_at=None,
+                    suspended_by_email=None,
+                    suspension_reason=None,
+                    updated_at=sa.func.now(),
+                )
+            await connection.execute(update)
+    state = "suspended" if args.suspended else "active"
+    return ToolResult(
+        content=(
+            TextContent(text=f"Workspace {workspace_id} is now {state}. Reason: {args.reason}"),
+        )
+    )
+
+
+SET_SUSPENSION_TOOL_DEF = ToolDef(
+    name=SUSPENSION_ACTION,
+    description="Suspend this workspace so it refuses new turns, or restore access.",
+    input_model=SetSuspensionInput,
+    handler=set_suspension,
+    side_effecting=True,
+    parallel_safe=True,
+    bound=ObjectBinding(kind=WORKSPACE_KIND, binding="instance"),
+    presentation=ActionPresentation(label="Set suspension"),
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +164,7 @@ class WorkspaceObjects:
         if ctx.audience.startswith(FOREIGN_AUDIENCE_PREFIX):
             return object_page((), query)
         shape = await self._shape()
+        assert shape is not None
         return object_page(
             (
                 ObjectRow(
@@ -94,11 +177,12 @@ class WorkspaceObjects:
         )
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[WorkspaceSpec] | None:
-        if ctx.audience.startswith(FOREIGN_AUDIENCE_PREFIX):
+        target_id = await self._target_id(ctx, name)
+        if target_id is None:
             return None
-        if name != str(ws_current().workspace_id):
+        shape = await self._shape(target_id)
+        if shape is None:
             return None
-        shape = await self._shape()
         return ObjectDetail(
             spec=WorkspaceSpec(members_can_add=shape.members_can_add),
             created_at=shape.created_at,
@@ -112,15 +196,21 @@ class WorkspaceObjects:
         *,
         expected_generation: UUID | None,
     ) -> dict[str, JsonValue] | None:
-        if ctx.audience.startswith(FOREIGN_AUDIENCE_PREFIX):
+        target_id = await self._target_id(ctx, name)
+        if target_id is None:
             return None
-        if name != str(ws_current().workspace_id):
+        shape = await self._shape(target_id)
+        if shape is None:
             return None
-        shape = await self._shape()
         whole = ctx.speaker_member_id is not None and await ctx.agent_is_main()
         return {
             "members": shape.members,
             "seated": shape.seated,
+            "suspended_at": (
+                None if shape.suspended_at is None else shape.suspended_at.isoformat()
+            ),
+            "suspended_by_email": shape.suspended_by_email,
+            "suspension_reason": shape.suspension_reason,
             "roster": [
                 {"email": entry.email, "seated": entry.seated, "admin": entry.admin}
                 for entry in shape.roster
@@ -170,24 +260,46 @@ class WorkspaceObjects:
     ) -> None:
         raise VerbNotSupported(WORKSPACE_IS_PERMANENT)
 
-    async def _shape(self) -> WorkspaceShape:
-        workspace_id = ws_current().workspace_id
-        async with workspace_tx() as connection:
-            row = (
-                await connection.execute(
-                    sa.select(
-                        tables.workspace.c.members_can_add,
-                        tables.workspace.c.created_at,
-                        tables.workspace.c.updated_at,
-                    ).where(tables.workspace.c.id == workspace_id)
-                )
-            ).one()
-            snapshot = await Seats(workspace_id).snapshot(connection)
+    async def _target_id(self, ctx: ToolContext, name: str) -> UUID | None:
+        if ctx.audience.startswith(FOREIGN_AUDIENCE_PREFIX):
+            return None
+        try:
+            target_id = UUID(name)
+        except ValueError:
+            return None
+        if target_id == ws_current().workspace_id:
+            return target_id
+        if await suspension_operator_email(ctx) is None:
+            return None
+        return target_id
+
+    async def _shape(self, workspace_id: UUID | None = None) -> WorkspaceShape | None:
+        workspace_id = workspace_id or ws_current().workspace_id
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                row = (
+                    await connection.execute(
+                        sa.select(
+                            tables.workspace.c.members_can_add,
+                            tables.workspace.c.suspended_at,
+                            tables.workspace.c.suspended_by_email,
+                            tables.workspace.c.suspension_reason,
+                            tables.workspace.c.created_at,
+                            tables.workspace.c.updated_at,
+                        ).where(tables.workspace.c.id == workspace_id)
+                    )
+                ).one_or_none()
+                if row is None:
+                    return None
+                snapshot = await Seats(workspace_id).snapshot(connection)
         return WorkspaceShape(
             members_can_add=row.members_can_add,
             members=len(snapshot.members),
             seated=snapshot.seated,
             roster=snapshot.members,
+            suspended_at=row.suspended_at,
+            suspended_by_email=row.suspended_by_email,
+            suspension_reason=row.suspension_reason,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -196,12 +308,14 @@ class WorkspaceObjects:
 WORKSPACE_OBJECT = ObjectKind(
     name=WORKSPACE_KIND,
     description=(
-        "Show how many members this workspace has, who holds a seat, and whether members who are "
-        "not admins may add teammates. A member's seat changes on the member object."
+        "Show this workspace's membership settings, seat roster, and suspension state. A member's "
+        "seat changes on the member object."
     ),
     guidance=(
-        "One object per workspace, named by the workspace id, so a listing returns exactly one "
-        "row. Listings filter and order on `members` and `seated`; status carries both plus "
+        "A listing returns the current workspace, named by its workspace id. A speaking fleet "
+        "operator can address another workspace by id and, when suspension is enabled, use "
+        "`set_suspension` with the new state and a reason. Listings filter and order on `members` "
+        "and `seated`; status carries both plus the suspension state and "
         "`roster`, which names every member with whether they hold a seat and whether they "
         "administer the workspace. A member asking the main agent in an internal conversation "
         "reads the whole roster; a child agent answers the speaker's own row alone. Members are "

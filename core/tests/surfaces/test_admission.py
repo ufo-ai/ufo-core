@@ -23,6 +23,7 @@ from ufo.runtime.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE
 from ufo.runtime.surfaces.admission import (
     ADMITTED_TURN_METRIC,
     ARCHIVED_REFUSAL_MESSAGE,
+    WORKSPACE_SUSPENDED_MESSAGE,
     Admission,
 )
 from ufo.runtime.turns.audience import conversation_audience
@@ -1829,6 +1830,43 @@ async def test_redispatch_keeps_a_pinned_followup_separate_from_a_live_sibling(
     assert [
         (turn_id, frame.arrivals) for turn_id, frame in hub.frames if isinstance(frame, Absorbed)
     ] == [(founded, (followup.arrival_id,))]
+
+
+async def test_a_suspended_workspace_refuses_member_and_internal_turns_without_folding(
+    db: None,
+) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    live = await admission.admit_member(workspace_id, conversation_id, "do the thing", member_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.workspace)
+            .values(
+                suspended_at=sa.func.now(),
+                suspended_by_email="operator@metalcraft.ai",
+                suspension_reason="confirmed fraud",
+            )
+            .where(tables.workspace.c.id == workspace_id)
+        )
+
+    member = await admission.admit_member(workspace_id, conversation_id, "and this too", member_id)
+    internal = await _invoke(
+        admission,
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "scheduled fire",
+        as_scheduled=True,
+    )
+
+    assert member.turn_id != live.turn_id
+    assert member.arrival_id is None
+    assert internal is not None
+    assert await _turn_row(member.turn_id) == ("cancelled", WORKSPACE_SUSPENDED_MESSAGE)
+    assert await _turn_row(internal) == ("cancelled", WORKSPACE_SUSPENDED_MESSAGE)
+    assert await _turn_row(live.turn_id) == ("queued", None)
+    assert dbos.enqueued == [str(live.turn_id)]
 
 
 async def test_a_message_to_an_archived_app_is_refused_beside_a_live_turn_rather_than_folded(

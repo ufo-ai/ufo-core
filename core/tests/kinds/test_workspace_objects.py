@@ -3,19 +3,30 @@ read through the verbs, its one setting applied by an admin, and the shape withh
 externally shared channel."""
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 import yaml
 
+import ufo.host.kinds.workspace_kind as workspace_kind
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.host.ext.loader import turn_tools
-from ufo.host.kinds.workspace_kind import WORKSPACE_KIND, WORKSPACE_OBJECT
+from ufo.host.kinds.workspace_kind import (
+    SET_SUSPENSION_TOOL_DEF,
+    SUSPENSION_ACTION,
+    WORKSPACE_KIND,
+    WORKSPACE_OBJECT,
+    WORKSPACE_SUSPENSION_ENABLED_ENV,
+)
+from ufo.runtime.ext.operator import OperatorGrant
+from ufo.runtime.object_scope import ObjectActionTarget
 from ufo.runtime.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.runtime.tools.registry import ToolDef
@@ -185,6 +196,9 @@ async def test_the_workspace_reads_as_one_object_carrying_its_seat_shape(db: Non
         assert read["status"] == {
             "members": 3,
             "seated": 2,
+            "suspended_at": None,
+            "suspended_by_email": None,
+            "suspension_reason": None,
             "roster": [
                 {"email": "member0@example.com", "seated": True, "admin": True},
                 {"email": "member1@example.com", "seated": True, "admin": False},
@@ -396,3 +410,134 @@ async def test_an_externally_shared_channel_hears_no_seat_shape(db: None) -> Non
         assert listed["objects"] == []
         with pytest.raises(UnknownObject):
             await _text(_tool("object_get"), foreign, ref=f"{WORKSPACE_KIND}/{workspace_id}")
+
+
+class _FleetRule:
+    async def admit(self, claimed_ws: UUID, email: str) -> OperatorGrant | None:
+        address = email.strip().lower()
+        local, _, domain = address.partition("@")
+        if not local or domain != "metalcraft.ai" or any(c.isspace() for c in address):
+            return None
+        return OperatorGrant(home=claimed_ws, reach="fleet")
+
+
+def _suspension_context(ctx: ToolContext, workspace_id: UUID) -> ToolContext:
+    return replace(
+        ctx,
+        target=ObjectActionTarget(
+            kind=WORKSPACE_KIND,
+            name=str(workspace_id),
+            agent=None,
+            generation=None,
+            expected_generation=None,
+        ),
+    )
+
+
+async def test_enabled_operator_can_suspend_and_restore_another_workspace(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_id, operator_id, main, _ = await _seed(members=1, seated=1)
+    target_id, _, _, _ = await _seed(members=1, seated=1)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .values(email="operator@metalcraft.ai")
+            .where(tables.member.c.id == operator_id)
+        )
+    monkeypatch.setenv(WORKSPACE_SUSPENSION_ENABLED_ENV, "1")
+    monkeypatch.setattr(
+        workspace_kind,
+        "installed_operator",
+        lambda: SimpleNamespace(rule=_FleetRule()),
+    )
+
+    _, _, registry = turn_tools((), None, audience=conversation_audience(operator_id))
+    assert SUSPENSION_ACTION in registry.actions[WORKSPACE_KIND]
+
+    with ws(source_id):
+        ctx = _suspension_context(_context(source_id, operator_id, main), target_id)
+        assert await WORKSPACE_OBJECT.store.get(ctx, str(target_id)) is not None
+        result = await SET_SUSPENSION_TOOL_DEF.handler(
+            ctx,
+            SET_SUSPENSION_TOOL_DEF.input_model(
+                suspended=True,
+                reason="confirmed fraud",
+            ),
+        )
+        status = await WORKSPACE_OBJECT.store.status(ctx, str(target_id), expected_generation=None)
+
+    assert result.is_error is False
+    assert status is not None
+    assert status["suspended_at"] is not None
+    assert status["suspended_by_email"] == "operator@metalcraft.ai"
+    assert status["suspension_reason"] == "confirmed fraud"
+
+    with ws(source_id):
+        await SET_SUSPENSION_TOOL_DEF.handler(
+            ctx,
+            SET_SUSPENSION_TOOL_DEF.input_model(
+                suspended=False,
+                reason="fraud review cleared",
+            ),
+        )
+    with ws(target_id):
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.workspace.c.suspended_at,
+                        tables.workspace.c.suspended_by_email,
+                        tables.workspace.c.suspension_reason,
+                    ).where(tables.workspace.c.id == target_id)
+                )
+            ).one()
+    assert row == (None, None, None)
+
+
+async def test_cross_workspace_suspension_is_closed_without_every_gate(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_id, speaker_id, main, _ = await _seed(members=1, seated=1)
+    target_id, _, _, _ = await _seed(members=1, seated=1)
+    ctx = _context(source_id, speaker_id, main)
+    targeted = _suspension_context(ctx, target_id)
+    suspension = SET_SUSPENSION_TOOL_DEF.input_model(
+        suspended=True,
+        reason="confirmed fraud",
+    )
+    monkeypatch.setattr(
+        workspace_kind,
+        "installed_operator",
+        lambda: SimpleNamespace(rule=_FleetRule()),
+    )
+
+    _, _, registry = turn_tools((), None, audience=conversation_audience(speaker_id))
+    assert SUSPENSION_ACTION not in registry.actions.get(WORKSPACE_KIND, {})
+    with ws(source_id):
+        assert await WORKSPACE_OBJECT.store.get(ctx, str(target_id)) is None
+
+    monkeypatch.setenv(WORKSPACE_SUSPENSION_ENABLED_ENV, "1")
+    with ws(source_id):
+        assert await WORKSPACE_OBJECT.store.get(ctx, str(target_id)) is None
+        with pytest.raises(ValueError, match="not available"):
+            await SET_SUSPENSION_TOOL_DEF.handler(targeted, suspension)
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .values(email="operator@metalcraft.ai")
+            .where(tables.member.c.id == speaker_id)
+        )
+    monkeypatch.delenv(WORKSPACE_SUSPENSION_ENABLED_ENV)
+    with ws(source_id):
+        assert await WORKSPACE_OBJECT.store.get(ctx, str(target_id)) is None
+        with pytest.raises(ValueError, match="not available"):
+            await SET_SUSPENSION_TOOL_DEF.handler(targeted, suspension)
+
+    monkeypatch.setenv(WORKSPACE_SUSPENSION_ENABLED_ENV, "1")
+    with ws(source_id):
+        with pytest.raises(ValueError, match="not available"):
+            await SET_SUSPENSION_TOOL_DEF.handler(
+                replace(targeted, speaker_member_id=None), suspension
+            )

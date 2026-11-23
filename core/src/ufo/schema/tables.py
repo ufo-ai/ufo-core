@@ -28,8 +28,21 @@ workspace = sa.Table(
     sa.Column("page_revision", sa.BigInteger, nullable=False, server_default="0"),
     sa.Column("egress_rules_generation", sa.BigInteger, nullable=False, server_default="0"),
     sa.Column("members_can_add", sa.Boolean, nullable=False, server_default=sa.true()),
+    sa.Column("suspended_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("suspended_by_email", sa.Text, nullable=True),
+    sa.Column("suspension_reason", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "(suspended_at is null and suspended_by_email is null and suspension_reason is null) or "
+        "(suspended_at is not null and suspended_by_email is not null and "
+        "suspension_reason is not null)",
+        name="workspace_suspension_complete",
+    ),
+    sa.CheckConstraint(
+        "suspension_reason is null or suspension_reason <> ''",
+        name="workspace_suspension_reason_nonempty",
+    ),
 )
 
 rate_limit = sa.Table(
