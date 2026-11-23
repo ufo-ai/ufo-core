@@ -1682,13 +1682,9 @@ fn is_globally_routable(ip: &Ipv4Addr) -> bool {
         [203, 0, 113],  // 203.0.113.0/24 TEST-NET-3
         [192, 88, 99],  // 192.88.99.0/24 6to4 relay anycast
     ];
-    if blocked_24
+    !blocked_24
         .iter()
         .any(|prefix| octets[0] == prefix[0] && octets[1] == prefix[1] && octets[2] == prefix[2])
-    {
-        return false;
-    }
-    true
 }
 
 // --- relay ------------------------------------------------------------------------------------
