@@ -18,7 +18,13 @@ from dataclasses import dataclass
 
 import httpx
 
-from ufo_ext_pipedream.client import ENVIRONMENT_HEADER, PIPEDREAM_API_BASE, PipedreamClient
+from ufo_ext_pipedream.client import (
+    ENVIRONMENT_HEADER,
+    PIPEDREAM_API_BASE,
+    PipedreamClient,
+    github_grant_unusable,
+)
+from ufo_ext_pipedream.token import GITHUB_REQUIRED_SCOPES, github_reconnect_reason
 
 PROXY_HEADER_PREFIX = "x-pd-proxy-"
 
@@ -50,6 +56,7 @@ class PipedreamProxyTransport(httpx.AsyncBaseTransport):
     client: PipedreamClient
     account_id: str
     external_user_id: str
+    provider: str
     inner: httpx.AsyncBaseTransport
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -71,7 +78,13 @@ class PipedreamProxyTransport(httpx.AsyncBaseTransport):
             params={"external_user_id": self.external_user_id, "account_id": self.account_id},
         )
         proxied = httpx.Request(request.method, proxy_url, headers=headers, content=content)
-        return await self.inner.handle_async_request(proxied)
+        response = await self.inner.handle_async_request(proxied)
+        if self.provider == "github":
+            await response.aread()
+            reconnect = github_reconnect_reason(response, required_scopes=GITHUB_REQUIRED_SCOPES)
+            if reconnect is not None:
+                raise github_grant_unusable(reconnect)
+        return response
 
     async def aclose(self) -> None:
         await self.inner.aclose()

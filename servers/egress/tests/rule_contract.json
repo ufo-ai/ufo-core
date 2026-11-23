@@ -31,6 +31,11 @@
       "dimension": "tokens"
     },
     {
+      "kind": "refusal",
+      "host": "api.github.com",
+      "message": "reconnect GitHub"
+    },
+    {
       "kind": "service",
       "host": "registry.npmjs.org",
       "daemon_prefix": "/pkg/registry.npmjs.org"

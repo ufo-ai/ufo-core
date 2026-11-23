@@ -471,6 +471,11 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
         }
     };
 
+    if let Some(message) = credential_refusal(&rules, &host) {
+        refuse_authenticated(stream, &shared.leaves, &host, &message).await;
+        return;
+    }
+
     // The preview service originates its own host, so it takes the service path with no daemon
     // configured; the cache fronts real origins, so its host dispatches as ordinary egress.
     if host == TOOL_BRIDGE_HOST && find_service(&rules, &host).is_some() {
@@ -677,6 +682,16 @@ fn injections_for<'a>(rules: &'a [Rule], host: &str) -> Vec<Inj<'a>> {
         .collect()
 }
 
+fn credential_refusal(rules: &[Rule], host: &str) -> Option<String> {
+    rules.iter().find_map(|rule| match rule {
+        Rule::Refusal {
+            host: rule_host,
+            message,
+        } if rule_host == host => Some(message.clone()),
+        _ => None,
+    })
+}
+
 fn find_service(rules: &[Rule], host: &str) -> Option<Option<String>> {
     rules.iter().find_map(|r| match r {
         Rule::Service {
@@ -795,6 +810,33 @@ async fn tunnel(
         None,
     )
     .await;
+}
+
+async fn refuse_authenticated(
+    mut stream: TcpStream,
+    leaves: &LeafStore,
+    host: &str,
+    message: &str,
+) {
+    let server_config = match leaves.server_config(host).await {
+        Ok(config) => config,
+        Err(_) => return,
+    };
+    if stream
+        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut client = match TlsAcceptor::from(server_config).accept(stream).await {
+        Ok(tls) => tls,
+        Err(_) => return,
+    };
+    if matches!(read_head(&mut client).await, ReadHead::Ok { .. }) {
+        let _ = respond(&mut client, 403, message).await;
+    }
+    let _ = client.shutdown().await;
 }
 
 /// Connect to the dispatch-vetted address while TLS uses the original host; resolving again could

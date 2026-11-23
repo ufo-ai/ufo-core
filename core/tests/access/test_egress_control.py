@@ -34,6 +34,7 @@ from ufo.runtime.access.egress_rules import (
     InjectionRule,
     InternetRule,
     MeterRule,
+    RefusalRule,
     ResidentialRule,
     ScopeRule,
     ServiceRule,
@@ -272,6 +273,7 @@ def test_rule_json_matches_the_golden_contract() -> None:
             real="sk-ant-real-key",
         ),
         MeterRule(host="api.anthropic.com", dimension="tokens"),
+        RefusalRule(host="api.github.com", message="reconnect GitHub"),
         ServiceRule(host="registry.npmjs.org", daemon_prefix="/pkg/registry.npmjs.org"),
         ResidentialRule(host="news.example.com"),
     )
@@ -510,6 +512,32 @@ async def test_resolve_returns_the_seeded_grant_and_injection_rules(db: None) ->
             "real": f"token-{ACCOUNT}",
         }
     ]
+    assert tokens.asked == [(seeded.workspace_id, ACCOUNT)]
+
+
+async def test_resolve_turns_an_unusable_cli_grant_into_actionable_host_refusals(
+    db: None,
+) -> None:
+    guidance = (
+        "GitHub connection must be reconnected to grant the new permissions; "
+        "ask the member to reconnect with connect_account"
+    )
+    seeded, resolver, tokens = await _seed_git_cli(fault=GrantUnusable(guidance, awaits_grant=True))
+    token = RUN_TOKENS.encode(
+        RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
+    )
+
+    async with _client(_control(resolver)) as client:
+        response = await client.post(
+            "/internal/egress/resolve",
+            headers=_auth(),
+            json={"proxy_auth": _basic(token)},
+        )
+
+    rules = response.json()["rules"]
+    assert {"kind": "refusal", "host": HOST, "message": guidance} in rules
+    assert {"kind": "refusal", "host": GIT.host, "message": guidance} in rules
+    assert not any(rule["kind"] == "injection" for rule in rules)
     assert tokens.asked == [(seeded.workspace_id, ACCOUNT)]
 
 

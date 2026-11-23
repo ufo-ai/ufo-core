@@ -75,6 +75,10 @@ APP_PROP_TYPE = "app"
 STASH_NEW = "NEW"
 FILESTASH_UPLOADS_EXPORT = "$filestash_uploads"
 PIPEDREAM_TRANSFER_HOSTS = ("pipedream-file-stash-production.s3.us-east-1.amazonaws.com",)
+GITHUB_RECONNECT_GUIDANCE = (
+    "GitHub connection must be reconnected to grant the new permissions; ask the member to "
+    "reconnect with connect_account"
+)
 
 
 @dataclass(frozen=True)
@@ -251,10 +255,19 @@ class PipedreamClient:
         on the deploy's own OAuth client. Ownership is asserted from the same record before the
         token is read, so a foreign account id yields nothing; an unhealthy account raises
         `GrantUnusable` exactly as every other read of it does."""
-        payload = await self._get(
-            f"/connect/{self.project_id}/accounts/{account_id}",
-            params={"include_credentials": "true"},
-        )
+        broker_token = await self.access_token()
+        try:
+            async with self._http(broker_token) as http:
+                payload = _body(
+                    await http.get(
+                        f"/connect/{self.project_id}/accounts/{account_id}",
+                        params={"include_credentials": "true"},
+                    )
+                )
+        except PipedreamError as error:
+            if oauth_grant_needs_reconnect(error, account_id):
+                raise github_grant_unusable(error.body) from error
+            raise
         record = _dict(payload.get("data")) or payload
         account = _account(record, account_id)
         if not _workspace_owns_external_user(workspace_id, account.external_user_id):
@@ -262,14 +275,14 @@ class PipedreamClient:
                 403,
                 f"connected account {account_id!r} is not owned by workspace {workspace_id}",
             )
-        token = _dict(record.get("credentials")).get("oauth_access_token")
-        if not isinstance(token, str) or not token:
+        provider_token = _dict(record.get("credentials")).get("oauth_access_token")
+        if not isinstance(provider_token, str) or not provider_token:
             raise PipedreamError(
                 502,
                 f"connected account {account_id!r} released no token: it was connected on "
                 "Pipedream's shared OAuth client rather than this deploy's own",
             )
-        return token
+        return provider_token
 
     async def newest_account(self, external_user_id: str, app: str) -> ConnectedAccount:
         """The account a just-completed consent produced for one state-scoped external user."""
@@ -391,19 +404,48 @@ def _account(record: dict[str, object], account_id: str) -> ConnectedAccount:
     owner = record.get("external_id")
     if not isinstance(owner, str) or not owner:
         raise PipedreamError(502, f"connected account {account_id!r} carried no external owner")
-    if record.get("healthy") is False:
-        raise GrantUnusable(
-            f"pipedream cannot authenticate connected account {account_id!r}: it is unhealthy, so "
-            "its grant needs the member to reconnect the account",
-            awaits_grant=True,
-        )
     app = _dict(record.get("app"))
     app_slug = app.get("name_slug")
+    if record.get("healthy") is False:
+        reason = f"pipedream cannot authenticate connected account {account_id!r}: it is unhealthy"
+        if app_slug == "github":
+            raise github_grant_unusable(reason)
+        raise GrantUnusable(
+            f"{reason}, so its grant needs the member to reconnect the account",
+            awaits_grant=True,
+        )
     return ConnectedAccount(
         account_id=account_id,
         app=app_slug if isinstance(app_slug, str) else "",
         external_user_id=owner,
     )
+
+
+def oauth_grant_needs_reconnect(error: PipedreamError, account_id: str) -> bool:
+    body = error.body.lower()
+    refresh_signatures = (
+        "invalid_grant",
+        "invalid grant",
+        "refresh token",
+        "failed to refresh",
+        "could not refresh",
+        "unable to refresh",
+        "oauth app scope",
+        "oauth scope",
+        "scope mismatch",
+        "scopes changed",
+        "scope has changed",
+        "token has been expired or revoked",
+    )
+    return any(signature in body for signature in refresh_signatures) or (
+        account_id.lower() in body
+        and error.status in {400, 401, 403, 422}
+        and any(word in body for word in ("oauth", "refresh", "scope", "token"))
+    )
+
+
+def github_grant_unusable(reason: str) -> GrantUnusable:
+    return GrantUnusable(f"{reason} — {GITHUB_RECONNECT_GUIDANCE}", awaits_grant=True)
 
 
 def workspace_user_prefix(workspace_id: UUID) -> str:
