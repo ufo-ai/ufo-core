@@ -4945,6 +4945,38 @@ async def test_a_dm_turn_core_founded_on_a_queued_message_answers_in_its_thread(
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_speakerless_followups_post_in_the_mirrored_channel_thread(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed(member_email="bee@example.com")
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(workspace_id, "C5", "Finished it.", blob, artifact=False)
+    reply_id = await _seed_spoken_reply(workspace_id, turn_id, "The checks passed.")
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+    with ws(workspace_id):
+        await slack._mirror_thread(
+            conversation_id,
+            slack.MirroredThread(queue_key="C5:200.0", message_ts="201.0"),
+        )
+
+    await app.state.mid_turn_reply_poller.drain()
+    await app.state.writeback_poller.drain()
+
+    posts = _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    bodies = [json.loads(request.content) for request in posts]
+    assert [(body["channel"], body.get("thread_ts")) for body in bodies] == [
+        ("C5", "200.0"),
+        ("C5", "200.0"),
+    ]
+    assert bodies[0]["metadata"]["event_payload"]["id"] == f"{reply_id}:0:markdown"
+
+
 async def _mirror_dm(workspace_id: UUID, turn_id: UUID, message_ts: str) -> None:
     """The thread mirror a Slack DM message leaves behind, for a turn seeded without one."""
     async with workspace_tx() as connection:

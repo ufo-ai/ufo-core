@@ -3008,12 +3008,13 @@ async def _reply_thread(
             if mirrored_channel == channel and mirrored_root and mirrored_root != root_ts:
                 return await _pin_turn_thread(store, turn_id, thread)
         return root_ts
-    if not answers_member:
-        return None
     mirrored = await store.get(_thread_mirror_key(conversation_id))
     if mirrored is None:
         return None
-    return await _pin_turn_thread(store, turn_id, MirroredThread.read(mirrored))
+    thread = MirroredThread.read(mirrored)
+    if not answers_member and (post_in_thread is False or not thread.queue_key.partition(":")[2]):
+        return None
+    return await _pin_turn_thread(store, turn_id, thread)
 
 
 class FollowerContext(Protocol):
