@@ -1,4 +1,5 @@
 import json
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
@@ -586,3 +587,70 @@ def test_silent_attachment_question_posts_only_question_prose(text: str, length:
         assert actions is not None
     else:
         assert actions is None
+
+
+async def test_top_level_question_submit_resumes_aliased_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conversation_id = uuid4()
+    member_id = uuid4()
+    turn_id = uuid4()
+    interaction = slack.AnswerSubmit(
+        slack_user_id="U9",
+        binding=None,
+        channel="C5",
+        queue_key="C5:999.200",
+        is_dm=False,
+        message_ts="999.200",
+        reply_root="999.200",
+        message_text="Submit your answers below.",
+        answers=(
+            slack.SubmittedAnswer(
+                block_id="ask:0",
+                question="Ship it?",
+                answer="Ship",
+                authorization_choice=None,
+            ),
+        ),
+        submit_block_id="submit-row",
+        blocks=(),
+    )
+    ctx = Mock()
+    ctx.find_conversation = AsyncMock(return_value=None)
+    ctx.admit = AsyncMock(return_value=slack.Admitted(turn_id=turn_id, opened_run=True))
+
+    async def admitted_body(answer_key: str) -> str:
+        assert answer_key == "C5:999.200:999.200:answer"
+        return ctx.admit.await_args.args[1]
+
+    ctx.admitted_body = AsyncMock(side_effect=admitted_body)
+    alias = AsyncMock(return_value=conversation_id)
+    mirror = AsyncMock()
+    followers = Mock()
+    rewrite = Mock()
+    monkeypatch.setattr(slack, "_aliased_conversation", alias)
+    monkeypatch.setattr(slack, "slack_user", AsyncMock(return_value=None))
+    monkeypatch.setattr(slack, "_slack_permalink", AsyncMock(return_value=None))
+    monkeypatch.setattr(slack, "_mirror_thread", mirror)
+    monkeypatch.setattr(slack, "_arm_followers", followers)
+    monkeypatch.setattr(slack, "_rewrite_in_background", rewrite)
+
+    response = await slack._handle_answer_submit(ctx, "xoxb-token", interaction, member_id)
+
+    assert response is None
+    ctx.find_conversation.assert_awaited_once_with("C5:999.200")
+    alias.assert_awaited_once_with("C5:999.200")
+    ctx.admit.assert_awaited_once()
+    admitted_args = ctx.admit.await_args
+    assert admitted_args.args[0] == conversation_id
+    assert slack.member_message_text(admitted_args.args[1]) == "Ship"
+    assert admitted_args.kwargs["idempotency_key"] == "C5:999.200:999.200:answer"
+    assert admitted_args.kwargs["speaker_member_id"] == member_id
+    thread = slack.MirroredThread(queue_key="C5:999.200", message_ts="999.200")
+    mirror.assert_awaited_once_with(conversation_id, thread)
+    followers.assert_called_once_with(
+        ctx,
+        slack.FollowedTurn(id=turn_id, conversation_id=conversation_id),
+        thread,
+    )
+    rewrite.assert_called_once_with("xoxb-token", interaction)
