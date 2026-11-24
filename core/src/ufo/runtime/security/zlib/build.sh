@@ -1,8 +1,13 @@
 #!/bin/sh
 set -eu
 security=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-test "$(dpkg-query -W -f='${Version}' zlib1g)" = '1:1.3.dfsg+really1.3.1-1+b1'
 mkdir -p /build/zlib-source /out
+version=$(dpkg-query -W -f='${Version}' zlib1g)
+if dpkg --compare-versions "$version" ge '1:1.3.dfsg+really1.3.1-1+deb13u1'; then
+    cp "$security/install.sh" /out/
+    exit 0
+fi
+test "$version" = '1:1.3.dfsg+really1.3.1-1+b1'
 cd /build/zlib-source
 while read -r checksum file; do
     curl -fLsS --retry 3 "https://deb.debian.org/debian/pool/main/z/zlib/$file" -o "$file"
