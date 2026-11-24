@@ -170,7 +170,7 @@ class Bundle:
                 .replace("COPY ", f"COPY {BUNDLE_LXML_DIR}/"),
                 f"FROM {DOCKERFILE_BASE} AS runtime-packages",
                 "RUN apt-get update "
-                "&& apt-get install -y --no-install-recommends libpcre2-8-0 "
+                "&& apt-get install -y --no-install-recommends libpcre2-8-0 zlib1g "
                 "&& dpkg --compare-versions "
                 "\"$(dpkg-query -W -f='${Version}' libpcre2-8-0)\" "
                 f"ge {PCRE2_MINIMUM_VERSION} "

@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer libreoffice-calc libreoffice-impress \
         gpg gpg-agent gpgconf \
         fonts-liberation fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
-        ffmpeg chromium python3 curl ca-certificates \
+        ffmpeg chromium python3 curl ca-certificates libfreetype6 \
     && rm -rf /var/lib/apt/lists/*
 RUN apt-get purge -y gnupg gpgsm \
     && for package in gpg gpg-agent gpgconf libreoffice-writer libreoffice-calc libreoffice-impress; do \
