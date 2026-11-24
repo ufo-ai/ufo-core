@@ -38,6 +38,8 @@ def test_zlib_backport_is_pinned_and_checks_real_package_state() -> None:
     assert provenance["upstreamFix"].endswith("df84af25dc1942490e1d1c899a07619152a46148")
     build = (SECURITY / "build.sh").read_text()
     assert "sha256sum -c" in build
+    assert "ge '1:1.3.dfsg+really1.3.1-1+deb13u1'" in build
+    assert build.index("dpkg --compare-versions") < build.index("curl ")
     assert "--fuzz=0" in build
     assert 'test "$before" = 42' in build
     assert "dpkg-buildpackage --build=binary -Pnobiarch" in build

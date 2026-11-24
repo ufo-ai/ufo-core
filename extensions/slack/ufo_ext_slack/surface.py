@@ -3793,9 +3793,11 @@ async def _handle_answer_submit(
     binding = interaction.binding
     queue_key = interaction.queue_key if binding is None else binding.queue_key
     conversation_id = await ctx.find_conversation(queue_key)
-    if conversation_id is None:
-        return JSONResponse({"ok": True, "ignored": True})
-    if binding is not None and conversation_id != binding.conversation_id:
+    if conversation_id is None and binding is None and not interaction.is_dm:
+        conversation_id = await _aliased_conversation(queue_key)
+    if conversation_id is None or (
+        binding is not None and conversation_id != binding.conversation_id
+    ):
         return JSONResponse({"ok": True, "ignored": True})
     if binding is not None and member_id is not None and binding.target_member_id != member_id:
         return JSONResponse({"ok": True, "ignored": True})

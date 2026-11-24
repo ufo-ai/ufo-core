@@ -57,6 +57,10 @@ pub enum Rule {
         host: String,
         dimension: String,
     },
+    Refusal {
+        host: String,
+        message: String,
+    },
     Service {
         host: String,
         #[serde(default)]

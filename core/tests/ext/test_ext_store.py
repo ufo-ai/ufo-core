@@ -259,7 +259,7 @@ def test_bundle_pins_a_bundle_only_extension_and_writes_a_build_context(
         assert (out / BUNDLE_ZLIB_DIR / source.name).read_bytes() == source.read_bytes()
     for source in LXML_ASSETS.iterdir():
         assert (out / BUNDLE_LXML_DIR / source.name).read_bytes() == source.read_bytes()
-    assert "apt-get install -y --no-install-recommends libpcre2-8-0" in dockerfile
+    assert "apt-get install -y --no-install-recommends libpcre2-8-0 zlib1g" in dockerfile
     assert (
         "dpkg --compare-versions \"$(dpkg-query -W -f='${Version}' libpcre2-8-0)\" "
         "ge 10.46-1~deb13u3" in dockerfile

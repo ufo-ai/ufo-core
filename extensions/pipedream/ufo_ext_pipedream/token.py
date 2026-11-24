@@ -34,6 +34,9 @@ GITHUB_USER_URL = "https://api.github.com/user"
 GITHUB_API_VERSION = "2022-11-28"
 GITHUB_NOREPLY_HOST = "users.noreply.github.com"
 GITHUB_USER_TIMEOUT_SECONDS = 10.0
+GITHUB_REQUIRED_SCOPES = frozenset({"workflow"})
+GITHUB_BAD_CREDENTIALS = "bad credentials"
+GITHUB_WORKFLOW_SCOPE_REJECTION = "refusing to allow an oauth app to create or update workflow"
 
 
 @dataclass(frozen=True)
@@ -49,7 +52,16 @@ class PipedreamGrantSecret:
         now = time.monotonic()
         if cached is not None and cached[1] > now:
             return cached[0]
-        token = await pipedream.pipedream_client().account_token(account_id, workspace_id)
+        client = pipedream.pipedream_client()
+        token = await client.account_token(account_id, workspace_id)
+        response = await _github_user_response(client, token)
+        reconnect = github_reconnect_reason(response, required_scopes=GITHUB_REQUIRED_SCOPES)
+        if reconnect is not None:
+            raise pipedream.github_grant_unusable(reconnect)
+        if response.status_code != httpx.codes.OK:
+            raise pipedream.PipedreamError(
+                response.status_code, f"github refused the credential check for {account_id!r}"
+            )
         self.held[account_id] = (token, now + TOKEN_CACHE_SECONDS)
         return token
 
@@ -72,6 +84,48 @@ class GithubAccount:
 
     subject: str
     commit: CommitIdentity
+
+
+def _github_scopes(value: str) -> frozenset[str]:
+    return frozenset(scope.strip().lower() for scope in value.split(",") if scope.strip())
+
+
+def github_reconnect_reason(
+    response: httpx.Response, *, required_scopes: frozenset[str] = frozenset()
+) -> str | None:
+    body = response.text.lower()
+    if response.status_code == httpx.codes.UNAUTHORIZED and GITHUB_BAD_CREDENTIALS in body:
+        return "GitHub rejected the token with 401 Bad credentials"
+    granted_header = response.headers.get("x-oauth-scopes")
+    granted = _github_scopes(granted_header or "")
+    accepted = _github_scopes(response.headers.get("x-accepted-oauth-scopes", ""))
+    missing = accepted - granted if response.status_code == httpx.codes.FORBIDDEN else frozenset()
+    if missing:
+        return f"GitHub requires OAuth scopes missing from the grant: {', '.join(sorted(missing))}"
+    if GITHUB_WORKFLOW_SCOPE_REJECTION in body and "without `workflow` scope" in body:
+        return "GitHub refused the workflow update because the grant lacks the workflow scope"
+    if granted_header is not None:
+        required_missing = required_scopes - granted
+        if required_missing:
+            return (
+                "GitHub grant is missing required OAuth scopes: "
+                f"{', '.join(sorted(required_missing))}"
+            )
+    return None
+
+
+async def _github_user_response(client: pipedream.PipedreamClient, token: str) -> httpx.Response:
+    async with httpx.AsyncClient(
+        timeout=GITHUB_USER_TIMEOUT_SECONDS, transport=client.transport
+    ) as http:
+        return await http.get(
+            GITHUB_USER_URL,
+            headers={
+                "authorization": f"Bearer {token}",
+                "accept": "application/vnd.github+json",
+                "x-github-api-version": GITHUB_API_VERSION,
+            },
+        )
 
 
 async def account_identity(
@@ -108,17 +162,10 @@ async def account_identity(
         return None
     client = pipedream.pipedream_client()
     token = await client.account_token(account_id, workspace_id)
-    async with httpx.AsyncClient(
-        timeout=GITHUB_USER_TIMEOUT_SECONDS, transport=client.transport
-    ) as http:
-        response = await http.get(
-            GITHUB_USER_URL,
-            headers={
-                "authorization": f"Bearer {token}",
-                "accept": "application/vnd.github+json",
-                "x-github-api-version": GITHUB_API_VERSION,
-            },
-        )
+    response = await _github_user_response(client, token)
+    reconnect = github_reconnect_reason(response, required_scopes=GITHUB_REQUIRED_SCOPES)
+    if reconnect is not None:
+        raise pipedream.github_grant_unusable(reconnect)
     if response.status_code != httpx.codes.OK:
         raise pipedream.PipedreamError(
             response.status_code, f"github refused the identity read for {account_id!r}"
