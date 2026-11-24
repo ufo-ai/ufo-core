@@ -15,7 +15,7 @@ import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -65,8 +65,11 @@ from ufo.runtime.billing.spend import GateDeploy, SpendGates
 from ufo.runtime.engine import FORCE_FINAL_PROMPT, TurnEngine
 from ufo.runtime.ext import writeback as writeback_module
 from ufo.runtime.ext.surface import (
+    SILENCE_SENTINEL,
     SurfaceRoute,
     SurfaceSpec,
+    Writeback,
+    writeback_says_nothing,
 )
 from ufo.runtime.ext.writeback import (
     WRITEBACK_MAX_AGE_SECONDS,
@@ -82,6 +85,7 @@ from ufo.runtime.surfaces.admission import Admission
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
+    MEMBER_ADMISSION,
     SPEND_HOLD_ROUND_INDEX,
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
@@ -916,6 +920,100 @@ async def test_the_arrival_lifecycle_is_logged_from_the_fold_to_the_window(
         (f"{first} {second}", 1)
     ]
     assert absorbed_ids == [first, second]
+
+
+async def test_a_background_result_cannot_replace_a_recycled_answer_with_silence(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    member_id = await _conversation_member(turn.conversation_id)
+    model = SilentAfterBackgroundResultModel(
+        turn=turn,
+        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
+    )
+    with ws(turn.workspace_id):
+        frame = await _engine(turn, model, tmp_path, member_id=member_id).run()
+
+    assert frame is not None
+    assert (frame.status, frame.text) == ("done", "the complete answer")
+    assert not writeback_says_nothing(
+        Writeback(
+            turn_id=turn.id,
+            conversation_id=turn.conversation_id,
+            agent_id=turn.agent_id,
+            queue_key="C1:1.0",
+            terminal=frame,
+            artifacts=(),
+        )
+    )
+    assert model.rounds == 2
+    assert model.folded_turn_id == turn.id
+    assert any(
+        isinstance(message.content, str) and "<spawn_result" in message.content
+        for message in model.requests[1].messages
+    )
+
+
+@dataclass
+class SilentAfterBackgroundResultModel:
+    """A complete answer loses its first commit to a child result. The child adds no new work, so
+    the next round uses the background-result silence sentinel."""
+
+    turn: Turn
+    admission: Admission
+    rounds: int = 0
+    requests: list[ModelRequest] = field(default_factory=list)
+    folded_turn_id: UUID | None = None
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.rounds += 1
+        self.requests.append(request)
+        if self.rounds == 1:
+            self.folded_turn_id = await self.admission.invoke(
+                self.turn.workspace_id,
+                self.turn.conversation_id,
+                self.turn.agent_id,
+                '<spawn_result target="profile:coding" status="done">done</spawn_result>',
+                "subagent-result:child",
+                holds_work_already_done=True,
+            )
+            yield TextDelta(text="the complete answer")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield TextDelta(text=SILENCE_SENTINEL)
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+async def test_a_member_followup_invalidates_a_recycled_answer(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    member_id = await _conversation_member(turn.conversation_id)
+    with ws(turn.workspace_id):
+        frame = await _engine(
+            turn,
+            SilentAfterMemberFollowupModel(turn=turn, member_id=member_id),
+            tmp_path,
+            member_id=member_id,
+        ).run()
+
+    assert frame is not None
+    assert (frame.status, frame.text) == ("done", SILENCE_SENTINEL)
+
+
+@dataclass
+class SilentAfterMemberFollowupModel:
+    turn: Turn
+    member_id: UUID
+    rounds: int = 0
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.rounds += 1
+        if self.rounds == 1:
+            await _queue_arrival(self.turn, "one more thing", self.member_id)
+            yield TextDelta(text="answer before the followup")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield TextDelta(text=SILENCE_SENTINEL)
+        yield Usage(input_tokens=1, output_tokens=1)
 
 
 async def test_a_pending_arrival_refuses_the_commit_and_the_refusal_is_logged(
