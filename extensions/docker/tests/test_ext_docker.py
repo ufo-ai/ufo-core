@@ -444,7 +444,7 @@ async def test_entries_lists_container_paths_workspace_relative(
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

@@ -282,7 +282,7 @@ def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) 
         "",
         None,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,

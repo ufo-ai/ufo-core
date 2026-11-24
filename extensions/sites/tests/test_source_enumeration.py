@@ -49,7 +49,7 @@ async def _context(workspace: Path, tmp_path: Path) -> ToolContext:
             inbound="hi",
             created_at=datetime(2026, 8, 23, tzinfo=UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=_no_spawn,
         speaker_member_id=None,
         audience=conversation_audience(None),

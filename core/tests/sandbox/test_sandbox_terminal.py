@@ -59,7 +59,7 @@ def _tool_context(sandbox: SandboxSession) -> ToolContext:
             inbound="build it",
             created_at=datetime(2026, 9, 3, tzinfo=UTC),
         ),
-        agent=Agent(prompt="be terse", model="claude-opus-4-8"),
+        agent=Agent(prompt="be terse", model="claude-opus-5-5"),
         spawn=None,
         speaker_member_id=None,
         audience=conversation_audience(None),

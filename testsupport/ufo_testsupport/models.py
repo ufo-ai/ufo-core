@@ -9,5 +9,5 @@ from ufo.harness.models.registry import ServingModel
 CORE_SPECS = {spec.id: spec for spec in CORE_MODEL_SPECS}
 
 
-def serving_model(client: ModelClient, model: str = "claude-opus-4-8") -> ServingModel:
+def serving_model(client: ModelClient, model: str = "claude-opus-5-5") -> ServingModel:
     return ServingModel(model=model, spec=CORE_SPECS[model], client=client)

@@ -2556,6 +2556,7 @@ class SurfaceContext:
     _declared_slots: tuple[DeclaredSlot, ...]
     _ambient_reply: AmbientReplyClassifier
     _connectors: ConnectorRegistry
+    _resolve_model: Callable[[str], str] | None = None
     _workspace_slots: "WorkspaceSlots | None" = None
     """The slots an extension resolves for one workspace, beside the deploy's own declarations —
     None where no installed extension resolves any."""
@@ -2645,7 +2646,12 @@ class SurfaceContext:
         document on a deployment that does not allow one. The document store callable stands in
         for the deployment gate: the composition root wires it exactly where documents are
         allowed, so runtime never learns what a document is."""
-        if runtime_config.model is not None and runtime_config.model not in self._models:
+        resolved_model = (
+            runtime_config.model
+            if self._resolve_model is None or runtime_config.model is None
+            else self._resolve_model(runtime_config.model)
+        )
+        if runtime_config.model is not None and resolved_model not in self._models:
             raise ValueError(f"unknown model: {runtime_config.model}")
         if runtime_config.environment is not None and self._store_environment_document is None:
             raise ValueError("this deployment does not allow environment documents")

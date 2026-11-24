@@ -78,7 +78,7 @@ FIRE_TIMEOUT_SECONDS = 25
 MARKER_KEY = "fired"
 MARKER_VALUE = {"ran": True}
 DORMANT_CRON = "0 0 5 * * *"
-BACKGROUND_MODEL = "gpt-5.6-luna"
+BACKGROUND_MODEL = "gpt-6-luna"
 RECOVERY_RUNS_KEY = "recovery-runs"
 
 
@@ -102,7 +102,7 @@ def _stub_registry() -> ModelRegistry:
             for spec in CORE_MODEL_SPECS
         },
         pricing=CORE_PRICING,
-        auto_model="claude-opus-5",
+        auto_model="claude-opus-5-5",
     )
 
 
@@ -744,7 +744,7 @@ async def test_a_refusal_reads_the_mark_of_the_model_it_was_refused_on(db: None)
     one: the member is told about this model's hold, and the other mark is left as it was."""
     workspace_id, _, _, _ = await _spoken_workspace()
     key = f"{CORE_EXTENSION}:memory"
-    other = spend_refusal_notice_key("claude-opus-4-8")
+    other = spend_refusal_notice_key("claude-opus-5-5")
     scoped = ScopedStore(extension=CORE_EXTENSION)
 
     async def _refused(context: ExtensionContext) -> None:
@@ -774,7 +774,7 @@ async def test_a_refusal_reads_the_mark_of_the_model_it_was_refused_on(db: None)
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_job_runs_its_own_model_calls_on_the_background_jobs_model(db: None) -> None:
     workspace_id = await _workspace()
-    registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-5")
+    registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-5-5")
     seen: list[str] = []
 
     async def _record_model(context: ExtensionContext) -> None:
@@ -791,11 +791,11 @@ async def test_a_job_runs_its_own_model_calls_on_the_background_jobs_model(db: N
         bindings=bindings_from((), (spec,)),
         manifests=(),
         registry=registry,
-        background_model="gpt-5.6-luna",
+        background_model="gpt-6-luna",
     )
     await runner.fire(f"{CORE_EXTENSION}:titles", workspace_id)
-    assert seen == ["gpt-5.6-luna"]
-    assert registry.auto_model == "claude-opus-5"
+    assert seen == ["gpt-6-luna"]
+    assert registry.auto_model == "claude-opus-5-5"
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -858,7 +858,7 @@ async def test_a_job_model_call_meters_its_tokens_and_latency_under_the_key_that
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_job_that_needs_the_deploy_model_keeps_it(db: None) -> None:
     workspace_id = await _workspace()
-    registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-5")
+    registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-5-5")
     seen: list[str] = []
 
     async def _record_model(context: ExtensionContext) -> None:
@@ -879,10 +879,10 @@ async def test_a_job_that_needs_the_deploy_model_keeps_it(db: None) -> None:
         bindings=bindings_from((), (spec,)),
         manifests=(),
         registry=registry,
-        background_model="gpt-5.6-luna",
+        background_model="gpt-6-luna",
     )
     await runner.fire(f"{CORE_EXTENSION}:replay", workspace_id)
-    assert seen == ["claude-opus-5"]
+    assert seen == ["claude-opus-5-5"]
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

@@ -234,7 +234,7 @@ def _hook_ctx(
         ext=ext,
         payload=UserPromptSubmit(text=inbound),
         turn=_turn(inbound, member_id, admission, parent_turn_id),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         speaker_member_id=member_id,
     )
 

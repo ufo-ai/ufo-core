@@ -326,7 +326,7 @@ def _tool_output_actual(turn: Turn, name: str = "") -> str:
 
 
 class _ActivityModel:
-    model = "gpt-5.6-luna"
+    model = "gpt-6-luna"
 
     async def complete(self, _request: ModelRequest) -> str:
         return "Working on the request."
@@ -1191,7 +1191,7 @@ async def _seed_turn(
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1277,7 +1277,7 @@ def _engine(
     requestable_credentials: CredentialRequests | None = None,
     memory: MemorySearch | None = None,
     skills: SkillRegistry = CORE_SKILL_REGISTRY,
-    model_id: str = "claude-opus-4-8",
+    model_id: str = "claude-opus-5-5",
     handle: SandboxHandle | None = None,
     byok: bool = False,
     actions: bool = False,
@@ -3059,7 +3059,7 @@ async def test_a_member_creates_an_app_in_their_own_conversation_without_the_ref
     owner = await _seeded_member(turn.workspace_id)
     engine = _engine(turn, EchoModel(), tmp_path, member_id=owner, actions=True)
     manifest = (
-        "kind: agent\nname: open-pr-list\nspec:\n  model: claude-opus-4-8\n"
+        "kind: agent\nname: open-pr-list\nspec:\n  model: claude-opus-5-5\n"
         "  reasoning: medium\n  visibility: private\n  internet_access_allowed: true\n"
         "  prompt: list the open pull requests\n"
     )
@@ -4495,7 +4495,7 @@ async def test_every_model_round_meters_one_observation_and_its_tokens(
     assert frame.status == "done"
     points = _exported_metrics(reader)
     assert [(point.count, dict(point.attributes)) for point in points["ufo.model_round_ms"]] == [
-        (2, {"model": "claude-opus-4-8", "provider": "anthropic", "profile": "main"})
+        (2, {"model": "claude-opus-5-5", "provider": "anthropic", "profile": "main"})
     ]
     assert {
         (point.count, point.attributes["round"], point.attributes["gap"])
@@ -4507,7 +4507,7 @@ async def test_every_model_round_meters_one_observation_and_its_tokens(
     assert {
         (point.attributes["kind"], point.attributes["model"], point.value)
         for point in points["ufo.model_round_tokens_total"]
-    } == {("input", "claude-opus-4-8", 3), ("output", "claude-opus-4-8", 3)}
+    } == {("input", "claude-opus-5-5", 3), ("output", "claude-opus-5-5", 3)}
 
 
 async def test_an_object_read_counts_under_the_kind_it_named(
@@ -4890,7 +4890,7 @@ async def test_a_finished_turn_meters_its_wall_clock_its_rounds_and_its_outcome(
 
 @pytest.mark.parametrize(
     ("model_id", "provider"),
-    (("claude-opus-4-8", "Anthropic"), ("gpt-5.6-sol", "OpenAI")),
+    (("claude-opus-5-5", "Anthropic"), ("gpt-6.2-sol", "OpenAI")),
 )
 async def test_a_model_refusal_names_the_provider_model_and_explanation(
     db: None, tmp_path: Path, model_id: str, provider: str
@@ -5636,7 +5636,7 @@ async def test_delta_publish_failure_never_fails_the_turn(db: None, tmp_path: Pa
 
 async def test_multi_tool_round_publishes_one_summary_per_tool(db: None, tmp_path: Path) -> None:
     class CurrentActivityModel:
-        model = "gpt-5.6-luna"
+        model = "gpt-6-luna"
 
         def __init__(self) -> None:
             self.names: list[str] = []
@@ -5913,7 +5913,7 @@ async def test_a_declared_activity_is_published_in_place_of_the_generated_one(
     db: None, tmp_path: Path
 ) -> None:
     class RecordingActivityModel:
-        model = "gpt-5.6-luna"
+        model = "gpt-6-luna"
 
         def __init__(self) -> None:
             self.names: list[str] = []
@@ -5956,7 +5956,7 @@ async def test_tool_dispatch_does_not_wait_for_activity_generation(
     db: None, tmp_path: Path
 ) -> None:
     class BlockedActivityModel:
-        model = "gpt-5.6-luna"
+        model = "gpt-6-luna"
 
         def __init__(self) -> None:
             self.started = asyncio.Event()
@@ -6622,7 +6622,7 @@ async def test_request_credentials_gates_on_admin_key_and_declared_slots(
             sandbox=SandboxSession(carrier=RecordingCarrier(), handle=handle),
             blob=blob,
             turn=turn,
-            agent=Agent(prompt="p", model="claude-opus-4-8"),
+            agent=Agent(prompt="p", model="claude-opus-5-5"),
             spawn=_unavailable_spawn,
             speaker_member_id=member,
             audience=conversation_audience(member),
@@ -6662,7 +6662,7 @@ async def test_extension_tool_authorizes_its_declared_credential_as_an_admin(
         ),
         blob=FilesystemBlobStore(root=tmp_path),
         turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=_unavailable_spawn,
         speaker_member_id=owner,
         audience=conversation_audience(owner),
@@ -7245,40 +7245,42 @@ async def test_unavailable_connected_accounts_move_to_the_deploy_model(
 
         async def client_for(self, model: str) -> ResolvedModelClient:
             clients: dict[str, ModelClient] = {
-                "gpt-5.6-sol": second,
-                "claude-sonnet-5": fallback,
+                "gpt-6.2-sol": second,
+                "claude-sonnet-5-5": fallback,
             }
-            funding = PLAN_FUNDED if model == "gpt-5.6-sol" else PLATFORM_FUNDED
-            payer = "member/openai" if model == "gpt-5.6-sol" else PLATFORM_PAYER
+            funding = PLAN_FUNDED if model == "gpt-6.2-sol" else PLATFORM_FUNDED
+            payer = "member/openai" if model == "gpt-6.2-sol" else PLATFORM_PAYER
             return ResolvedModelClient(clients[model], funding, payer)
 
-    engine = replace(_engine(turn, first, tmp_path, model_id="claude-opus-5"), attempt="attempt-1")
+    engine = replace(
+        _engine(turn, first, tmp_path, model_id="claude-opus-5-5"), attempt="attempt-1"
+    )
     engine.serving.funding = PLAN_FUNDED
     engine.serving.payer = "member/anthropic"
     engine.serving.routes = ModelRoutes(
         registry=cast(ModelRegistry, Registry()),
         remaining=(
-            ModelRoute("gpt-5.6-sol", PLAN_FUNDED, "member/openai"),
-            ModelRoute("claude-sonnet-5", PLATFORM_FUNDED, PLATFORM_PAYER),
+            ModelRoute("gpt-6.2-sol", PLAN_FUNDED, "member/openai"),
+            ModelRoute("claude-sonnet-5-5", PLATFORM_FUNDED, PLATFORM_PAYER),
         ),
     )
 
     frame = await engine.run()
 
     assert frame.status == "done"
-    assert first.seen == ["claude-opus-5"]
-    assert second.seen == ["gpt-5.6-sol"]
-    assert fallback.seen == ["claude-sonnet-5"]
-    assert engine.serving.model == "claude-sonnet-5"
+    assert first.seen == ["claude-opus-5-5"]
+    assert second.seen == ["gpt-6.2-sol"]
+    assert fallback.seen == ["claude-sonnet-5-5"]
+    assert engine.serving.model == "claude-sonnet-5-5"
     assert frame.model_route_changes == (
         ModelRouteChange(
-            failed_model="claude-opus-5",
-            replacement_model="gpt-5.6-sol",
+            failed_model="claude-opus-5-5",
+            replacement_model="gpt-6.2-sol",
             failure="unavailable",
         ),
         ModelRouteChange(
-            failed_model="gpt-5.6-sol",
-            replacement_model="claude-sonnet-5",
+            failed_model="gpt-6.2-sol",
+            replacement_model="claude-sonnet-5-5",
             failure="unavailable",
         ),
     )
@@ -7292,13 +7294,13 @@ async def test_route_changes_stay_out_of_replacement_model_rounds(db: None, tmp_
     unavailable = UnavailableAccountModel()
     fallback = ToolThenAnswerModel()
     engine = replace(
-        _engine(turn, unavailable, tmp_path, model_id="claude-opus-5"), attempt="attempt-1"
+        _engine(turn, unavailable, tmp_path, model_id="claude-opus-5-5"), attempt="attempt-1"
     )
     engine.serving.funding = PLAN_FUNDED
     engine.serving.payer = "member/anthropic"
     engine.serving.routes = ModelRoutes(
         registry=_route_registry(fallback, PLATFORM_FUNDED, PLATFORM_PAYER),
-        remaining=(ModelRoute("claude-sonnet-5", PLATFORM_FUNDED, PLATFORM_PAYER),),
+        remaining=(ModelRoute("claude-sonnet-5-5", PLATFORM_FUNDED, PLATFORM_PAYER),),
     )
     frame = await engine.run()
 
@@ -7307,8 +7309,8 @@ async def test_route_changes_stay_out_of_replacement_model_rounds(db: None, tmp_
     assert len(fallback.requests) == 2
     assert frame.model_route_changes == (
         ModelRouteChange(
-            failed_model="claude-opus-5",
-            replacement_model="claude-sonnet-5",
+            failed_model="claude-opus-5-5",
+            replacement_model="claude-sonnet-5-5",
             failure="unavailable",
         ),
     )
@@ -7324,14 +7326,14 @@ async def test_an_unavailable_pinned_account_does_not_change_models(
 ) -> None:
     turn = await _seed_turn("queued", None)
     unavailable = UnavailableAccountModel()
-    engine = _engine(turn, unavailable, tmp_path, model_id="claude-opus-5")
+    engine = _engine(turn, unavailable, tmp_path, model_id="claude-opus-5-5")
 
     with pytest.raises(ModelStreamError) as caught:
         await engine.run()
 
     assert caught.value.model_error_class == ModelAccountUnavailable.__name__
-    assert unavailable.seen == ["claude-opus-5"]
-    assert engine.serving.model == "claude-opus-5"
+    assert unavailable.seen == ["claude-opus-5-5"]
+    assert engine.serving.model == "claude-opus-5-5"
 
 
 async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_account(
@@ -7341,45 +7343,45 @@ async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_acco
     turn = await _seed_turn("queued", None)
     first, other = LimitedAfterOneRoundModel(), OtherAccountModel()
     member = uuid4()
-    engine = replace(_engine(turn, first, tmp_path, model_id="gpt-5.6-sol"), attempt="attempt-1")
+    engine = replace(_engine(turn, first, tmp_path, model_id="gpt-6.2-sol"), attempt="attempt-1")
     engine.serving.funding = PLAN_FUNDED
     engine.serving.payer = member_slot(OPENAI_KEY_SLOT, member)
     engine.serving.routes = ModelRoutes(
         registry=_route_registry(other, PLAN_FUNDED, member_slot(ANTHROPIC_KEY_SLOT, member)),
         remaining=(
             ModelRoute(
-                "claude-opus-5",
+                "claude-opus-5-5",
                 PLAN_FUNDED,
                 member_slot(ANTHROPIC_KEY_SLOT, member),
             ),
-            ModelRoute("claude-sonnet-5", PLATFORM_FUNDED, PLATFORM_PAYER),
+            ModelRoute("claude-sonnet-5-5", PLATFORM_FUNDED, PLATFORM_PAYER),
         ),
     )
-    assert engine.context.window.context_tokens == CORE_SPECS["gpt-5.6-sol"].context_window
+    assert engine.context.window.context_tokens == CORE_SPECS["gpt-6.2-sol"].context_window
 
     with (
         ws(turn.workspace_id),
         model_credentials(
             {
-                "gpt-5.6-sol": member_slot(OPENAI_KEY_SLOT, member),
-                "claude-opus-5": member_slot(ANTHROPIC_KEY_SLOT, member),
+                "gpt-6.2-sol": member_slot(OPENAI_KEY_SLOT, member),
+                "claude-opus-5-5": member_slot(ANTHROPIC_KEY_SLOT, member),
             }
         ),
     ):
         frame = await engine.run()
 
     assert frame is not None and (frame.status, frame.text) == ("done", "done")
-    assert first.seen == ["gpt-5.6-sol", "gpt-5.6-sol"]
-    assert other.seen == ["claude-opus-5"]
-    assert engine.serving.model == "claude-opus-5"
+    assert first.seen == ["gpt-6.2-sol", "gpt-6.2-sol"]
+    assert other.seen == ["claude-opus-5-5"]
+    assert engine.serving.model == "claude-opus-5-5"
     assert frame.model_route_changes == (
         ModelRouteChange(
-            failed_model="gpt-5.6-sol",
-            replacement_model="claude-opus-5",
+            failed_model="gpt-6.2-sol",
+            replacement_model="claude-opus-5-5",
             failure="rate_limited",
         ),
     )
-    assert engine.context.window.context_tokens == CORE_SPECS["claude-opus-5"].context_window
+    assert engine.context.window.context_tokens == CORE_SPECS["claude-opus-5-5"].context_window
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
@@ -7399,26 +7401,28 @@ async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_acco
     other_burn = Usage(input_tokens=5, output_tokens=7)
     assert [tuple(row) for row in rows] == [
         (
-            ledger_id_for(turn.workspace_id, turn.id, TOKENS_DIMENSION, "attempt-1/claude-opus-5"),
-            "claude-opus-5",
+            ledger_id_for(
+                turn.workspace_id, turn.id, TOKENS_DIMENSION, "attempt-1/claude-opus-5-5"
+            ),
+            "claude-opus-5-5",
             5,
             7,
-            CORE_PRICING.micro_usd("claude-opus-5", other_burn),
+            CORE_PRICING.micro_usd("claude-opus-5-5", other_burn),
             True,
         ),
         (
             ledger_id_for(turn.workspace_id, turn.id, TOKENS_DIMENSION, "attempt-1"),
-            "gpt-5.6-sol",
+            "gpt-6.2-sol",
             2,
             2,
-            CORE_PRICING.micro_usd("gpt-5.6-sol", first_burn),
+            CORE_PRICING.micro_usd("gpt-6.2-sol", first_burn),
             True,
         ),
     ]
     assert frame.tokens == 16
     assert frame.cost_micro_usd == CORE_PRICING.micro_usd(
-        "claude-opus-5", other_burn
-    ) + CORE_PRICING.micro_usd("gpt-5.6-sol", first_burn)
+        "claude-opus-5-5", other_burn
+    ) + CORE_PRICING.micro_usd("gpt-6.2-sol", first_burn)
 
 
 async def test_a_rate_limited_plan_route_falls_back_to_the_deploy_model(
@@ -7426,23 +7430,23 @@ async def test_a_rate_limited_plan_route_falls_back_to_the_deploy_model(
 ) -> None:
     turn = await _seed_turn("queued", None)
     first, fallback = LimitedAfterOneRoundModel(), OtherAccountModel()
-    first.seen.append("gpt-5.6-sol")
+    first.seen.append("gpt-6.2-sol")
     hub = RecordingHub()
     member = uuid4()
-    engine = replace(_engine(turn, first, tmp_path, model_id="gpt-5.6-sol"), hub=hub)
+    engine = replace(_engine(turn, first, tmp_path, model_id="gpt-6.2-sol"), hub=hub)
     engine.serving.funding = PLAN_FUNDED
     engine.serving.payer = member_slot(OPENAI_KEY_SLOT, member)
     engine.serving.routes = ModelRoutes(
         registry=_route_registry(fallback, PLATFORM_FUNDED, PLATFORM_PAYER),
-        remaining=(ModelRoute("claude-opus-5", PLATFORM_FUNDED, PLATFORM_PAYER),),
+        remaining=(ModelRoute("claude-opus-5-5", PLATFORM_FUNDED, PLATFORM_PAYER),),
     )
 
     frame = await engine.run()
 
     assert frame.status == "done"
-    assert fallback.seen == ["claude-opus-5"]
+    assert fallback.seen == ["claude-opus-5-5"]
     assert engine.serving.funding == PLATFORM_FUNDED
-    assert Activity(text="Continuing on claude-opus-5.") in hub.frames
+    assert Activity(text="Continuing on claude-opus-5-5.") in hub.frames
 
 
 async def test_a_failover_activity_publish_failure_never_fails_the_turn(
@@ -7457,19 +7461,19 @@ async def test_a_failover_activity_publish_failure_never_fails_the_turn(
 
     turn = await _seed_turn("queued", None)
     first, fallback = LimitedAfterOneRoundModel(), OtherAccountModel()
-    first.seen.append("gpt-5.6-sol")
+    first.seen.append("gpt-6.2-sol")
     engine = replace(
-        _engine(turn, first, tmp_path, model_id="gpt-5.6-sol"), hub=FailingActivityHub()
+        _engine(turn, first, tmp_path, model_id="gpt-6.2-sol"), hub=FailingActivityHub()
     )
     engine.serving.routes = ModelRoutes(
         registry=_route_registry(fallback, PLATFORM_FUNDED, PLATFORM_PAYER),
-        remaining=(ModelRoute("claude-opus-5", PLATFORM_FUNDED, PLATFORM_PAYER),),
+        remaining=(ModelRoute("claude-opus-5-5", PLATFORM_FUNDED, PLATFORM_PAYER),),
     )
 
     frame = await engine.run()
 
     assert frame.status == "done"
-    assert fallback.seen == ["claude-opus-5"]
+    assert fallback.seen == ["claude-opus-5-5"]
 
 
 async def test_a_turn_on_no_member_account_fails_a_rate_limit_as_the_providers_fault(
@@ -7477,8 +7481,8 @@ async def test_a_turn_on_no_member_account_fails_a_rate_limit_as_the_providers_f
 ) -> None:
     turn = await _seed_turn("queued", None)
     limited = LimitedAfterOneRoundModel()
-    limited.seen.append("gpt-5.6-sol")
-    engine = _engine(turn, limited, tmp_path, model_id="gpt-5.6-sol")
+    limited.seen.append("gpt-6.2-sol")
+    engine = _engine(turn, limited, tmp_path, model_id="gpt-6.2-sol")
     assert engine.serving.routes is None
 
     with pytest.raises(ModelStreamError) as caught:
@@ -7543,7 +7547,7 @@ async def test_a_mid_stream_interruption_discards_the_partial_round_and_retries_
     points = _exported_metrics(reader)
     assert [
         (point.value, dict(point.attributes)) for point in points["ufo.model_provider_retry_total"]
-    ] == [(1, {"provider": "anthropic", "model": "claude-opus-4-8", "kind": "stream_error"})]
+    ] == [(1, {"provider": "anthropic", "model": "claude-opus-5-5", "kind": "stream_error"})]
     retry = next(
         record
         for record in caplog.records
@@ -7552,7 +7556,7 @@ async def test_a_mid_stream_interruption_discards_the_partial_round_and_retries_
     assert retry.ufo == {
         "turn_id": str(turn.id),
         "provider": "anthropic",
-        "model": "claude-opus-4-8",
+        "model": "claude-opus-5-5",
         "kind": "stream_error",
         "attempt": 1,
     }
@@ -7619,7 +7623,7 @@ async def test_no_step_argument_renders_a_payload_into_a_cancellation_log(
     engine = replace(
         _engine(turn, EchoModel(), tmp_path),
         turn=turn.model_copy(update={"inbound": secret}),
-        agent=Agent(prompt=secret, model="claude-opus-4-8"),
+        agent=Agent(prompt=secret, model="claude-opus-5-5"),
         system_prompt=rendered_prompt(secret),
     )
     round_input = _RoundInput(
@@ -7790,7 +7794,7 @@ async def test_per_step_cap_parks_a_running_turn(db: None, tmp_path: Path) -> No
                 prompt_tokens=10,
                 input_tokens=10,
                 priced_micro_usd=100,
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -8079,7 +8083,7 @@ async def test_a_gate_holds_the_next_round_once_the_turns_spend_is_charged(
                     connection,
                     turn.workspace_id,
                     turn.id,
-                    "claude-opus-4-8",
+                    "claude-opus-5-5",
                     Usage(input_tokens=2_000_000, output_tokens=2_000_000),
                     "drain",
                 )
@@ -8125,7 +8129,7 @@ async def test_per_step_park_then_resume_persists_full_transcript(db: None, tmp_
                 prompt_tokens=10,
                 input_tokens=10,
                 priced_micro_usd=100,
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -8953,7 +8957,7 @@ async def test_dispatch_keeps_route_guidance_after_an_untrusted_result_preview(
     full = "a" * total
     route_change = ModelRouteChange(
         failed_model="claude-opus-5-5",
-        replacement_model="gpt-5.6-sol",
+        replacement_model="gpt-6.2-sol",
         failure="unavailable",
     )
 
@@ -9898,8 +9902,8 @@ async def test_cache_metrics_split_first_and_later_rounds_by_idle_gap(
         )
         for point in points["ufo.model_cache_round_total"]
     } == {
-        ("claude-opus-4-8", "first", "5m_1h", "1h", "miss", 1),
-        ("claude-opus-4-8", "later", "within_turn", "1h", "miss", 1),
+        ("claude-opus-5-5", "first", "5m_1h", "1h", "miss", 1),
+        ("claude-opus-5-5", "later", "within_turn", "1h", "miss", 1),
     }
     assert {
         (
@@ -9911,8 +9915,8 @@ async def test_cache_metrics_split_first_and_later_rounds_by_idle_gap(
         )
         for point in points["ufo.model_cache_tokens_total"]
     } == {
-        ("claude-opus-4-8", "first", "5m_1h", "input", 2),
-        ("claude-opus-4-8", "later", "within_turn", "input", 1),
+        ("claude-opus-5-5", "first", "5m_1h", "input", 2),
+        ("claude-opus-5-5", "later", "within_turn", "input", 1),
     }
     assert {
         (point.attributes["round"], point.attributes["gap"], point.attributes["result"])
@@ -10293,7 +10297,7 @@ class _LabelAfterResultModel:
     label loses the race a fast search wins in production."""
 
     results_seen: asyncio.Event
-    model = "gpt-5.6-luna"
+    model = "gpt-6-luna"
 
     async def complete(self, request: ModelRequest) -> str:
         await self.results_seen.wait()

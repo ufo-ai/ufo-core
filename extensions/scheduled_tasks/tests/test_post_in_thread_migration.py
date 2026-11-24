@@ -40,7 +40,7 @@ def test_existing_tasks_default_to_parent_channel_delivery(tmp_path: Path) -> No
             sa.text(
                 "insert into agent "
                 "(id, workspace_id, name, prompt, model, created_at, updated_at) values "
-                "(:id, :workspace, 'assistant', 'p', 'claude-opus-4-8', :now, :now)"
+                "(:id, :workspace, 'assistant', 'p', 'claude-opus-5-5', :now, :now)"
             ),
             {"id": agent_id, "workspace": workspace_id, "now": now},
         )

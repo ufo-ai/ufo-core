@@ -156,7 +156,7 @@ class _CrashAfterBindFailureModel:
         yield Usage(input_tokens=2, output_tokens=2)
 
 
-async def _seed_turn(model: str = "claude-opus-4-8") -> tuple[UUID, UUID, UUID]:
+async def _seed_turn(model: str = "claude-opus-5-5") -> tuple[UUID, UUID, UUID]:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     async with workspace_tx() as connection:
         await connection.execute(
@@ -297,7 +297,7 @@ async def test_crash_mid_turn_recovers_without_re_executing_completed_work(
             for spec in CORE_MODEL_SPECS
         },
         pricing=CORE_PRICING,
-        auto_model="claude-opus-4-8",
+        auto_model="claude-opus-5-5",
     )
     workspace_id, conversation_id, turn_id = await _seed_turn()
     hits = tmp_path / "workspaces" / str(conversation_id) / HITS_LOG
@@ -364,7 +364,7 @@ async def test_bind_failure_keeps_dispatch_step_count_stable_on_recovery(
             for spec in CORE_MODEL_SPECS
         },
         pricing=CORE_PRICING,
-        auto_model="claude-opus-4-8",
+        auto_model="claude-opus-5-5",
     )
     workspace_id, conversation_id, turn_id = await _seed_turn()
     workspace = tmp_path / "workspaces" / str(conversation_id)
@@ -455,7 +455,7 @@ def _guidance_probe_registry() -> ModelRegistry:
             for spec in CORE_MODEL_SPECS
         },
         pricing=CORE_PRICING,
-        auto_model="claude-opus-4-8",
+        auto_model="claude-opus-5-5",
     )
 
 

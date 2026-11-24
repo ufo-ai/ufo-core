@@ -412,7 +412,7 @@ async def _seed_two_workspaces(url: str) -> tuple[UUID, UUID, UUID]:
                     workspace_id=theirs,
                     name="assistant",
                     prompt="p",
-                    model="claude-opus-4-8",
+                    model="claude-opus-5-5",
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -492,7 +492,7 @@ async def _seed_two_workspaces(url: str) -> tuple[UUID, UUID, UUID]:
                     prompt_tokens=10,
                     input_tokens=10,
                     priced_micro_usd=THEIR_SPEND_MICRO_USD,
-                    model="claude-opus-4-8",
+                    model="claude-opus-5-5",
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -733,7 +733,7 @@ STANDIN_REGISTRY = ModelRegistry(
         for spec in CORE_MODEL_SPECS
     },
     pricing=CORE_PRICING,
-    auto_model="claude-opus-4-8",
+    auto_model="claude-opus-5-5",
 )
 
 
@@ -835,7 +835,7 @@ async def _bootstrap_workspace() -> UUID:
                 workspace_id=workspace_id,
                 name=DEFAULT_AGENT_NAME,
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -923,7 +923,7 @@ def wire_server(
             "",
             None,
             None,
-            ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+            ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
             ambient_reply=UNREACHED_AMBIENT_REPLY,
             skills=EMPTY_SKILL_REGISTRY,
             member_skill_listing=no_member_skills,
@@ -990,8 +990,8 @@ def test_the_wire_streams_the_answer_then_spend_reports_the_burn(
     asyncio.run(dispose_db())
     spent = runner.invoke(cli.main, ["spend"])
     assert spent.exit_code == 0, spent.output
-    assert "$0.000110" in spent.output
-    assert f"by service:\n  {'models':<32}$0.000110\n" in spent.output
+    assert "$0.000088" in spent.output
+    assert f"by service:\n  {'models':<32}$0.000088\n" in spent.output
 
 
 def test_migrate_prefers_owner_dsn_env_as_asyncpg(monkeypatch: pytest.MonkeyPatch) -> None:

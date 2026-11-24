@@ -400,7 +400,7 @@ async def _seed() -> _Seeded:
                 workspace_id=seeded.workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=True,
                 created_at=created_at,
                 updated_at=created_at,

@@ -436,7 +436,7 @@ async def test_a_child_of_an_archived_parent_stays_pending_and_the_pass_goes_on(
                 workspace_id=workspace_id,
                 name="still-here",
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

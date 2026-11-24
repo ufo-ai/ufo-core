@@ -160,7 +160,7 @@ def _context(
             inbound="hi",
             created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=spawn,
         speaker_member_id=None,
         audience=conversation_audience(None),

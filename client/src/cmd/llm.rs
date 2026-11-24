@@ -5,7 +5,7 @@ use std::io::Write;
 use std::time::Duration;
 
 pub const USAGE: &str = "usage: ufo llm [--model MODEL] [--max-tokens N] PROMPT";
-const DEFAULT_MODEL: &str = "claude-opus-4-8";
+const DEFAULT_MODEL: &str = "claude-opus-5-5";
 const DEFAULT_MAX_TOKENS: u64 = 8192;
 const ANTHROPIC_HOST: &str = "api.anthropic.com";
 const ANTHROPIC_PORT: u16 = 443;
@@ -199,14 +199,14 @@ mod tests {
     #[test]
     fn the_request_carries_the_sentinel_key_and_the_api_version() {
         let call = Call {
-            model: "claude-opus-4-8".to_string(),
+            model: "claude-opus-5-5".to_string(),
             max_tokens: 8192,
             prompt: "hi".to_string(),
         };
         let body = request_body(&call);
         assert_eq!(
             String::from_utf8(body.clone()).unwrap(),
-            r#"{"max_tokens":8192,"messages":[{"content":"hi","role":"user"}],"model":"claude-opus-4-8"}"#
+            r#"{"max_tokens":8192,"messages":[{"content":"hi","role":"user"}],"model":"claude-opus-5-5"}"#
         );
         let head = request_head("sentinel", body.len());
         assert!(head.starts_with("POST /v1/messages HTTP/1.1\r\n"), "{head}");

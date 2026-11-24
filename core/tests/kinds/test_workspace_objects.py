@@ -72,7 +72,7 @@ async def _agent(workspace_id: UUID, *, is_main: bool) -> UUID:
                 workspace_id=workspace_id,
                 name=agent_id.hex[:8],
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=is_main,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),

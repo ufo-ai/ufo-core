@@ -117,7 +117,7 @@ async def _seed(surface: str = "cli") -> tuple[UUID, UUID, UUID, UUID]:
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -146,7 +146,7 @@ async def _second_agent(workspace_id: UUID) -> UUID:
                 workspace_id=workspace_id,
                 name=f"second-{agent_id.hex[:8]}",
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -175,7 +175,7 @@ def _tool_ctx(
             inbound="please wait for the approval",
             created_at=datetime(2026, 8, 14, tzinfo=UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=_unavailable_spawn,
         speaker_member_id=speaker_member_id,
         audience=SHARED_AUDIENCE,
@@ -539,7 +539,7 @@ async def test_a_spend_breach_cancels_the_resume_and_ends_the_wait(db: None) -> 
                 prompt_tokens=10,
                 input_tokens=10,
                 priced_micro_usd=100,
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

@@ -234,21 +234,21 @@ def test_a_profile_can_pin_a_distinct_model() -> None:
         tool_names=(),
         input_model=_Task,
         output_model=_Finding,
-        models=("gpt-5.4",),
+        models=("gpt-6.2-astra",),
         reasoning="high",
     )
-    assert pinned.models == ("gpt-5.4",)
+    assert pinned.models == ("gpt-6.2-astra",)
     assert pinned.reasoning == "high"
 
-    escalation = replace(_profile("worker"), name="worker-escalation", models=("gpt-5.4",))
+    escalation = replace(_profile("worker"), name="worker-escalation", models=("gpt-6.2-astra",))
     registry = SubagentRegistry((_profile("worker"), escalation))
     assert registry.get("worker").models == ()
-    assert registry.get("worker-escalation").models == ("gpt-5.4",)
+    assert registry.get("worker-escalation").models == ("gpt-6.2-astra",)
     assert registry.get("worker").tool_names == registry.get("worker-escalation").tool_names
     assert registry.get("worker").input_model is registry.get("worker-escalation").input_model
 
 
-@pytest.mark.parametrize("models", (("",), ("gpt-5.4", "gpt-5.4")))
+@pytest.mark.parametrize("models", (("",), ("gpt-6.2-astra", "gpt-6.2-astra")))
 def test_a_profile_model_route_requires_unique_nonempty_ids(models: tuple[str, ...]) -> None:
     with pytest.raises(ValueError, match="unique nonempty ids"):
         replace(_profile("worker"), models=models)
@@ -462,7 +462,7 @@ async def test_message_to_a_running_child_folds_into_its_live_turn(
             )
         )
     parent = _parent_of(workspace_id, agent_id, member_id)
-    runtime_config = TurnRuntimeConfig(model="claude-opus-4-8", internet_access=False)
+    runtime_config = TurnRuntimeConfig(model="claude-opus-5-5", internet_access=False)
     child_id, child_conversation = await _running_child(
         workspace_id,
         agent_id,
@@ -503,7 +503,7 @@ async def test_message_to_an_idle_child_admits_and_dispatches_its_next_turn(
 ) -> None:
     workspace_id, agent_id = await _workspace_agent()
     parent = _parent_of(workspace_id, agent_id)
-    runtime_config = TurnRuntimeConfig(model="claude-opus-4-8", internet_access=False)
+    runtime_config = TurnRuntimeConfig(model="claude-opus-5-5", internet_access=False)
     child_id, child_conversation = await _running_child(
         workspace_id, agent_id, parent.id, runtime_config=runtime_config
     )
@@ -1135,16 +1135,16 @@ async def test_spawn_model_pins_the_child_turn_under_an_unpinned_tree(
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
         audience=conversation_audience(None),
-        models=("claude-opus-4-8", "gpt-5.6-sol"),
+        models=("claude-opus-5-5", "gpt-6.2-sol"),
     )
 
     pinned = await subagents.spawn(
-        "research", {"task": "acme"}, background=True, model="gpt-5.6-sol"
+        "research", {"task": "acme"}, background=True, model="gpt-6.2-sol"
     )
     inheriting = await subagents.spawn("research", {"task": "beta"}, background=True)
 
     child, _, _ = await _load_turn(pinned.turn_id)
-    assert child.runtime_config == TurnRuntimeConfig(model="gpt-5.6-sol", internet_access=False)
+    assert child.runtime_config == TurnRuntimeConfig(model="gpt-6.2-sol", internet_access=False)
     sibling, _, _ = await _load_turn(inheriting.turn_id)
     assert sibling.runtime_config == inherited
 
@@ -1156,7 +1156,7 @@ async def test_spawn_cannot_move_a_pinned_turn_tree_onto_another_model(
     every agent and profile model in the tree."""
     workspace_id, agent_id = await _workspace_agent()
     parent = (await _parent(workspace_id, agent_id)).model_copy(
-        update={"runtime_config": TurnRuntimeConfig(model="claude-opus-4-8")}
+        update={"runtime_config": TurnRuntimeConfig(model="claude-opus-5-5")}
     )
     client = _RecordingClient()
     subagents = Subagents(
@@ -1164,14 +1164,14 @@ async def test_spawn_cannot_move_a_pinned_turn_tree_onto_another_model(
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
         audience=conversation_audience(None),
-        models=("claude-opus-4-8", "gpt-5.6-sol"),
+        models=("claude-opus-5-5", "gpt-6.2-sol"),
     )
 
     with pytest.raises(SpawnModelRejected) as refusal:
-        await subagents.spawn("research", {"task": "acme"}, background=True, model="gpt-5.6-sol")
+        await subagents.spawn("research", {"task": "acme"}, background=True, model="gpt-6.2-sol")
 
-    assert "claude-opus-4-8" in str(refusal.value)
-    assert "gpt-5.6-sol" in str(refusal.value)
+    assert "claude-opus-5-5" in str(refusal.value)
+    assert "gpt-6.2-sol" in str(refusal.value)
     assert client.enqueued == []
 
 
@@ -1188,14 +1188,14 @@ async def test_spawn_refuses_a_model_the_registry_does_not_serve(
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
         audience=conversation_audience(None),
-        models=("claude-opus-4-8",),
+        models=("claude-opus-5-5",),
     )
 
     with pytest.raises(SpawnModelRejected) as refusal:
-        await subagents.spawn("research", {"task": "acme"}, background=True, model="gpt-5.6-sol")
+        await subagents.spawn("research", {"task": "acme"}, background=True, model="gpt-6.2-sol")
 
-    assert "gpt-5.6-sol" in str(refusal.value)
-    assert "claude-opus-4-8" in str(refusal.value)
+    assert "gpt-6.2-sol" in str(refusal.value)
+    assert "claude-opus-5-5" in str(refusal.value)
     assert client.enqueued == []
 
 
@@ -1211,14 +1211,14 @@ async def test_spawn_model_override_uses_the_matching_member_account(
     subagents = Subagents(
         client=_RecordingClient(),
         registry=SubagentRegistry(
-            (replace(_profile("coding"), models=("claude-opus-5", "z-ai/glm-5.3")),)
+            (replace(_profile("coding"), models=("claude-opus-5-5", "z-ai/glm-5.3")),)
         ),
         parent=parent,
         audience=conversation_audience(member_id),
-        models=("claude-opus-5", "gpt-5.6-sol", "z-ai/glm-5.3"),
+        models=("claude-opus-5-5", "gpt-6.2-sol", "z-ai/glm-5.3"),
         model_providers={
-            "claude-opus-5": PROVIDER_ANTHROPIC,
-            "gpt-5.6-sol": PROVIDER_OPENAI,
+            "claude-opus-5-5": PROVIDER_ANTHROPIC,
+            "gpt-6.2-sol": PROVIDER_OPENAI,
             "z-ai/glm-5.3": "openrouter",
         },
     )
@@ -1231,18 +1231,18 @@ async def test_spawn_model_override_uses_the_matching_member_account(
             "coding",
             {"task": "acme"},
             background=True,
-            model="gpt-5.6-sol",
+            model="gpt-6.2-sol",
             requester_member_id=member_id,
         )
         agent_spawned = await subagents.spawn(
             "support",
             {"task": "acme"},
-            model="gpt-5.6-sol",
+            model="gpt-6.2-sol",
             requester_member_id=member_id,
         )
 
     child, _, _ = await _load_turn(spawned.turn_id)
-    assert child.runtime_config == TurnRuntimeConfig(model="gpt-5.6-sol")
+    assert child.runtime_config == TurnRuntimeConfig(model="gpt-6.2-sol")
     assert child.model_accounts == (
         ModelAccountCapability(
             provider=PROVIDER_OPENAI,
@@ -1250,7 +1250,7 @@ async def test_spawn_model_override_uses_the_matching_member_account(
         ),
     )
     agent_child, _, _ = await _load_turn(agent_spawned.turn_id)
-    assert agent_child.runtime_config == TurnRuntimeConfig(model="gpt-5.6-sol")
+    assert agent_child.runtime_config == TurnRuntimeConfig(model="gpt-6.2-sol")
     assert agent_child.model_accounts == child.model_accounts
 
 
@@ -1762,7 +1762,7 @@ async def test_a_delivery_posts_under_the_parents_config_without_child_model_cap
         "plain",
         SubagentRegistry((_profile("plain"),)),
         runtime_config=TurnRuntimeConfig(
-            model="gpt-5.6-sol",
+            model="gpt-6.2-sol",
             environment="sha256:" + "1" * 64,
         ),
         model_accounts=(
@@ -1930,7 +1930,7 @@ async def test_an_untrusted_profiles_output_is_walled_on_delivery(db: None) -> N
             model_route_changes=(
                 ModelRouteChange(
                     failed_model="claude-opus-5-5",
-                    replacement_model="gpt-5.6-sol",
+                    replacement_model="gpt-6.2-sol",
                     failure="unavailable",
                 ),
             ),
@@ -1944,7 +1944,7 @@ async def test_an_untrusted_profiles_output_is_walled_on_delivery(db: None) -> N
     assert "&lt;/untrusted-content&gt;" in body
     assert body.index("</untrusted-content>") < body.index("<model_route_guidance>")
     assert '"failed_model":"claude-opus-5-5"' in body
-    assert '"replacement_model":"gpt-5.6-sol"' in body
+    assert '"replacement_model":"gpt-6.2-sol"' in body
     assert body.count("</spawn_result>") == 1
     assert body.partition("</spawn_result>\n\n")[2] == RESULT_REPLY_GUIDANCE
     assert body.index("</untrusted-content>") < body.rindex("<background_results>")
@@ -2190,7 +2190,7 @@ async def test_a_capped_workspace_holds_the_result_rather_than_discarding_it(db:
                 prompt_tokens=10,
                 input_tokens=10,
                 priced_micro_usd=100,
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -3787,14 +3787,14 @@ async def test_model_account_capabilities_are_resolved_once_and_inherited(
         )
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     init_workspace_credentials(store)
-    own_account = replace(_profile("coding"), models=("claude-opus-5", "z-ai/glm-5.3"))
+    own_account = replace(_profile("coding"), models=("claude-opus-5-5", "z-ai/glm-5.3"))
     subagents = Subagents(
         client=_RecordingClient(),
         registry=SubagentRegistry((own_account,)),
         parent=parent,
         audience=conversation_audience(member_id),
         model_providers={
-            "claude-opus-5": PROVIDER_ANTHROPIC,
+            "claude-opus-5-5": PROVIDER_ANTHROPIC,
             "z-ai/glm-5.3": "openrouter",
         },
     )
@@ -3826,7 +3826,7 @@ async def test_model_account_capabilities_are_resolved_once_and_inherited(
         parent=child,
         audience=conversation_audience(member_id),
         model_providers={
-            "claude-opus-5": PROVIDER_ANTHROPIC,
+            "claude-opus-5-5": PROVIDER_ANTHROPIC,
             "z-ai/glm-5.3": "openrouter",
         },
     )
@@ -3859,10 +3859,10 @@ async def test_an_own_account_spawn_persists_only_its_profiles_provider_slots(
         )
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     init_workspace_credentials(store)
-    anthropic = replace(_profile("anthropic"), models=("claude-opus-5", "z-ai/glm-5.3"))
+    anthropic = replace(_profile("anthropic"), models=("claude-opus-5-5", "z-ai/glm-5.3"))
     mixed = replace(
         _profile("mixed"),
-        models=("claude-opus-5", "gpt-5.6-sol", "z-ai/glm-5.3"),
+        models=("claude-opus-5-5", "gpt-6.2-sol", "z-ai/glm-5.3"),
     )
     registry = SubagentRegistry((anthropic, mixed))
     spawner = Subagents(
@@ -3871,8 +3871,8 @@ async def test_an_own_account_spawn_persists_only_its_profiles_provider_slots(
         parent=parent,
         audience=conversation_audience(member_id),
         model_providers={
-            "claude-opus-5": PROVIDER_ANTHROPIC,
-            "gpt-5.6-sol": PROVIDER_OPENAI,
+            "claude-opus-5-5": PROVIDER_ANTHROPIC,
+            "gpt-6.2-sol": PROVIDER_OPENAI,
             "z-ai/glm-5.3": "openrouter",
         },
     )
@@ -3907,8 +3907,8 @@ async def test_an_own_account_spawn_persists_only_its_profiles_provider_slots(
             parent=child,
             audience=child_audience,
             model_providers={
-                "claude-opus-5": PROVIDER_ANTHROPIC,
-                "gpt-5.6-sol": PROVIDER_OPENAI,
+                "claude-opus-5-5": PROVIDER_ANTHROPIC,
+                "gpt-6.2-sol": PROVIDER_OPENAI,
                 "z-ai/glm-5.3": "openrouter",
             },
         ).spawn("mixed", {"task": "nested"}, background=True)
@@ -4057,14 +4057,14 @@ async def test_model_route_spawn_replay_keeps_the_admitted_runtime_config(
         )
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     init_workspace_credentials(store)
-    own_account = replace(_profile("coding"), models=("claude-opus-5", "z-ai/glm-5.3"))
+    own_account = replace(_profile("coding"), models=("claude-opus-5-5", "z-ai/glm-5.3"))
     subagents = Subagents(
         client=_RecordingClient(),
         registry=SubagentRegistry((own_account,)),
         parent=parent,
         audience=conversation_audience(member_id),
         model_providers={
-            "claude-opus-5": PROVIDER_ANTHROPIC,
+            "claude-opus-5-5": PROVIDER_ANTHROPIC,
             "z-ai/glm-5.3": "openrouter",
         },
     )

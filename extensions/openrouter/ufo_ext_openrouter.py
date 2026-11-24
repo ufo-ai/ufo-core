@@ -96,7 +96,7 @@ UNSERVABLE_REQUEST_MARKERS = (
 """What a relayed 400 says when every other route says it too. A refusal naming the request's size,
 the key, or the account is the request itself being unservable, so re-issuing it elsewhere only
 spends the round on the same answer."""
-GEMINI_ABORT_RETRY_MODEL = "google/gemini-3.7-flash"
+GEMINI_ABORT_RETRY_MODEL = "google/gemini-4-neon"
 GEMINI_ABORT_ERROR = "The operation was aborted"
 JSON_REFERENCE_KEYS = frozenset({"$ref", "$dynamicRef"})
 GENERATION_PATH = "/generation"
@@ -118,8 +118,8 @@ _REQUIRED_REASONS = ReasoningSupport(
 
 EXPLICIT_CACHE_PREFIX = "anthropic/"
 """Slugs whose upstream caches nothing unless the request asks for it. Every other upstream here
-caches on its own. Probing fable 5.1 twice on one 14.8K-token prefix, the asking arm read 14,833
-cached tokens on its second round and the silent arm read 0, at 38x the cost."""
+caches on its own. Probing an Anthropic route twice on one 14.8K-token prefix, the asking arm read
+14,833 cached tokens on its second round and the silent arm read 0, at 38x the cost."""
 
 GLM_PROVIDER_ORDER = ("fireworks", "baseten")
 PROVIDER_ORDER = {
@@ -1024,13 +1024,8 @@ def _openrouter(
 
 OPENROUTER_MODEL_SPECS = (
     _openrouter(
-        "google/gemini-2.5-pro",
-        ModelPrice(1_000_000, 10_000_000, 0, 0, 0),
-        "2025-01",
-    ),
-    _openrouter(
-        "google/gemini-3.7-flash",
-        ModelPrice(375_000, 1_875_000, 37_500, 0, 0),
+        "google/gemini-4-neon",
+        ModelPrice(3_000_000, 15_000_000, 150_000, 0, 0),
         "2026-03",
         context_window=1_048_576,
         reasoning=_REQUIRED_REASONS,
@@ -1061,25 +1056,18 @@ OPENROUTER_MODEL_SPECS = (
         context_window=1_048_576,
     ),
     _openrouter(
-        "moonshotai/kimi-k3",
-        ModelPrice(3_000_000, 15_000_000, 300_000, 0, 0),
+        "moonshotai/kimi-k3.1-pro",
+        ModelPrice(240_300, 8_402_300, 200_000, 0, 0),
         "2026-04",
-        context_window=1_000_000,
+        context_window=1_048_576,
     ),
     _openrouter(
-        "anthropic/claude-fable-5.1",
-        ModelPrice(10_000_000, 50_000_000, 250_000, 12_500_000, 0),
-        "2026-01",
+        "anthropic/claude-fable-5.2",
+        ModelPrice(8_000_000, 40_000_000, 200_000, 10_000_000, 16_000_000),
+        "2026-06",
         context_window=1_000_000,
         reasoning=_REQUIRED_REASONS,
         forced_tool_choice=False,
-    ),
-    _openrouter(
-        "anthropic/claude-fable-5",
-        ModelPrice(10_000_000, 50_000_000, 1_000_000, 12_500_000, 0),
-        "2026-01",
-        context_window=1_000_000,
-        reasoning=_REQUIRED_REASONS,
     ),
     # Grok 4.7 accepts 500,000 tokens but doubles input, cache-read and output rates above a
     # 200,000-token prompt, so the window is the one the registered rate is true at.
@@ -1089,9 +1077,27 @@ OPENROUTER_MODEL_SPECS = (
         "2026-05",
     ),
     _openrouter(
-        "openai/gpt-5.6-sol",
-        ModelPrice(4_000_000, 20_000_000, 400_000, 0, 0, 5_000_000),
-        "2026-02",
+        "openai/gpt-6.2-astra",
+        ModelPrice(8_000_000, 40_000_000, 400_000, 0, 0, 10_000_000),
+        "2026-05",
+        context_window=272_000,
+    ),
+    _openrouter(
+        "openai/gpt-6.2-sol",
+        ModelPrice(2_000_000, 10_000_000, 100_000, 0, 0, 2_500_000),
+        "2026-06",
+        context_window=272_000,
+    ),
+    _openrouter(
+        "openai/gpt-6.1-terra",
+        ModelPrice(1_000_000, 5_000_000, 50_000, 0, 0, 1_250_000),
+        "2026-06",
+        context_window=272_000,
+    ),
+    _openrouter(
+        "openai/gpt-6-luna",
+        ModelPrice(100_000, 500_000, 10_000, 0, 0, 125_000),
+        "2026-05",
         context_window=272_000,
     ),
 )

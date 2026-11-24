@@ -119,7 +119,7 @@ AUDIT_ID = f"action:{sample.WORKSPACE_KIND}:{AUDIT_ACTION}"
 
 
 class _ActivityModel:
-    model = "gpt-5.6-luna"
+    model = "gpt-6-luna"
 
     def __init__(self) -> None:
         self.payloads: list[str] = []
@@ -209,7 +209,7 @@ async def _seed_turn(
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=main,
                 visibility="workspace",
                 created_at=sa.func.now(),
@@ -286,7 +286,7 @@ async def _seed_agent(
                 workspace_id=workspace_id,
                 name=name,
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 visibility=visibility,
                 owner_member_id=owner_member_id,
                 created_at=sa.func.now(),
@@ -326,7 +326,7 @@ def _engine(
     manifest = next(m for m in load_manifests() if m.name == sample.NAME)
     return TurnEngine(
         turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         byok=False,
         system_prompt=rendered_prompt("p"),
         serving=serving_model(model),

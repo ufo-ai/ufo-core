@@ -42,7 +42,7 @@
   },
   "pricing": {
     "prices": {
-      "claude-opus-4-8": {
+      "claude-opus-5-5": {
         "input": 15000000,
         "output": 75000000,
         "cache_read": 1500000,

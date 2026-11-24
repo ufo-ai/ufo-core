@@ -196,7 +196,7 @@ def make_context(
         sandbox=sandbox,
         blob=FilesystemBlobStore(root=tmp_path),
         turn=turn,
-        agent=Agent(prompt="be terse", model="claude-opus-4-8"),
+        agent=Agent(prompt="be terse", model="claude-opus-5-5"),
         spawn=spawn,
         speaker_member_id=None,
         audience=conversation_audience(None),
@@ -1175,7 +1175,7 @@ async def test_spawn_returns_route_changes_beside_the_validated_output(
                 model_route_changes=(
                     ModelRouteChange(
                         failed_model="claude-opus-5-5",
-                        replacement_model="gpt-5.6-sol",
+                        replacement_model="gpt-6.2-sol",
                         failure="unavailable",
                     ),
                 ),
@@ -1195,7 +1195,7 @@ async def test_spawn_returns_route_changes_beside_the_validated_output(
     assert result.model_route_changes == (
         ModelRouteChange(
             failed_model="claude-opus-5-5",
-            replacement_model="gpt-5.6-sol",
+            replacement_model="gpt-6.2-sol",
             failure="unavailable",
         ),
     )
@@ -1220,9 +1220,9 @@ async def test_spawn_carries_the_calls_model_to_the_child_and_surfaces_its_refus
         requesting_message_ref: UUID | None = None,
     ) -> SpawnResult:
         asked.append((model, requester_member_id))
-        if model == "gpt-5.6-sol":
+        if model == "gpt-6.2-sol":
             return SpawnResult(turn_id=uuid4(), conversation_id=uuid4(), output=None)
-        raise SpawnModelRejected.unknown(model or "", ("gpt-5.6-sol",))
+        raise SpawnModelRejected.unknown(model or "", ("gpt-6.2-sol",))
 
     speaker = uuid4()
     ctx = replace(
@@ -1236,7 +1236,7 @@ async def test_spawn_carries_the_calls_model_to_the_child_and_surfaces_its_refus
         target="research",
         payload={"task": "x"},
         background=True,
-        model="gpt-5.6-sol",
+        model="gpt-6.2-sol",
     )
     refused = await run(
         "spawn",
@@ -1247,11 +1247,11 @@ async def test_spawn_carries_the_calls_model_to_the_child_and_surfaces_its_refus
         model="gpt-9",
     )
 
-    assert asked == [("gpt-5.6-sol", speaker), ("gpt-9", speaker)]
+    assert asked == [("gpt-6.2-sol", speaker), ("gpt-9", speaker)]
     assert not pinned.is_error
     assert refused.is_error
     assert "gpt-9" in refused.content[0].text
-    assert "gpt-5.6-sol" in refused.content[0].text
+    assert "gpt-6.2-sol" in refused.content[0].text
 
 
 async def test_a_finished_foreground_spawn_names_its_spawn_id_beside_the_output(
@@ -1354,7 +1354,7 @@ def test_the_audience_seal_holds_for_every_audience_and_speaker() -> None:
                 inbound="hello",
                 created_at=datetime(2026, 7, 9, tzinfo=UTC),
             ),
-            agent=Agent(prompt="be terse", model="claude-opus-4-8"),
+            agent=Agent(prompt="be terse", model="claude-opus-5-5"),
             spawn=_unavailable_spawn,
             speaker_member_id=speaker,
             audience=audience,
@@ -1394,7 +1394,7 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1448,7 +1448,7 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
             speaker_member_id=member_id,
             created_at=datetime(2026, 8, 20, tzinfo=UTC),
         ),
-        agent=Agent(prompt="be terse", model="claude-opus-4-8"),
+        agent=Agent(prompt="be terse", model="claude-opus-5-5"),
         spawn=None,
         speaker_member_id=member_id,
         audience=conversation_audience(None),

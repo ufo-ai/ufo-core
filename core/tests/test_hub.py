@@ -42,7 +42,7 @@ async def _drop(pending: asyncio.Future[tuple[str, LiveFrame]]) -> None:
 
 
 class _ActivityModel:
-    model = "gpt-5.6-luna"
+    model = "gpt-6-luna"
     request: ModelRequest | None = None
 
     async def complete(self, request: ModelRequest) -> str:

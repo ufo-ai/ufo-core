@@ -60,7 +60,7 @@ async def _seed() -> tuple[UUID, UUID, UUID]:
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -223,7 +223,7 @@ async def test_member_reach_skips_an_archived_agents_conversation(db: None) -> N
                 archived_name="old-app",
                 archived_at=now,
                 prompt="gone",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

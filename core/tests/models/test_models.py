@@ -79,7 +79,7 @@ from ufo.schema.records import Usage
 from ufo.sdk import models as sdk_models
 
 REQUEST = ModelRequest(
-    model="claude-opus-4-8",
+    model="claude-opus-5-5",
     system="be terse",
     messages=(Message(role="user", content="hi"),),
     max_tokens=64,
@@ -89,7 +89,7 @@ REQUEST = ModelRequest(
 _REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True)
 _PRICE = ModelPrice(0, 0, 0, 0, 0)
 ANTHROPIC_SPEC = ModelSpec(
-    id="claude-opus-4-8",
+    id="claude-opus-5-5",
     provider="anthropic",
     client=lambda spec, key: AnthropicClient(client=anthropic_sdk_client(key), spec=spec),
     price=_PRICE,
@@ -101,7 +101,7 @@ ANTHROPIC_SPEC = ModelSpec(
 
 
 OPENAI_SPEC = ModelSpec(
-    id="gpt-5.5",
+    id="gpt-6.2-sol",
     provider="openai",
     client=lambda spec, key: OpenAIClient(client=openai_sdk_client(key), spec=spec),
     price=_PRICE,
@@ -164,7 +164,7 @@ def anthropic_message_start(
             id="msg_test",
             type="message",
             role="assistant",
-            model="claude-opus-4-8",
+            model="claude-opus-5-5",
             content=[],
             stop_reason=None,
             stop_sequence=None,
@@ -322,7 +322,7 @@ class CapturingCreate(ScriptedCreate):
 
 
 IMAGE_REQUEST = ModelRequest(
-    model="claude-opus-4-8",
+    model="claude-opus-5-5",
     system="be terse",
     max_tokens=64,
     conversation_cache_ttl="5m",
@@ -430,7 +430,7 @@ CHATGPT_TOKEN = chatgpt_token({CHATGPT_AUTH_CLAIM: {"chatgpt_account_id": CHATGP
 
 def core_openai_spec() -> ModelSpec:
     specs = core_model_specs("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
-    return next(spec for spec in specs if spec.id == "gpt-5.5")
+    return next(spec for spec in specs if spec.id == "gpt-6.2-sol")
 
 
 def test_a_chatgpt_account_token_is_served_by_the_codex_backend() -> None:
@@ -844,7 +844,7 @@ REJECTED_KEY_CLIENTS = [
     pytest.param(
         lambda create: AnthropicClient(client=anthropic_sdk(create), spec=KEYED_ANTHROPIC_SPEC),
         anthropic.APIStatusError,
-        r"model 'claude-opus-4-8' key was rejected by the provider: env UFO_ANTHROPIC_API_KEY "
+        r"model 'claude-opus-5-5' key was rejected by the provider: env UFO_ANTHROPIC_API_KEY "
         r"\(or ANTHROPIC_API_KEY\) or the workspace's 'anthropic_api_key' BYOK slot holds a key "
         r"anthropic does not accept\. Replace it\.",
         id="anthropic",
@@ -852,7 +852,7 @@ REJECTED_KEY_CLIENTS = [
     pytest.param(
         lambda create: OpenAIClient(client=openai_sdk(create), spec=KEYED_OPENAI_SPEC),
         openai.APIStatusError,
-        r"model 'gpt-5\.5' key was rejected by the provider: env UFO_OPENAI_API_KEY "
+        r"model 'gpt-6\.2-sol' key was rejected by the provider: env UFO_OPENAI_API_KEY "
         r"\(or OPENAI_API_KEY\) or the workspace's 'openai_api_key' BYOK slot holds a key openai "
         r"does not accept\. Replace it\.",
         id="openai-chat",
@@ -863,7 +863,7 @@ REJECTED_KEY_CLIENTS = [
             spec=replace(KEYED_OPENAI_SPEC, api_surface="responses"),
         ),
         openai.APIStatusError,
-        r"model 'gpt-5\.5' key was rejected by the provider: env UFO_OPENAI_API_KEY "
+        r"model 'gpt-6\.2-sol' key was rejected by the provider: env UFO_OPENAI_API_KEY "
         r"\(or OPENAI_API_KEY\) or the workspace's 'openai_api_key' BYOK slot holds a key openai "
         r"does not accept\. Replace it\.",
         id="openai-responses",
@@ -1481,7 +1481,11 @@ async def test_anthropic_reasoning_off_omits_the_thinking_block() -> None:
 
 
 CORE_SPECS = {spec.id: spec for spec in core_model_specs("ANTHROPIC_API_KEY", "OPENAI_API_KEY")}
-ALWAYS_THINKING_UNFORCED = ("claude-opus-5-5", "claude-sonnet-5-5")
+ALWAYS_THINKING_UNFORCED = (
+    "claude-fable-5-2",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+)
 FINISH_SCHEMA = ToolSchema(name="finish", description="one", input_schema={"type": "object"})
 
 
@@ -1517,9 +1521,9 @@ async def test_anthropic_off_on_an_always_thinking_model_sends_adaptive_low(mode
     assert kwargs["output_config"] == {"effort": "low"}
 
 
-async def test_anthropic_off_on_opus_5_still_disables_thinking() -> None:
+async def test_anthropic_off_on_haiku_5_5_disables_thinking() -> None:
     kwargs = await _anthropic_kwargs(
-        CORE_SPECS["claude-opus-5"], REQUEST.model_copy(update={"reasoning": "off"})
+        CORE_SPECS["claude-haiku-5-5"], REQUEST.model_copy(update={"reasoning": "off"})
     )
     assert kwargs["thinking"] == {"type": "disabled"}
     assert "output_config" not in kwargs
@@ -1558,7 +1562,7 @@ async def test_anthropic_tool_choice_on_an_unforced_model_refuses_other_tools() 
 
 
 REASONING_REQUEST = ModelRequest(
-    model="claude-opus-4-8",
+    model="claude-opus-5-5",
     system="be terse",
     max_tokens=64,
     conversation_cache_ttl="5m",
@@ -1671,131 +1675,94 @@ def _config(tmp_path: Path, models: ModelsConfig | None = None) -> Config:
     )
 
 
-def test_registry_resolves_auto_to_the_configured_default(tmp_path: Path) -> None:
+def test_registry_resolves_auto_and_retired_models(tmp_path: Path) -> None:
     registry = model_registry(_config(tmp_path), ())
     assert registry.resolve("auto") == "claude-opus-5-5"
-    assert registry.resolve("claude-sonnet-5") == "claude-sonnet-5"
+    assert registry.resolve("claude-opus-4-8") == "claude-opus-5-5"
+    assert registry.spec("gpt-5.6-terra").id == "gpt-6.1-terra"
 
 
-def test_catalog_registers_opus_5_5_with_its_launch_facts(tmp_path: Path) -> None:
+def test_registry_accepts_retired_configured_models(tmp_path: Path) -> None:
+    registry = model_registry(
+        _config(
+            tmp_path,
+            ModelsConfig(
+                auto_model="claude-opus-4-8",
+                ambient_reply_model="gpt-5.6-luna",
+                background_jobs_model="gpt-5.6-luna",
+            ),
+        ),
+        (),
+    )
+
+    assert registry.auto_model == "claude-opus-5-5"
+    assert registry.resolve("auto") == "claude-opus-5-5"
+
+
+def test_registry_keeps_unknown_models_loud(tmp_path: Path) -> None:
     registry = model_registry(_config(tmp_path), ())
-    spec = registry.spec("claude-opus-5-5")
-    assert spec.provider == "anthropic"
-    assert spec.context_window == 1_000_000
-    assert spec.knowledge_cutoff == "2026-06"
-    assert spec.price.input == 4_000_000
-    assert spec.price.output == 20_000_000
-    assert spec.price.cache_read == 200_000
-    assert spec.price.cache_write_5m == 5_000_000
-    assert spec.price.cache_write_1h == 8_000_000
-    assert spec.reasoning.default_on
+    assert registry.resolve("missing-model") == "missing-model"
+    with pytest.raises(ValueError, match="no model registered for id 'missing-model'"):
+        registry.spec("missing-model")
 
 
-def test_catalog_registers_opus_5_with_its_long_context_window(tmp_path: Path) -> None:
+def test_catalog_registers_current_anthropic_models(tmp_path: Path) -> None:
     registry = model_registry(_config(tmp_path), ())
-    spec = registry.spec("claude-opus-5")
-    assert spec.provider == "anthropic"
-    assert spec.context_window == 1_000_000
-    assert spec.knowledge_cutoff == "2026-05"
-    assert spec.price.input == 5_000_000
-    assert spec.price.output == 25_000_000
+    fable = registry.spec("claude-fable-5-2")
+    assert fable.context_window == 1_000_000
+    assert fable.knowledge_cutoff == "2026-06"
+    assert fable.price == ModelPrice(8_000_000, 40_000_000, 200_000, 10_000_000, 16_000_000)
+    assert fable.reasoning.default_on
+    assert not fable.reasoning.can_disable
+    assert not fable.forced_tool_choice
+
+    opus = registry.spec("claude-opus-5-5")
+    assert opus.context_window == 1_000_000
+    assert opus.knowledge_cutoff == "2026-06"
+    assert opus.price == ModelPrice(4_000_000, 20_000_000, 200_000, 5_000_000, 8_000_000)
+
+    sonnet = registry.spec("claude-sonnet-5-5")
+    assert sonnet.context_window == 1_000_000
+    assert sonnet.knowledge_cutoff == "2026-06"
+    assert sonnet.price == ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000)
+
+    haiku = registry.spec("claude-haiku-5-5")
+    assert haiku.context_window == 100_000
+    assert haiku.knowledge_cutoff == "2026-06"
+    assert haiku.price == ModelPrice(100_000, 500_000, 10_000, 125_000, 200_000)
+    assert haiku.reasoning.can_disable
+    assert haiku.forced_tool_choice
 
 
-def test_catalog_registers_sonnet_5_5_at_sonnet_pricing(tmp_path: Path) -> None:
+def test_catalog_registers_current_openai_models(tmp_path: Path) -> None:
     registry = model_registry(_config(tmp_path), ())
-    spec = registry.spec("claude-sonnet-5-5")
-    assert spec.provider == "anthropic"
-    assert spec.knowledge_cutoff == "2026-05"
-    assert spec.price.input == 2_000_000
-    assert spec.price.output == 10_000_000
-    assert spec.price.cache_read == 200_000
-    assert spec.price.cache_write_5m == 2_500_000
-    assert spec.price.cache_write_1h == 4_000_000
-    assert spec.reasoning.default_on
+    expected = {
+        "gpt-6.2-astra": ("2026-05", ModelPrice(8_000_000, 40_000_000, 400_000, 0, 0, 10_000_000)),
+        "gpt-6.2-sol": ("2026-06", ModelPrice(2_000_000, 10_000_000, 100_000, 0, 0, 2_500_000)),
+        "gpt-6.1-terra": ("2026-06", ModelPrice(1_000_000, 5_000_000, 50_000, 0, 0, 1_250_000)),
+        "gpt-6-luna": ("2026-05", ModelPrice(100_000, 500_000, 10_000, 0, 0, 125_000)),
+    }
+    for model, (cutoff, price) in expected.items():
+        spec = registry.spec(model)
+        assert spec.provider == "openai"
+        assert spec.api_surface == "responses"
+        assert spec.context_window == 272_000
+        assert spec.knowledge_cutoff == cutoff
+        assert spec.price == price
 
 
-def test_catalog_registers_haiku_5_5_at_its_lower_tier_rates(tmp_path: Path) -> None:
-    """Haiku 5.5 bills a prompt over 100,000 tokens at 5x every rate, so the row carries the
-    lower tier's prices and the window they are true at."""
-    registry = model_registry(_config(tmp_path), ())
-    spec = registry.spec("claude-haiku-5-5")
-    assert spec.provider == "anthropic"
-    assert spec.context_window == 100_000
-    assert spec.knowledge_cutoff == "2026-06"
-    assert spec.price.input == 100_000
-    assert spec.price.output == 500_000
-    assert spec.price.cache_read == 10_000
-    assert spec.price.cache_write_5m == 125_000
-    assert spec.price.cache_write_1h == 200_000
-    assert spec.reasoning.default_on
-    assert spec.reasoning.can_disable
-    assert spec.forced_tool_choice
-
-
-def test_catalog_registers_gpt_5_6_sol_on_the_responses_surface(tmp_path: Path) -> None:
-    """Sol shares the family's refusal of `tools` beside `reasoning_effort` on
-    `/v1/chat/completions` (#568), so it is called on Responses."""
-    registry = model_registry(_config(tmp_path), ())
-    spec = registry.spec("gpt-5.6-sol")
-    assert spec.provider == "openai"
-    assert spec.api_surface == "responses"
-    assert spec.context_window == 272_000
-    assert spec.knowledge_cutoff == "2026-02"
-    assert spec.price.input == 4_000_000
-    assert spec.price.output == 20_000_000
-    assert spec.price.cache_read == 400_000
-    assert spec.price.cache_write_30m == 5_000_000
-
-
-def test_catalog_registers_gpt_6_astra_with_its_launch_facts(tmp_path: Path) -> None:
-    """Astra accepts 1,050,000 tokens and bills a whole request over 272,000 at 2x input and 1.5x
-    output, so the row carries the window its registered rate is true at, as the GPT-5.6 rows do."""
-    registry = model_registry(_config(tmp_path), ())
-    spec = registry.spec("gpt-6-astra")
-    assert spec.provider == "openai"
-    assert spec.api_surface == "responses"
-    assert spec.context_window == 272_000
-    assert spec.knowledge_cutoff == "2026-04"
-    assert spec.price.input == 10_000_000
-    assert spec.price.output == 50_000_000
-    assert spec.price.cache_read == 1_000_000
-    assert spec.price.cache_write_30m == 12_500_000
-
-
-def test_catalog_registers_gpt_6_sol_and_luna_at_their_permanent_rates(tmp_path: Path) -> None:
-    registry = model_registry(_config(tmp_path), ())
-    sol = registry.spec("gpt-6-sol")
-    assert sol.provider == "openai"
-    assert sol.api_surface == "responses"
-    assert sol.context_window == 272_000
-    assert sol.knowledge_cutoff == "2026-09"
-    assert sol.price.input == 2_000_000
-    assert sol.price.output == 10_000_000
-    assert sol.price.cache_read == 200_000
-    assert sol.price.cache_write_30m == 2_500_000
-    luna = registry.spec("gpt-6-luna")
-    assert luna.api_surface == "responses"
-    assert luna.context_window == 272_000
-    assert luna.knowledge_cutoff == "2026-09"
-    assert luna.price.input == 100_000
-    assert luna.price.output == 500_000
-    assert luna.price.cache_read == 10_000
-    assert luna.price.cache_write_30m == 125_000
-
-
-def test_catalog_registers_gpt_6_1_sol_at_its_launch_facts(tmp_path: Path) -> None:
-    """GPT-6.1 Sol bills GPT-6 Sol's input and output prices with cached input at 5% of base
-    input, per OpenAI's model page, on the same Responses surface the GPT-6 family uses."""
-    registry = model_registry(_config(tmp_path), ())
-    spec = registry.spec("gpt-6.1-sol")
-    assert spec.provider == "openai"
-    assert spec.api_surface == "responses"
-    assert spec.context_window == 272_000
-    assert spec.knowledge_cutoff == "2026-04"
-    assert spec.price.input == 2_000_000
-    assert spec.price.output == 10_000_000
-    assert spec.price.cache_read == 100_000
-    assert spec.price.cache_write_30m == 2_500_000
+def test_catalog_only_keeps_the_current_member_of_each_model_family(tmp_path: Path) -> None:
+    ids = set(model_registry(_config(tmp_path), ()).specs)
+    assert ids == {
+        "claude-fable-5-2",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
+        "gpt-6.1-terra",
+        "gpt-6-luna",
+    }
 
 
 def test_registry_rejects_an_auto_model_no_spec_describes(tmp_path: Path) -> None:
@@ -1833,8 +1800,8 @@ def test_registry_rejects_a_subagent_route_model_no_spec_describes(tmp_path: Pat
 @pytest.mark.parametrize(
     ("model_id", "key_env", "key_slot"),
     (
-        ("claude-opus-4-8", "ANTHROPIC_API_KEY", "anthropic_api_key"),
-        ("gpt-5.4", "OPENAI_API_KEY", "openai_api_key"),
+        ("claude-opus-5-5", "ANTHROPIC_API_KEY", "anthropic_api_key"),
+        ("gpt-6.1-terra", "OPENAI_API_KEY", "openai_api_key"),
     ),
 )
 async def test_registry_rejects_non_ascii_core_provider_keys(

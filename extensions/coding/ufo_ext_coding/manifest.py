@@ -54,9 +54,9 @@ CODING_TOOL_NAMES = (
 )
 CODING_PROMPT = (Path(__file__).parent / "prompts" / "subagent_coding.md").read_text()
 CODING_ROUND_LIMIT = 500
-CODING_MODELS = ("claude-opus-5-5", "gpt-5.6-sol", "z-ai/glm-5.3")
+CODING_MODELS = ("claude-opus-5-5", "gpt-6.2-sol", "z-ai/glm-5.3")
 FABLE_ESCALATION_PROFILE_NAME = "fable_escalation"
-FABLE_ESCALATION_MODEL = "anthropic/claude-fable-5.1"
+FABLE_ESCALATION_MODEL = "anthropic/claude-fable-5.2"
 FABLE_ESCALATION_PROMPT = (
     Path(__file__).parent / "prompts" / "subagent_fable_escalation.md"
 ).read_text()

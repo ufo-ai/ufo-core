@@ -201,9 +201,9 @@ def test_models_auto_default(tmp_path: Path) -> None:
 
 def test_models_auto_parse(tmp_path: Path) -> None:
     path = tmp_path / "ufo.toml"
-    path.write_text(VALID + '\n[models]\nauto_model = "claude-sonnet-5"\n')
+    path.write_text(VALID + '\n[models]\nauto_model = "claude-sonnet-5-5"\n')
     config = load_config(path)
-    assert config.models.auto_model == "claude-sonnet-5"
+    assert config.models.auto_model == "claude-sonnet-5-5"
 
 
 def test_auto_model_rejects_the_auto_sentinel(tmp_path: Path) -> None:
@@ -219,15 +219,15 @@ def test_background_jobs_model_defaults_to_the_cheap_one_shot_model(tmp_path: Pa
     path = tmp_path / "ufo.toml"
     path.write_text(VALID)
     config = load_config(path)
-    assert config.models.background_jobs_model == "gpt-5.6-luna"
+    assert config.models.background_jobs_model == "gpt-6-luna"
     assert config.models.auto_model == "claude-opus-5-5"
 
 
 def test_background_jobs_model_parse(tmp_path: Path) -> None:
     path = tmp_path / "ufo.toml"
-    path.write_text(VALID + '\n[models]\nbackground_jobs_model = "claude-haiku-4-5"\n')
+    path.write_text(VALID + '\n[models]\nbackground_jobs_model = "claude-haiku-5-5"\n')
     config = load_config(path)
-    assert config.models.background_jobs_model == "claude-haiku-4-5"
+    assert config.models.background_jobs_model == "claude-haiku-5-5"
 
 
 def test_background_jobs_model_rejects_the_auto_sentinel_and_the_empty_value(

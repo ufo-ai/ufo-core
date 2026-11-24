@@ -27,7 +27,6 @@ from ufo_ext_context_rollover.rollover import (
     CHECKPOINT_REMINDER,
     CHECKPOINT_REMINDER_FRACTION,
     CONTINUE_HEADING,
-    DEFAULT_CONTEXT_WINDOW_TOKENS,
     HANDOFF_HEADING,
     HANDOFF_MAX_CHARS,
     HISTORY_LINE,
@@ -114,10 +113,12 @@ class RefusingModel:
         yield  # pragma: no cover - keeps the signature an async iterator
 
 
-def _rollover(tmp_path: Path, **overrides: object) -> ContextRollover:
+def _rollover(
+    tmp_path: Path, model_id: str = "claude-opus-5-5", **overrides: object
+) -> ContextRollover:
     overrides.setdefault("journal", FileJournal(_history_file(tmp_path)))
     return ContextRollover(
-        serving=serving_model(cast(ModelClient, RefusingModel())),
+        serving=serving_model(cast(ModelClient, RefusingModel()), model_id),
         blob=FilesystemBlobStore(root=tmp_path),
         conversation_id=uuid4(),
         **overrides,  # type: ignore[arg-type]
@@ -152,7 +153,7 @@ def _rollover_metric(reason: str) -> list[tuple[str, dict[str, str]]]:
         (
             "rollover_total",
             {
-                "model": "claude-opus-4-8",
+                "model": "claude-opus-5-5",
                 "outcome": "recoverable",
                 "provider": "anthropic",
                 "reason": reason,
@@ -875,7 +876,7 @@ def test_the_line_is_the_serving_models_window(tmp_path: Path) -> None:
     window: the line reads the serving spec at each use."""
     rollover = _rollover(tmp_path)
     assert rollover.window.trigger == (
-        DEFAULT_CONTEXT_WINDOW_TOKENS - RECOVERY_RESERVE_TOKENS - ROLLOVER_BUFFER_TOKENS
+        rollover.serving.spec.context_window - RECOVERY_RESERVE_TOKENS - ROLLOVER_BUFFER_TOKENS
     )
     rollover.serving.spec = replace(rollover.serving.spec, context_window=1_000_000)
     assert rollover.window.trigger == (1_000_000 - RECOVERY_RESERVE_TOKENS - ROLLOVER_BUFFER_TOKENS)
@@ -891,9 +892,9 @@ async def test_remaining_reports_the_line_and_the_hard_limit(tmp_path: Path) -> 
     assert remaining.rollover_at_tokens == 1_000
     assert remaining.used_tokens == rollover.window.tokens(messages)
     assert remaining.tokens_until_rollover == 1_000 - remaining.used_tokens
-    assert remaining.hard_limit_tokens == DEFAULT_CONTEXT_WINDOW_TOKENS
+    assert remaining.hard_limit_tokens == rollover.serving.spec.context_window
     assert remaining.tokens_until_hard_limit == (
-        DEFAULT_CONTEXT_WINDOW_TOKENS - remaining.used_tokens
+        rollover.serving.spec.context_window - remaining.used_tokens
     )
 
 
@@ -904,8 +905,10 @@ def test_round_output_budget_fits_under_the_rollover_line() -> None:
 
 
 async def test_the_line_derives_from_the_model_window(tmp_path: Path) -> None:
-    rollover = _rollover(tmp_path)
-    derived = DEFAULT_CONTEXT_WINDOW_TOKENS - RECOVERY_RESERVE_TOKENS - ROLLOVER_BUFFER_TOKENS
+    rollover = _rollover(tmp_path, model_id="claude-haiku-5-5")
+    derived = (
+        rollover.serving.spec.context_window - RECOVERY_RESERVE_TOKENS - ROLLOVER_BUFFER_TOKENS
+    )
     under = (
         Message(role="user", content="a " + "x" * (derived - 5_000) * CHARS_PER_TOKEN),
         Message(role="assistant", content="b"),
@@ -921,8 +924,10 @@ async def test_the_line_derives_from_the_model_window(tmp_path: Path) -> None:
 async def test_a_connector_heavy_window_over_the_real_line_rolls_over(tmp_path: Path) -> None:
     """The live failure behind #282: URL-dense connector JSON tokenizes at 2.2 characters per token,
     so a window read any sparser puts the line past the provider's own limit."""
-    rollover = _rollover(tmp_path)
-    derived = DEFAULT_CONTEXT_WINDOW_TOKENS - RECOVERY_RESERVE_TOKENS - ROLLOVER_BUFFER_TOKENS
+    rollover = _rollover(tmp_path, model_id="claude-haiku-5-5")
+    derived = (
+        rollover.serving.spec.context_window - RECOVERY_RESERVE_TOKENS - ROLLOVER_BUFFER_TOKENS
+    )
     window = connector_window()
 
     assert CONNECTOR_WINDOW_TOKENS > derived
@@ -1217,7 +1222,7 @@ async def test_a_window_under_the_line_fires_no_hook(tmp_path: Path) -> None:
 
 
 def test_the_rollover_step_renders_no_window_into_a_cancellation_log(tmp_path: Path) -> None:
-    rollover = _rollover(tmp_path, agent=Agent(prompt=HEAD_FACT, model="claude-opus-4-8"))
+    rollover = _rollover(tmp_path, agent=Agent(prompt=HEAD_FACT, model="claude-opus-5-5"))
     request = _RolloverRequest(messages=_history(), force=False, reset=None, active_requests=())
     step = functools.partial(ContextRollover._roll_over, rollover, request)
 
@@ -1227,7 +1232,7 @@ def test_the_rollover_step_renders_no_window_into_a_cancellation_log(tmp_path: P
         "_RolloverRequest(messages=5, force=False, reset=False, active_requests=0)"
     )
     assert repr(rollover) == (
-        f"ContextRollover(conversation_id={rollover.conversation_id}, model=claude-opus-4-8)"
+        f"ContextRollover(conversation_id={rollover.conversation_id}, model=claude-opus-5-5)"
     )
 
 

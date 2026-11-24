@@ -84,7 +84,7 @@ from ufo.schema import tables
 from ufo.schema.ids import uuid7
 from ufo.schema.records import Usage
 
-BACKGROUND_MODEL = "gpt-5.6-luna"
+BACKGROUND_MODEL = "gpt-6-luna"
 RACER_EXTENSION = "racer_ext"
 RACER_CURSOR_KEY = f"{PAGE_CHANGE_CURSOR_KEY}:_advance_the_cursor_then_record"
 CONCURRENT_CURSOR = f"9000|{UUID(int=9000)}"
@@ -199,7 +199,7 @@ def _stub_registry() -> ModelRegistry:
             for spec in CORE_MODEL_SPECS
         },
         pricing=CORE_PRICING,
-        auto_model="claude-opus-5",
+        auto_model="claude-opus-5-5",
     )
 
 
@@ -230,7 +230,7 @@ async def test_runner_wires_the_model_into_the_off_turn_context(db: None, tmp_pa
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     await _seed_page(blob, workspace_id, "a page for model wiring")
-    registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-4-8")
+    registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-5-5")
     with ws(workspace_id):
         await _drive_all(_runner(blob, registry=registry))
 
@@ -247,7 +247,7 @@ async def test_a_page_change_consumer_runs_on_the_background_jobs_model(
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     await _seed_page(blob, workspace_id, "a page for the background model")
-    registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-5")
+    registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-5-5")
     seen: list[str] = []
 
     async def _record_model(ctx: HookContext) -> HookOutcome:
@@ -265,13 +265,13 @@ async def test_a_page_change_consumer_runs_on_the_background_jobs_model(
         ),
         pages=CorePageFeed(blob=blob),
         registry=registry,
-        background_model="gpt-5.6-luna",
+        background_model="gpt-6-luna",
     )
     with ws(workspace_id):
         await _drive_all(runner)
 
-    assert seen == ["gpt-5.6-luna"]
-    assert registry.auto_model == "claude-opus-5"
+    assert seen == ["gpt-6-luna"]
+    assert registry.auto_model == "claude-opus-5-5"
 
 
 async def test_a_consumer_meters_its_model_call_under_its_own_page_change_job(

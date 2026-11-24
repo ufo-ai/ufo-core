@@ -85,7 +85,7 @@ async def test_an_active_extension_emits_the_metrics_its_manifest_declares(
             inbound="hi",
             created_at=datetime(2026, 9, 24, tzinfo=UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=None,
         speaker_member_id=None,
         audience=conversation_audience(None),

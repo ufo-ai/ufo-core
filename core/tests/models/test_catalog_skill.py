@@ -29,11 +29,11 @@ def test_catalog_skill_lists_every_registered_model_with_its_facts(tmp_path: Pat
     for spec in registry.specs.values():
         assert f"`{spec.id}`" in skill.instructions
         assert spec.knowledge_cutoff in skill.instructions
-    assert registry.spec("gpt-5.6-terra").api_surface == "responses"
+    assert registry.spec("gpt-6.1-terra").api_surface == "responses"
     assert "responses" in skill.instructions
-    sonnet = registry.spec("claude-sonnet-4-6").price
-    assert (sonnet.input, sonnet.output) == (3_000_000, 15_000_000)
-    assert "$3.00 / $15.00" in skill.instructions
+    sonnet = registry.spec("claude-sonnet-5-5").price
+    assert (sonnet.input, sonnet.output) == (2_000_000, 10_000_000)
+    assert "$2.00 / $10.00" in skill.instructions
 
 
 def test_catalog_skill_registers_in_the_loadable_index(tmp_path: Path) -> None:

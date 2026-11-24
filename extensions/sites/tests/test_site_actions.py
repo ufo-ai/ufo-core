@@ -145,7 +145,7 @@ class _StaticSiteCarrier(_StubCarrier):
 
 
 class _ActivityModel:
-    model = "gpt-5.6-luna"
+    model = "gpt-6-luna"
 
     async def complete(self, request: ModelRequest) -> str:
         return "Working on the request."
@@ -223,7 +223,7 @@ async def _seed_turn(
                 workspace_id=workspace_id,
                 name="ufo",
                 prompt="Help.",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 visibility="workspace",
                 is_main=True,
                 created_at=sa.func.now(),
@@ -236,7 +236,7 @@ async def _seed_turn(
                 workspace_id=workspace_id,
                 name=AGENT_NAME,
                 prompt="Track the team's work.",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 visibility=visibility,
                 is_main=False,
                 created_at=sa.func.now(),
@@ -301,7 +301,7 @@ async def _seed_agent(
                 workspace_id=workspace_id,
                 name=name,
                 prompt="Watch the market.",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 visibility=visibility,
                 is_main=False,
                 owner_member_id=owner_member_id,
@@ -370,7 +370,7 @@ def _engine(
     sandbox = SandboxSession(carrier=carrier or _StubCarrier(), handle=handle)
     return TurnEngine(
         turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         byok=False,
         system_prompt=rendered_prompt("p"),
         serving=serving_model(model),

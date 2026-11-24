@@ -56,7 +56,7 @@ needs_redis = pytest.mark.skipif(not redis_reachable(), reason="redis service no
 
 FRAMES: tuple[HubFrame, ...] = (
     TextDelta(text="hello"),
-    Terminal(frame=TerminalFrame(status="done", text="answer", model="claude-opus-4-8")),
+    Terminal(frame=TerminalFrame(status="done", text="answer", model="claude-opus-5-5")),
     Parked(message="over a spend cap"),
     CostTick(cost_micro_usd=110, tokens=10),
     Activity(text="Listing the workspace.", call_id="c1"),

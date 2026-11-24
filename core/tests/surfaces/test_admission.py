@@ -125,7 +125,7 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID]:
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -595,7 +595,7 @@ async def test_a_reject_cap_stops_arrivals_at_the_boundary(db: None) -> None:
                 prompt_tokens=10,
                 input_tokens=10,
                 priced_micro_usd=100,
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1111,7 +1111,7 @@ async def test_a_reject_cap_holds_a_turn_carrying_work_already_paid_for(db: None
                 prompt_tokens=10,
                 input_tokens=10,
                 priced_micro_usd=100,
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1447,7 +1447,7 @@ async def test_redispatch_founds_a_run_on_the_oldest_pending_member_arrival(db: 
     workspace_id, member_id, _, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    pinned = TurnRuntimeConfig(model="claude-opus-4-8", internet_access=False)
+    pinned = TurnRuntimeConfig(model="claude-opus-5-5", internet_access=False)
     first = await admission.admit_member(
         workspace_id, conversation_id, "start", member_id, runtime_config=pinned
     )
@@ -1536,7 +1536,7 @@ async def _spawned_conversation(
     """A child conversation whose founding turn ended `status` with a parent's follow-up still
     pending on it, as a fold followed by a failure or a cancel leaves things."""
     child_conversation, child_id, parent_id = uuid4(), uuid4(), uuid4()
-    pinned = TurnRuntimeConfig(model="claude-opus-4-8", internet_access=False)
+    pinned = TurnRuntimeConfig(model="claude-opus-5-5", internet_access=False)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.conversation).values(
@@ -1785,7 +1785,7 @@ async def test_redispatch_keeps_a_pinned_followup_separate_from_a_live_sibling(
     workspace_id, member_id, agent_id, conversation_id = await _seed()
     dbos, hub = StubDbos(), _RecordingHub()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset(), hub=hub)
-    pinned = TurnRuntimeConfig(model="claude-opus-4-8", internet_access=False)
+    pinned = TurnRuntimeConfig(model="claude-opus-5-5", internet_access=False)
     first = await admission.admit_member(
         workspace_id, conversation_id, "start", member_id, runtime_config=pinned
     )

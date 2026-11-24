@@ -144,7 +144,7 @@ async def _seed() -> tuple[UUID, UUID, UUID]:
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -204,7 +204,7 @@ def _context(
             inbound="connect slack",
             created_at=datetime(2026, 7, 10, tzinfo=UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=_unavailable_spawn,
         speaker_member_id=member_id,
         audience=conversation_audience(member_id),
@@ -239,7 +239,7 @@ async def _run(
 
 
 class _ActivityModel:
-    model = "gpt-5.6-luna"
+    model = "gpt-6-luna"
 
     async def complete(self, request: ModelRequest) -> str:
         return "Connecting Slack."
@@ -344,7 +344,7 @@ async def _dispatch(
     workspace_blob = WorkspaceBlobStore(backend=blob)
     engine = TurnEngine(
         turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         byok=False,
         system_prompt=rendered_prompt("p"),
         serving=serving_model(model),

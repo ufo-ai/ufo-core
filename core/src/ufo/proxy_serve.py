@@ -10,7 +10,7 @@ from ufo.config import Config
 from ufo.runtime.access.credentials import deploy_env
 from ufo.runtime.access.egress_rules import Rule, ScopeRule, derive_model_rules
 
-MODEL_PROBES = ("claude-opus-4-8", "gpt-5")
+MODEL_PROBES = ("claude-opus-5-5", "gpt-6.2-sol")
 OWNER_DSN_ENV = "UFO_OWNER_DSN"
 OTLP_ENDPOINT_ENV = "UFO_OTLP_ENDPOINT"
 

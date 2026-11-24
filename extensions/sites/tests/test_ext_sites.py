@@ -301,7 +301,7 @@ def _context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
         sandbox=sandbox,
         blob=FilesystemBlobStore(root=tmp_path),
         turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
         audience=conversation_audience(None),

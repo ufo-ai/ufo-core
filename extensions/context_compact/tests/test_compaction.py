@@ -15,7 +15,6 @@ from ufo_ext_context_compact.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     COMPACTION_FORMAT_RESTATEMENT,
     COMPACTION_SUMMARY_MAX_TOKENS,
-    DEFAULT_CONTEXT_WINDOW_TOKENS,
     FILES_HEADING,
     MAX_ANCHORS_PER_KIND,
     MAX_REFERENCE_PATHS,
@@ -177,9 +176,14 @@ class RawTextModel:
         yield Usage(input_tokens=1, output_tokens=1)
 
 
-def _compaction(tmp_path: Path, model: object = None, **overrides: object) -> Compaction:
+def _compaction(
+    tmp_path: Path,
+    model: object = None,
+    model_id: str = "claude-opus-5-5",
+    **overrides: object,
+) -> Compaction:
     return Compaction(
-        serving=serving_model(cast(ModelClient, model or SummaryModel())),
+        serving=serving_model(cast(ModelClient, model or SummaryModel()), model_id),
         blob=FilesystemBlobStore(root=tmp_path),
         conversation_id=uuid4(),
         **overrides,
@@ -210,7 +214,7 @@ def _compaction_metric(trigger: str) -> list[tuple[str, dict[str, str]]]:
         (
             "compaction_verified_total",
             {
-                "model": "claude-opus-4-8",
+                "model": "claude-opus-5-5",
                 "outcome": "clean",
                 "provider": "anthropic",
                 "retried": "false",
@@ -602,7 +606,9 @@ async def test_summarizer_requests_the_5m_conversation_cache_ttl(tmp_path: Path)
 def test_the_window_is_the_serving_models_window(tmp_path: Path) -> None:
     compaction = _compaction(tmp_path)
     assert compaction.window.trigger == (
-        DEFAULT_CONTEXT_WINDOW_TOKENS - compaction.summary_max_tokens - AUTOCOMPACT_BUFFER_TOKENS
+        compaction.serving.spec.context_window
+        - compaction.summary_max_tokens
+        - AUTOCOMPACT_BUFFER_TOKENS
     )
     compaction.serving.spec = replace(compaction.serving.spec, context_window=1_000_000)
     assert compaction.window.trigger == (
@@ -1143,9 +1149,11 @@ def test_round_output_budget_fits_under_the_compaction_trigger() -> None:
 async def test_trigger_derives_from_the_model_window(tmp_path: Path) -> None:
     """Phase 3: with no explicit trigger the threshold is the model window less the summary reserve
     and buffer — a window just under it is left alone, just over it compacts."""
-    compaction = _compaction(tmp_path, keep_messages=2)
+    compaction = _compaction(tmp_path, model_id="claude-haiku-5-5", keep_messages=2)
     derived = (
-        DEFAULT_CONTEXT_WINDOW_TOKENS - compaction.summary_max_tokens - AUTOCOMPACT_BUFFER_TOKENS
+        compaction.serving.spec.context_window
+        - compaction.summary_max_tokens
+        - AUTOCOMPACT_BUFFER_TOKENS
     )
     under = (
         Message(role="user", content="a " + "x" * (derived - 200) * CHARS_PER_TOKEN),
@@ -1165,9 +1173,11 @@ async def test_trigger_derives_from_the_model_window(tmp_path: Path) -> None:
 
 
 async def test_a_connector_heavy_window_over_the_real_trigger_compacts(tmp_path: Path) -> None:
-    compaction = _compaction(tmp_path)
+    compaction = _compaction(tmp_path, model_id="claude-haiku-5-5")
     derived = (
-        DEFAULT_CONTEXT_WINDOW_TOKENS - compaction.summary_max_tokens - AUTOCOMPACT_BUFFER_TOKENS
+        compaction.serving.spec.context_window
+        - compaction.summary_max_tokens
+        - AUTOCOMPACT_BUFFER_TOKENS
     )
     window = connector_window()
     assert CONNECTOR_WINDOW_TOKENS > derived
@@ -1270,14 +1280,14 @@ async def test_head_reasoning_reaches_the_summarizer_as_text_without_its_signatu
 
 
 def test_the_compact_step_renders_no_window_into_a_cancellation_log(tmp_path: Path) -> None:
-    compaction = _compaction(tmp_path, agent=Agent(prompt=HEAD_FACT, model="claude-opus-4-8"))
+    compaction = _compaction(tmp_path, agent=Agent(prompt=HEAD_FACT, model="claude-opus-5-5"))
     request = _CompactionRequest(messages=_history(), reason="auto", active_requests=())
     step = functools.partial(Compaction._compact, compaction, request)
 
     assert HEAD_FACT not in repr(step)
     assert TAIL_FACT not in repr(step)
     assert repr(compaction) == (
-        f"Compaction(conversation_id={compaction.conversation_id}, model=claude-opus-4-8)"
+        f"Compaction(conversation_id={compaction.conversation_id}, model=claude-opus-5-5)"
     )
     assert repr(request) == "_CompactionRequest(messages=5, reason=auto, active_requests=0)"
 

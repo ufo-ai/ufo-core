@@ -186,7 +186,7 @@ def mounted(
         "",
         None,
         None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ("auto", "claude-opus-5-5", "claude-sonnet-5-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
@@ -237,7 +237,7 @@ async def _seed_workspace(emails: tuple[str, ...] = (ADMIN, MEMBER)) -> _Seeded:
                     workspace_id=workspace_id,
                     name="assistant",
                     prompt="be brief",
-                    model="claude-opus-4-8",
+                    model="claude-opus-5-5",
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -288,7 +288,7 @@ async def _seed_turn(
     turn_id = uuid4()
     terminal = (
         TerminalFrame(
-            status=status, text="answer", tokens=9, cost_micro_usd=77, model="claude-opus-4-8"
+            status=status, text="answer", tokens=9, cost_micro_usd=77, model="claude-opus-5-5"
         ).model_dump(mode="json")
         if status in ("done", "failed", "cancelled")
         else None
@@ -709,7 +709,7 @@ async def test_conversations_list_every_surface_newest_first_with_what_opened_th
     await _seed_turn(seeded, settled, 2, at=older)
     running_conversation = await _seed_conversation(seeded, queue_key="C002:2.0")
     running = await _seed_turn(seeded, running_conversation, 1, status="running", at=newer)
-    await _seed_ledger(seeded, running, "claude-sonnet-5")
+    await _seed_ledger(seeded, running, "claude-sonnet-5-5")
     fanned = await _seed_conversation(
         seeded, queue_key=str(running), surface=SUBAGENT_SURFACE, created_at=older
     )
@@ -745,10 +745,10 @@ async def test_conversations_list_every_surface_newest_first_with_what_opened_th
         "turn_count": 2,
         "last_turn_at": "2026-08-20T09:30:00Z",
         "opening_message": "ask 1",
-        "model": "claude-opus-4-8",
+        "model": "claude-opus-5-5",
         "link": None,
     }
-    assert by_key["C002:2.0"]["model"] == "claude-sonnet-5"
+    assert by_key["C002:2.0"]["model"] == "claude-sonnet-5-5"
     assert by_key[str(running)]["surface"] == SUBAGENT_SURFACE
     assert by_key[str(running)]["model"] is None
     assert by_key["C003:3.0"]["turn_count"] == 0
@@ -824,7 +824,7 @@ async def test_turn_detail_carries_its_ledger_its_subagents_and_its_steps(debug)
     seeded = await _seed_workspace()
     conversation = await _seed_conversation(seeded)
     parent = await _seed_turn(seeded, conversation, 1, status="running")
-    await _seed_ledger(seeded, parent, "claude-sonnet-5")
+    await _seed_ledger(seeded, parent, "claude-sonnet-5-5")
     fanned = await _seed_conversation(seeded, queue_key=str(parent), surface=SUBAGENT_SURFACE)
     child = await _seed_turn(seeded, fanned, 1, parent_turn_id=parent)
     headers = _auth(_token(seeded))
@@ -833,7 +833,7 @@ async def test_turn_detail_carries_its_ledger_its_subagents_and_its_steps(debug)
     steps = (await client.get(f"/surface/debug/api/turns/{parent}/steps", headers=headers)).json()
 
     assert detail["turn"]["id"] == str(parent)
-    assert detail["model"] == "claude-sonnet-5"
+    assert detail["model"] == "claude-sonnet-5-5"
     assert detail["links"] == []
     assert [(entry["dimension"], entry["amount"]) for entry in detail["ledger"]] == [
         ("tokens", 120)

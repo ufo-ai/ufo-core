@@ -96,7 +96,7 @@ from ufo.runtime.workspace import (
 from ufo.schema import tables
 from ufo.schema.records import SUBAGENT_SURFACE, Usage
 
-MODEL = "claude-opus-4-8"
+MODEL = "claude-opus-5-5"
 JOB = "memory:memory_consolidate"
 
 
@@ -114,7 +114,7 @@ async def _workspace() -> UUID:
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -377,7 +377,7 @@ async def test_an_allowed_background_call_forgets_the_spend_refusal_mark(db: Non
     )
     store = ScopedStore(extension=CORE_EXTENSION)
     mark = spend_refusal_notice_key(MODEL)
-    held = spend_refusal_notice_key("gpt-5.6-luna")
+    held = spend_refusal_notice_key("gpt-6-luna")
     with ws(workspace_id):
         await store.put(mark, PARK)
         await store.put(held, PARK)
@@ -1405,7 +1405,7 @@ async def test_an_extension_reads_what_the_gates_alone_decide_now(db: None) -> N
         await store.put(workspace_id, "anthropic_api_key", "workspace-key")
         assert (await context.spend_admitted()).outcome == "allow"
         assert (await context.spend_admitted(MODEL)).outcome == "allow"
-        assert await context.spend_admitted("gpt-5.6-luna") == refused
+        assert await context.spend_admitted("gpt-6-luna") == refused
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1461,4 +1461,4 @@ async def test_spend_rollup_reads_the_bound_workspaces_totals_naming_no_member_o
     assert totals == SpendTotals(
         None, report.total_micro_usd, report.by_dimension, report.by_service, report.usage
     )
-    assert totals.by_service == (ServiceTotal("models", 5_084), ServiceTotal("proxy", 0))
+    assert totals.by_service == (ServiceTotal("models", 4_084), ServiceTotal("proxy", 0))

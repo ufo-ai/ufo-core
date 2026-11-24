@@ -94,7 +94,7 @@ async def _agent_row(workspace_id: UUID, name: str) -> UUID:
                 workspace_id=workspace_id,
                 name=name,
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=True,
                 visibility="workspace",
                 internet_access_allowed=True,

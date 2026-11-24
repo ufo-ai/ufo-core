@@ -221,13 +221,13 @@ async def _member(workspace_id: UUID, created_at: datetime) -> UUID:
     return member_id
 
 
-FABLE_MODEL = "anthropic/claude-fable-5"
+FABLE_MODEL = "anthropic/claude-fable-5-2"
 
 DEPLOY_MODELS = (
     "auto",
-    "claude-opus-4-8",
-    "claude-opus-5",
-    "claude-sonnet-5",
+    "claude-opus-5-5",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
     FABLE_MODEL,
     "m2",
     "m3",
@@ -237,7 +237,7 @@ DEPLOY_MODELS = (
 def _tool_context(
     workspace_id: UUID,
     speaker_member_id: UUID | None = None,
-    agent_model: str = "claude-opus-4-8",
+    agent_model: str = "claude-opus-5-5",
     agent_id: UUID | None = None,
     model_specs: Mapping[str, ModelSpec] | None = None,
     auto_model: str = "auto",
@@ -1032,7 +1032,7 @@ async def _agent_row(
     workspace_id: UUID,
     name: str = "assistant",
     prompt: str = "be brief",
-    model: str = "claude-opus-4-8",
+    model: str = "claude-opus-5-5",
     internet_access_allowed: bool = True,
     reasoning: str = "high",
     *,
@@ -1079,7 +1079,7 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
             await _text(tools, "object_get", owner_ctx, ref=f"{AGENT_KIND}/assistant")
         )
         assert fetched["spec"] == {
-            "model": "claude-opus-4-8",
+            "model": "claude-opus-5-5",
             "internet_access_allowed": True,
             "use_workspace_skills": True,
             "reasoning": "high",
@@ -1242,7 +1242,7 @@ async def test_agent_kind_visibility_widens_and_main_stays_workspace(db: None) -
                 "kind": AGENT_KIND,
                 "name": "research",
                 "spec": {
-                    "model": "claude-opus-4-8",
+                    "model": "claude-opus-5-5",
                     "internet_access_allowed": True,
                     "reasoning": "high",
                     "visibility": "workspace",
@@ -1274,7 +1274,7 @@ async def test_agent_kind_visibility_widens_and_main_stays_workspace(db: None) -
                         "kind": AGENT_KIND,
                         "name": "ufo",
                         "spec": {
-                            "model": "claude-opus-4-8",
+                            "model": "claude-opus-5-5",
                             "internet_access_allowed": True,
                             "reasoning": "high",
                             "visibility": "private",
@@ -1293,7 +1293,7 @@ async def test_agent_kind_visibility_widens_and_main_stays_workspace(db: None) -
                         "kind": AGENT_KIND,
                         "name": "ufo",
                         "spec": {
-                            "model": "claude-opus-4-8",
+                            "model": "claude-opus-5-5",
                             "internet_access_allowed": True,
                             "reasoning": "high",
                         },
@@ -1500,7 +1500,7 @@ async def test_agent_kind_refuses_an_effort_outside_the_enum(db: None) -> None:
                         "kind": AGENT_KIND,
                         "name": "assistant",
                         "spec": {
-                            "model": "claude-opus-4-8",
+                            "model": "claude-opus-5-5",
                             "internet_access_allowed": True,
                             "reasoning": "turbo",
                         },
@@ -1527,7 +1527,7 @@ async def test_agent_kind_reports_the_model_an_auto_agent_actually_runs(db: None
     with ws(workspace_id):
         owner = await _member(workspace_id, ADMIN_CREATED_AT)
         await _agent_row(workspace_id, model="auto", is_main=True)
-        ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_model="claude-opus-5")
+        ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_model="claude-opus-5-5")
 
         fetched = yaml.safe_load(
             await _text(tools, "object_get", ctx, ref=f"{AGENT_KIND}/assistant")
@@ -1535,8 +1535,8 @@ async def test_agent_kind_reports_the_model_an_auto_agent_actually_runs(db: None
         listing = json.loads(await _text(tools, "object_list", ctx, kind=AGENT_KIND))
 
     assert fetched["spec"]["model"] == "auto"
-    assert fetched["status"]["model"] == "claude-opus-5"
-    assert "claude-opus-5" in listing["objects"][0]["summary"]
+    assert fetched["status"]["model"] == "claude-opus-5-5"
+    assert "claude-opus-5-5" in listing["objects"][0]["summary"]
     assert "auto" not in listing["objects"][0]["summary"]
 
 
@@ -1659,7 +1659,7 @@ async def test_an_owner_or_admin_edits_an_agent_and_anyone_else_is_refused(db: N
                 "kind": AGENT_KIND,
                 "name": "research",
                 "spec": {
-                    "model": "claude-opus-4-8",
+                    "model": "claude-opus-5-5",
                     "internet_access_allowed": True,
                     "reasoning": "high",
                     "prompt": "review the exact request",
@@ -1758,7 +1758,7 @@ async def test_an_owner_or_admin_edits_an_agent_and_anyone_else_is_refused(db: N
                                 "kind": AGENT_KIND,
                                 "name": "ufo",
                                 "spec": {
-                                    "model": "claude-opus-4-8",
+                                    "model": "claude-opus-5-5",
                                     "internet_access_allowed": True,
                                     "reasoning": "high",
                                     "prompt": "rewrite the main agent",
@@ -1847,7 +1847,7 @@ async def _workspace_context(
         sandbox=SandboxSession(carrier=carrier, handle=handle),
         blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path / "blobs")),
         turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=_unavailable_spawn,
         speaker_member_id=speaker_member_id or turn.speaker_member_id,
         audience=audience,
@@ -4145,7 +4145,7 @@ async def test_an_agent_write_refuses_a_model_the_deploy_does_not_serve(db: None
         owner = await _member(workspace_id, ADMIN_CREATED_AT)
         ctx = _tool_context(workspace_id, speaker_member_id=owner)
         good = AgentSpec(
-            model="claude-opus-4-8",
+            model="claude-opus-5-5",
             internet_access_allowed=False,
             reasoning="auto",
             prompt="be brief",
@@ -4162,7 +4162,7 @@ async def test_an_agent_write_refuses_a_model_the_deploy_does_not_serve(db: None
                     sa.select(tables.agent.c.model).where(tables.agent.c.name == "typo-agent")
                 )
             ).scalar_one()
-        assert stored == "claude-opus-4-8"
+        assert stored == "claude-opus-5-5"
 
 
 async def test_an_agent_write_refuses_off_reasoning_for_a_required_reasoning_model(
@@ -4170,7 +4170,7 @@ async def test_an_agent_write_refuses_off_reasoning_for_a_required_reasoning_mod
 ) -> None:
     workspace_id = await _workspace()
     fable = replace(
-        next(spec for spec in core_model_specs("", "") if spec.id == "claude-opus-5"),
+        next(spec for spec in core_model_specs("", "") if spec.id == "claude-opus-5-5"),
         id=FABLE_MODEL,
         reasoning=ReasoningSupport(
             supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
@@ -4202,7 +4202,7 @@ async def test_an_agent_write_refuses_off_reasoning_for_a_required_reasoning_mod
                 ctx, "auto-fable-agent", auto_invalid, None, expected_generation=None
             )
         await AgentObjects().apply(
-            replace(ctx, auto_model="claude-opus-5"),
+            replace(ctx, auto_model="claude-opus-5-5"),
             "auto-opus-agent",
             auto_invalid,
             None,
@@ -5682,7 +5682,7 @@ async def test_delete_archives_an_app_frees_its_name_and_restore_returns_the_sam
                         "kind": AGENT_KIND,
                         "name": "invoice-intake",
                         "spec": {
-                            "model": "claude-opus-4-8",
+                            "model": "claude-opus-5-5",
                             "internet_access_allowed": True,
                             "reasoning": "high",
                             "prompt": "read the invoices again",
@@ -5747,7 +5747,7 @@ async def test_a_restore_is_refused_a_name_a_live_app_answers_to(db: None) -> No
                     "kind": AGENT_KIND,
                     "name": "invoice-intake",
                     "spec": {
-                        "model": "claude-opus-4-8",
+                        "model": "claude-opus-5-5",
                         "internet_access_allowed": True,
                         "reasoning": "high",
                         "prompt": "read the invoices again",

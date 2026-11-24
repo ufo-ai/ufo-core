@@ -89,35 +89,29 @@ def _openai(
 
 
 def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[ModelSpec, ...]:
-    """Core's direct backends, built with the key-env names the deploy configured. The GPT-5.6
-    models are called on the Responses surface (`api_surface="responses"`) — each rejects `tools` +
-    `reasoning_effort` together on `/v1/chat/completions`, so they declare the surface that
-    renders the legal request rather than tripping a mid-turn 400 — with 30-minute cache writes at
-    1.25x base input and cache reads at 0.1x. `claude-opus-5-5` and `claude-opus-5` carry the
-    1M-token context window they ship with: Opus 5 at Opus-tier pricing unchanged from Opus 4.8,
-    Opus 5.5 at $4/$20 per Mtok with cache reads at 0.05x base input. Anthropic cache writes are
-    1.25x base input at 5m and 2x at 1h; cache reads are 0.1x of input, except `claude-opus-5-5`
-    at 0.05x. `claude-opus-5-5` and `claude-sonnet-5-5` refuse both `thinking: disabled` and a
-    forced tool choice with a 400, so they declare reasoning they cannot disable and no forced
-    choice. `claude-haiku-5-5` joined on October 7 at $0.10/$0.50 per Mtok with the standard
-    Anthropic cache multipliers, adaptive thinking on by default, and a forced tool choice it
-    accepts. `gpt-6-astra` is called on the same
-    Responses surface, which is where OpenAI serves its tool and computer use, at $10/$50 per Mtok
-    with cache reads at 0.1x and 30-minute cache writes at 1.25x base input. `gpt-6-sol` and
-    `gpt-6-luna` joined the same surface on September 22 at half their GPT-5.6 predecessors' prices:
-    Sol at $2/$10 per Mtok and Luna at $0.10/$0.50, both permanent rates, with the same cache-read
-    0.1x and 30-minute cache-write 1.25x multipliers. `gpt-6.1-sol` joined on September 29 at
-    GPT-6 Sol's $2/$10 per Mtok, with cached input at $0.10 (0.05x base input) and the same 1.25x
-    cache-write multiplier.
+    """Core's direct backends, built with the key-env names the deploy configured. Anthropic cache
+    writes cost 1.25x base input at 5m and 2x at 1h. Cache reads cost 0.1x input except on Opus 5.5
+    and Fable 5.2, where they cost 0.05x and 0.025x. The current Opus, Sonnet, and Fable models
+    require reasoning and reject forced tool choice. Haiku 5.5 defaults to reasoning but permits
+    both disabling it and forcing one tool.
 
-    The GPT-5.6 family, the GPT-6 family, and `gpt-6-astra` accept 1,050,000 tokens, but a
-    request whose input passes 272,000 is billed at 2x input and 1.5x output for the whole
-    request, which one rate per token class cannot express. `context_window` is what the turn
-    loop compacts against, so these rows carry the 272,000 the registered rate is true at rather
-    than the window the provider accepts: a larger number would let a turn grow into a tier this
-    table bills at half price. `claude-haiku-5-5` accepts 1M tokens but bills a prompt over
-    100,000 at 5x every rate, so its row carries the 100,000 its registered rate is true at."""
+    OpenAI's current Astra, Sol, Terra, and Luna models run on the Responses surface. Cached input
+    costs 0.05x base input for Astra, Sol, and Terra, and 0.1x for Luna. A 30-minute cache write
+    costs 1.25x base input. Each accepts 1,050,000
+    tokens, but a prompt at or above 272,000 is billed at 2x input and 1.5x output. One rate per
+    token class cannot express that tier, so these rows carry the 272,000-token window where their
+    registered rate is true. Haiku 5.5 similarly carries the 100,000-token window below its 5x
+    long-context tier rather than the full 1M tokens it accepts."""
     return (
+        _anthropic(
+            "claude-fable-5-2",
+            ModelPrice(8_000_000, 40_000_000, 200_000, 10_000_000, 16_000_000),
+            "2026-06",
+            anthropic_key_env,
+            context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
+            reasoning=REQUIRED_REASONS_WITH_TOOLS,
+            forced_tool_choice=False,
+        ),
         _anthropic(
             "claude-opus-5-5",
             ModelPrice(4_000_000, 20_000_000, 200_000, 5_000_000, 8_000_000),
@@ -128,51 +122,13 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
             forced_tool_choice=False,
         ),
         _anthropic(
-            "claude-opus-5",
-            ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000),
-            "2026-05",
-            anthropic_key_env,
-            context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
-            reasoning=DEFAULT_REASONS_WITH_TOOLS,
-        ),
-        _anthropic(
-            "claude-opus-4-8",
-            ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000),
-            "2026-01",
-            anthropic_key_env,
-        ),
-        _anthropic(
-            "claude-opus-4-7",
-            ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000),
-            "2026-01",
-            anthropic_key_env,
-        ),
-        _anthropic(
-            "claude-opus-4-6",
-            ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000),
-            "2025-08",
-            anthropic_key_env,
-        ),
-        _anthropic(
             "claude-sonnet-5-5",
             ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000),
-            "2026-05",
+            "2026-06",
             anthropic_key_env,
+            context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
             reasoning=REQUIRED_REASONS_WITH_TOOLS,
             forced_tool_choice=False,
-        ),
-        _anthropic(
-            "claude-sonnet-5",
-            ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000),
-            "2026-01",
-            anthropic_key_env,
-            reasoning=DEFAULT_REASONS_WITH_TOOLS,
-        ),
-        _anthropic(
-            "claude-sonnet-4-6",
-            ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000, 6_000_000),
-            "2025-08",
-            anthropic_key_env,
         ),
         _anthropic(
             "claude-haiku-5-5",
@@ -182,84 +138,33 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
             context_window=HAIKU_5_5_LOWER_TIER_WINDOW,
             reasoning=DEFAULT_REASONS_WITH_TOOLS,
         ),
-        _anthropic(
-            "claude-haiku-4-5",
-            ModelPrice(1_000_000, 5_000_000, 100_000, 1_250_000, 2_000_000),
-            "2025-07",
-            anthropic_key_env,
-        ),
         _openai(
-            "gpt-6-astra",
-            ModelPrice(10_000_000, 50_000_000, 1_000_000, 0, 0, 12_500_000),
-            "2026-04",
+            "gpt-6.2-astra",
+            ModelPrice(8_000_000, 40_000_000, 400_000, 0, 0, 10_000_000),
+            "2026-05",
             openai_key_env,
             api_surface="responses",
         ),
         _openai(
-            "gpt-6.1-sol",
+            "gpt-6.2-sol",
             ModelPrice(2_000_000, 10_000_000, 100_000, 0, 0, 2_500_000),
-            "2026-04",
+            "2026-06",
             openai_key_env,
             api_surface="responses",
         ),
         _openai(
-            "gpt-6-sol",
-            ModelPrice(2_000_000, 10_000_000, 200_000, 0, 0, 2_500_000),
-            "2026-09",
+            "gpt-6.1-terra",
+            ModelPrice(1_000_000, 5_000_000, 50_000, 0, 0, 1_250_000),
+            "2026-06",
             openai_key_env,
             api_surface="responses",
         ),
         _openai(
             "gpt-6-luna",
             ModelPrice(100_000, 500_000, 10_000, 0, 0, 125_000),
-            "2026-09",
+            "2026-05",
             openai_key_env,
             api_surface="responses",
-        ),
-        _openai(
-            "gpt-5.6-sol",
-            ModelPrice(4_000_000, 20_000_000, 400_000, 0, 0, 5_000_000),
-            "2026-02",
-            openai_key_env,
-            api_surface="responses",
-        ),
-        _openai(
-            "gpt-5.6-terra",
-            ModelPrice(2_000_000, 12_000_000, 200_000, 0, 0, 2_500_000),
-            "2026-02",
-            openai_key_env,
-            api_surface="responses",
-        ),
-        _openai(
-            "gpt-5.6-luna",
-            ModelPrice(200_000, 1_200_000, 20_000, 0, 0, 250_000),
-            "2026-02",
-            openai_key_env,
-            api_surface="responses",
-        ),
-        _openai(
-            "gpt-5.5",
-            ModelPrice(5_000_000, 30_000_000, 500_000, 5_000_000, 5_000_000),
-            "2025-12",
-            openai_key_env,
-        ),
-        _openai(
-            "gpt-5.4",
-            ModelPrice(2_500_000, 15_000_000, 250_000, 2_500_000, 2_500_000),
-            "2025-08",
-            openai_key_env,
-        ),
-        _openai(
-            "gpt-5.4-mini",
-            ModelPrice(750_000, 4_500_000, 75_000, 750_000, 750_000),
-            "2025-08",
-            openai_key_env,
-        ),
-        _openai(
-            "gpt-5.4-nano",
-            ModelPrice(200_000, 1_250_000, 20_000, 200_000, 200_000),
-            "2025-08",
-            openai_key_env,
         ),
     )
 

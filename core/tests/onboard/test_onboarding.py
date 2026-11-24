@@ -44,7 +44,7 @@ from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, MAIN_AGENT_ICON, ReasoningEffort
 
 OWNER_EMAIL = "owner@example.com"
-DEFAULT_MODEL = "claude-opus-4-8"
+DEFAULT_MODEL = "claude-opus-5-5"
 
 
 def _onboarding(

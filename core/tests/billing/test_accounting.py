@@ -73,7 +73,7 @@ UNCACHED_USAGE = Usage(input_tokens=50_000, output_tokens=200)
 
 def test_priced_micro_usd_matches_hand_math() -> None:
     usage = Usage(input_tokens=1000, output_tokens=2000)
-    assert CORE_PRICING.micro_usd("claude-opus-4-8", usage) == 55_000
+    assert CORE_PRICING.micro_usd("claude-opus-5-5", usage) == 44_000
 
 
 def test_cache_tokens_are_priced() -> None:
@@ -82,7 +82,7 @@ def test_cache_tokens_are_priced() -> None:
         cache_write_5m_tokens=1_000_000,
         cache_write_1h_tokens=1_000_000,
     )
-    assert CORE_PRICING.micro_usd("claude-opus-4-8", usage) == 16_750_000
+    assert CORE_PRICING.micro_usd("claude-opus-5-5", usage) == 13_200_000
 
 
 def test_anthropic_cache_writes_are_priced_at_their_ttl_rates() -> None:
@@ -98,11 +98,11 @@ def test_anthropic_cache_writes_are_priced_at_their_ttl_rates() -> None:
 
 
 def test_sub_micro_usd_floors() -> None:
-    assert CORE_PRICING.micro_usd("claude-haiku-4-5", Usage(cache_read_tokens=9)) == 0
+    assert CORE_PRICING.micro_usd("claude-haiku-5-5", Usage(cache_read_tokens=9)) == 0
 
 
 def test_price_digest_changes_when_price_table_changes() -> None:
-    changed = {**CORE_PRICES, "claude-opus-4-8": ModelPrice(1, 1, 1, 1, 1)}
+    changed = {**CORE_PRICES, "claude-opus-5-5": ModelPrice(1, 1, 1, 1, 1)}
     assert price_digest(changed) != PRICE_DIGEST
 
 
@@ -113,7 +113,7 @@ def test_pricing_from_prices_a_contributed_model() -> None:
         pricing.micro_usd("vendor/model-x", Usage(input_tokens=1_000_000, output_tokens=1_000_000))
         == 3_000_000
     )
-    assert pricing.micro_usd("claude-opus-4-8", Usage(input_tokens=1_000_000)) == 5_000_000
+    assert pricing.micro_usd("claude-opus-5-5", Usage(input_tokens=1_000_000)) == 4_000_000
     assert pricing.digest != CORE_PRICING.digest
 
 
@@ -145,20 +145,20 @@ async def test_a_large_turn_that_cached_nothing_warns(
         workspace_id, turn_id = await _seed_turn(connection)
         with caplog.at_level(logging.WARNING, logger="ufo"):
             await UNGATED_LEDGER.record_turn_usage(
-                connection, workspace_id, turn_id, "claude-opus-4-8", UNCACHED_USAGE
+                connection, workspace_id, turn_id, "claude-opus-5-5", UNCACHED_USAGE
             )
 
     record = caplog.records[-1]
     assert record.message == "accounting.uncached_prompt"
-    assert record.ufo["model"] == "claude-opus-4-8"
+    assert record.ufo["model"] == "claude-opus-5-5"
     assert record.ufo["prompt_tokens"] == 50_000
 
 
 @pytest.mark.parametrize(
     ("model", "usage"),
     [
-        ("claude-opus-4-8", UNCACHED_USAGE.model_copy(update={"cache_write_5m_tokens": 50_000})),
-        ("claude-opus-4-8", Usage(input_tokens=1_000, output_tokens=10)),
+        ("claude-opus-5-5", UNCACHED_USAGE.model_copy(update={"cache_write_5m_tokens": 50_000})),
+        ("claude-opus-5-5", Usage(input_tokens=1_000, output_tokens=10)),
         ("gpt-4o", UNCACHED_USAGE),
     ],
 )
@@ -205,7 +205,7 @@ async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:
             workspace_id=workspace_id,
             name="assistant",
             prompt="p",
-            model="claude-opus-4-8",
+            model="claude-opus-5-5",
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
@@ -266,7 +266,7 @@ async def _seed_workspace_turn(
             workspace_id=workspace_id,
             name="assistant",
             prompt="p",
-            model="claude-opus-4-8",
+            model="claude-opus-5-5",
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
@@ -312,16 +312,16 @@ async def test_member_usage_follows_the_turns_member_not_the_conversations(
     async with workspace_tx() as connection:
         workspace_id, member_id, turn_id = await _seed_workspace_turn(connection, spoken=spoken)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, 3600)
         own = await SpendRollup(workspace_id).read_member(connection, member_id, 3600)
-    assert report.total_micro_usd == 96_500
+    assert report.total_micro_usd == 76_600
     assert [(s.label, s.priced_micro_usd) for s in report.by_member] == (
-        [("a@b.c", 96_500)] if spoken else []
+        [("a@b.c", 76_600)] if spoken else []
     )
-    assert own.total_micro_usd == (96_500 if spoken else 0)
+    assert own.total_micro_usd == (76_600 if spoken else 0)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -329,7 +329,7 @@ async def test_record_then_read_back(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
     async with workspace_tx() as connection:
         cost = await read_turn_cost(connection, turn_id, TOKENS_DIMENSION)
@@ -347,7 +347,7 @@ async def test_record_then_read_back(db: None) -> None:
             )
         ).one()
     assert cost == TurnCost(
-        tokens=10_000, micro_usd=96_500, model="claude-opus-4-8", cache_percent=38
+        tokens=10_000, micro_usd=76_600, model="claude-opus-5-5", cache_percent=38
     )
     assert tuple(ledger) == (1000, 2000, 3000, 0, 0, 4000, False)
 
@@ -360,7 +360,7 @@ async def test_ledger_freezes_the_serving_byok_decision(db: None) -> None:
             connection,
             workspace_id,
             turn_id,
-            "claude-opus-4-8",
+            "claude-opus-5-5",
             Usage(input_tokens=100),
             byok=True,
         )
@@ -391,7 +391,7 @@ async def test_a_parked_then_resumed_turn_reads_back_as_one_spend(db: None) -> N
                 connection,
                 workspace_id,
                 turn_id,
-                "claude-opus-4-8",
+                "claude-opus-5-5",
                 usage,
                 attempt,
             )
@@ -417,9 +417,9 @@ async def test_a_parked_then_resumed_turn_reads_back_as_one_spend(db: None) -> N
         ledger_id_for(workspace_id, turn_id, TOKENS_DIMENSION, attempt)
         for attempt in ("parked-run", "resumed-run")
     }
-    assert tuple(int(total) for total in totals) == (2_200, 9_200, 2_000, 1_400)
+    assert tuple(int(total) for total in totals) == (2_200, 7_080, 2_000, 1_400)
     assert cost == TurnCost(
-        tokens=2_200, micro_usd=9_200, model="claude-opus-4-8", cache_percent=70
+        tokens=2_200, micro_usd=7_080, model="claude-opus-5-5", cache_percent=70
     )
 
 
@@ -428,7 +428,7 @@ async def test_ledger_insert_stamps_current_price_digest(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
     async with workspace_tx() as connection:
         stamped = (
@@ -444,10 +444,10 @@ async def test_replay_leaves_one_row(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
     async with workspace_tx() as connection:
         count = (
@@ -485,10 +485,10 @@ async def test_sandbox_tokens_row_is_disjoint_from_the_host_token_row(db: None) 
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
         await UNGATED_LEDGER.record_sandbox_tokens(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
     async with workspace_tx() as connection:
         rows = (
@@ -509,12 +509,12 @@ async def test_sandbox_tokens_row_is_disjoint_from_the_host_token_row(db: None) 
         row.dimension: (int(row.amount), int(row.priced_micro_usd), row.price_digest)
         for row in rows
     } == {
-        "sandbox_tokens": (10_000, 96_500, PRICE_DIGEST),
-        "tokens": (10_000, 96_500, PRICE_DIGEST),
+        "sandbox_tokens": (10_000, 76_600, PRICE_DIGEST),
+        "tokens": (10_000, 76_600, PRICE_DIGEST),
     }
     assert len({row.id for row in rows}) == 2
     assert cost == TurnCost(
-        tokens=10_000, micro_usd=96_500, model="claude-opus-4-8", cache_percent=38
+        tokens=10_000, micro_usd=76_600, model="claude-opus-5-5", cache_percent=38
     )
 
 
@@ -524,10 +524,10 @@ async def test_sandbox_tokens_accumulate_into_one_row(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_sandbox_tokens(
-            connection, workspace_id, turn_id, "claude-opus-4-8", usage
+            connection, workspace_id, turn_id, "claude-opus-5-5", usage
         )
         await UNGATED_LEDGER.record_sandbox_tokens(
-            connection, workspace_id, turn_id, "claude-opus-4-8", usage
+            connection, workspace_id, turn_id, "claude-opus-5-5", usage
         )
     async with workspace_tx() as connection:
         row = (
@@ -542,7 +542,7 @@ async def test_sandbox_tokens_accumulate_into_one_row(db: None) -> None:
     assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == (
         "sandbox_tokens",
         6000,
-        110_000,
+        88_000,
     )
 
 
@@ -554,7 +554,7 @@ async def test_sandbox_rows_from_both_proxy_shapes_roll_up_and_export_once(db: N
             connection,
             workspace_id,
             turn_id,
-            "claude-opus-4-8",
+            "claude-opus-5-5",
             Usage(input_tokens=100),
         )
         old_id = ledger_id_for(workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION)
@@ -567,7 +567,7 @@ async def test_sandbox_rows_from_both_proxy_shapes_roll_up_and_export_once(db: N
                 amount=50,
                 prompt_tokens=50,
                 priced_micro_usd=0,
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -674,7 +674,7 @@ async def test_images_are_disjoint_from_the_turns_token_bill(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
         await UNGATED_LEDGER.record_image_usage(
             connection, workspace_id, turn_id, "openai/gpt-image-2", 1, 130_000
@@ -692,7 +692,7 @@ async def test_images_are_disjoint_from_the_turns_token_bill(db: None) -> None:
     assert len({row.id for row in rows}) == 2
     assert {row.dimension for row in rows} == {"tokens", "images"}
     assert tokens == TurnCost(
-        tokens=10_000, micro_usd=96_500, model="claude-opus-4-8", cache_percent=38
+        tokens=10_000, micro_usd=76_600, model="claude-opus-5-5", cache_percent=38
     )
     assert images == TurnCost(
         tokens=1, micro_usd=130_000, model="openai/gpt-image-2", cache_percent=0
@@ -704,21 +704,21 @@ async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
         await record_egress_request(connection, workspace_id, turn_id)
         await record_egress_request(connection, workspace_id, turn_id)
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, 3600)
-    assert report.total_micro_usd == 96_500
+    assert report.total_micro_usd == 76_600
     assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
         "egress": (2, 0),
-        "tokens": (10_000, 96_500),
+        "tokens": (10_000, 76_600),
     }
-    assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 96_500)]
-    assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 96_500)]
+    assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 76_600)]
+    assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 76_600)]
     assert [(p.price_digest, p.priced_micro_usd) for p in report.by_price_digest] == [
-        (PRICE_DIGEST, 96_500)
+        (PRICE_DIGEST, 76_600)
     ]
 
 
@@ -728,7 +728,7 @@ async def test_spend_rollup_totals_each_service_over_the_dimensions_it_meters(db
         workspace_id, turn_id = await _seed_turn(connection)
         await record_egress_request(connection, workspace_id, turn_id)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
         await UNGATED_LEDGER.record_image_usage(
             connection, workspace_id, turn_id, "openai/gpt-image-2", 1, 130_000
@@ -736,7 +736,7 @@ async def test_spend_rollup_totals_each_service_over_the_dimensions_it_meters(db
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, None)
     assert report.by_service == (
-        ServiceTotal("models", 96_500 + 130_000),
+        ServiceTotal("models", 76_600 + 130_000),
         ServiceTotal("proxy", 0),
     )
 
@@ -746,7 +746,7 @@ async def test_spend_rollup_lists_a_costlier_service_first(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
         await connection.execute(
             sa.insert(tables.ledger).values(
@@ -763,7 +763,7 @@ async def test_spend_rollup_lists_a_costlier_service_first(db: None) -> None:
         )
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, None)
-    assert report.by_service == (ServiceTotal("proxy", 100_000), ServiceTotal("models", 96_500))
+    assert report.by_service == (ServiceTotal("proxy", 100_000), ServiceTotal("models", 76_600))
 
 
 def test_every_ledger_dimension_belongs_to_a_service() -> None:
@@ -826,7 +826,7 @@ async def _seed_job_spend(
 ) -> None:
     for offset, age in enumerate(ages, start=1):
         await UNGATED_LEDGER.record_workspace_usage(
-            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=offset * 100)
+            connection, workspace_id, "claude-opus-5-5", Usage(input_tokens=offset * 100)
         )
         await connection.execute(
             sa.update(tables.ledger)
@@ -847,7 +847,7 @@ async def test_folding_job_days_leaves_every_usage_answer_unchanged(db: None) ->
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
         await _seed_job_spend(
             connection,
@@ -955,20 +955,20 @@ async def test_spend_by_origin_gathers_a_subagents_burn_under_the_channel(db: No
             .values(surface="slack", surface_label="#eng")
         )
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
         child_turn = await _spawn_child_turn(connection, workspace_id, turn_id)
         grandchild = await _spawn_child_turn(connection, workspace_id, child_turn)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, child_turn, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, child_turn, "claude-opus-5-5", FULL_USAGE
         )
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, grandchild, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, grandchild, "claude-opus-5-5", FULL_USAGE
         )
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, 3600)
     assert [(o.surface, o.label, o.tokens, o.priced_micro_usd) for o in report.by_origin] == [
-        ("slack", "#eng", 30_000, 289_500)
+        ("slack", "#eng", 30_000, 229_800)
     ]
 
 
@@ -977,10 +977,10 @@ async def test_spend_by_origin_names_an_unlabelled_surface_and_a_turnless_job(db
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
         await UNGATED_LEDGER.record_workspace_usage(
-            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=1000)
+            connection, workspace_id, "claude-opus-5-5", Usage(input_tokens=1000)
         )
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, 3600)
@@ -1003,21 +1003,21 @@ async def test_spend_by_origin_totals_every_row_of_a_turn_and_of_the_jobs(db: No
         )
         for attempt in ("parked-run", "resumed-run"):
             await UNGATED_LEDGER.record_turn_usage(
-                connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE, attempt
+                connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE, attempt
             )
         child_turn = await _spawn_child_turn(connection, workspace_id, turn_id)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, child_turn, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, child_turn, "claude-opus-5-5", FULL_USAGE
         )
         for _ in range(2):
             await UNGATED_LEDGER.record_workspace_usage(
-                connection, workspace_id, "claude-opus-4-8", FULL_USAGE
+                connection, workspace_id, "claude-opus-5-5", FULL_USAGE
             )
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, 3600)
     assert [(o.surface, o.label, o.tokens, o.priced_micro_usd) for o in report.by_origin] == [
-        ("slack", "#eng", 30_000, 289_500),
-        (None, "Workspace jobs", 20_000, 193_000),
+        ("slack", "#eng", 30_000, 229_800),
+        (None, "Workspace jobs", 20_000, 153_200),
     ]
 
 
@@ -1026,11 +1026,11 @@ async def test_usage_details_report_history_models_execution_and_all_time(db: No
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
         child_turn = await _spawn_child_turn(connection, workspace_id, turn_id)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, child_turn, "gpt-5.6-terra", OPENAI_FULL_USAGE
+            connection, workspace_id, child_turn, "gpt-6.1-terra", OPENAI_FULL_USAGE
         )
         await connection.execute(
             sa.insert(tables.ledger).values(
@@ -1042,7 +1042,7 @@ async def test_usage_details_report_history_models_execution_and_all_time(db: No
                 prompt_tokens=7,
                 input_tokens=7,
                 priced_micro_usd=100,
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=datetime.now(UTC) - timedelta(minutes=90),
                 updated_at=sa.func.now(),
             )
@@ -1050,9 +1050,9 @@ async def test_usage_details_report_history_models_execution_and_all_time(db: No
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, 3600)
     assert report.usage.selected.tokens == 20_000
-    assert report.usage.selected.token_micro_usd == 96_500 + 36_600
+    assert report.usage.selected.token_micro_usd == 76_600 + 16_150
     assert report.usage.all_time.tokens == 20_007
-    assert report.usage.all_time.total_micro_usd == 96_500 + 36_600 + 100
+    assert report.usage.all_time.total_micro_usd == 76_600 + 16_150 + 100
     assert report.usage.previous_tokens == 7
     assert report.usage.first_used_at is not None
     assert sum(day.tokens for day in report.usage.daily) == 20_000
@@ -1061,8 +1061,8 @@ async def test_usage_details_report_history_models_execution_and_all_time(db: No
         ("research", 10_000),
     ]
     assert [(row.label, row.tokens) for row in report.usage.by_model] == [
-        ("claude-opus-4-8", 10_000),
-        ("gpt-5.6-terra", 10_000),
+        ("claude-opus-5-5", 10_000),
+        ("gpt-6.1-terra", 10_000),
     ]
 
 
@@ -1072,11 +1072,11 @@ async def test_spend_totals_answer_what_the_rollup_reports_for_the_workspace(db:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
         child_turn = await _spawn_child_turn(connection, workspace_id, turn_id)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, child_turn, "gpt-5.6-terra", OPENAI_FULL_USAGE
+            connection, workspace_id, child_turn, "gpt-6.1-terra", OPENAI_FULL_USAGE
         )
         await UNGATED_LEDGER.record_image_usage(
             connection, workspace_id, turn_id, "openai/gpt-image-2", 1, 130_000
@@ -1117,7 +1117,7 @@ async def test_spend_rollup_reads_each_report_in_a_bounded_statement_count(db: N
             )
         ).scalar_one()
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
     async with workspace_tx() as connection:
         statements: list[str] = []
@@ -1169,7 +1169,7 @@ async def test_spend_rollup_reads_each_report_in_a_bounded_statement_count(db: N
     assert "ledger.created_at >=" in member_scope
     assert workspace.usage == member.usage
     assert workspace.usage.selected.tokens == 10_000
-    assert workspace.usage.by_execution == (accounting.UsageBreakdown("", 10_000, 96_500),)
+    assert workspace.usage.by_execution == (accounting.UsageBreakdown("", 10_000, 76_600),)
     assert all_time.usage.previous_tokens is None
 
 
@@ -1178,24 +1178,24 @@ async def test_workspace_usage_counts_in_total_not_member_or_agent(db: None) -> 
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, turn_id, "claude-opus-5-5", FULL_USAGE
         )
         await UNGATED_LEDGER.record_workspace_usage(
-            connection, workspace_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, "claude-opus-5-5", FULL_USAGE
         )
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, 3600)
-    assert report.total_micro_usd == 96_500 * 2
+    assert report.total_micro_usd == 76_600 * 2
     assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
-        "tokens": (20_000, 96_500 * 2)
+        "tokens": (20_000, 76_600 * 2)
     }
-    assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 96_500)]
+    assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 76_600)]
     assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [
-        ("assistant", 96_500),
-        ("Workspace jobs", 96_500),
+        ("assistant", 76_600),
+        ("Workspace jobs", 76_600),
     ]
     assert [(p.price_digest, p.priced_micro_usd) for p in report.by_price_digest] == [
-        (PRICE_DIGEST, 96_500 * 2)
+        (PRICE_DIGEST, 76_600 * 2)
     ]
 
 
@@ -1214,7 +1214,7 @@ async def test_spend_rollup_excludes_ledger_outside_the_window(db: None) -> None
                 prompt_tokens=10,
                 input_tokens=10,
                 priced_micro_usd=100,
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=old,
                 updated_at=sa.func.now(),
             )
@@ -1284,21 +1284,21 @@ async def test_member_spend_reads_only_that_members_turns_and_caps(db: None) -> 
                 )
             )
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, mine, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, mine, "claude-opus-5-5", FULL_USAGE
         )
         await record_egress_request(connection, workspace_id, mine)
         await UNGATED_LEDGER.record_turn_usage(
-            connection, workspace_id, theirs, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, theirs, "claude-opus-5-5", FULL_USAGE
         )
         await UNGATED_LEDGER.record_turn_usage(
             connection,
             workspace_id,
             subagent_turn,
-            "claude-opus-4-8",
+            "claude-opus-5-5",
             FULL_USAGE,
         )
         await UNGATED_LEDGER.record_workspace_usage(
-            connection, workspace_id, "claude-opus-4-8", FULL_USAGE
+            connection, workspace_id, "claude-opus-5-5", FULL_USAGE
         )
         for subject_id, limit in ((member_id, 5_000_000), (stranger_id, 9_000_000)):
             await connection.execute(
@@ -1319,14 +1319,14 @@ async def test_member_spend_reads_only_that_members_turns_and_caps(db: None) -> 
         rollup = await SpendRollup(workspace_id).read(connection, 3600)
     assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
         "egress": (1, 0),
-        "tokens": (10_000, 96_500),
+        "tokens": (10_000, 76_600),
     }
-    assert report.total_micro_usd == 96_500
+    assert report.total_micro_usd == 76_600
     assert report.window_seconds == 3600
     assert [(c.window_seconds, c.limit_micro_usd, c.on_breach) for c in report.caps] == [
         (3600, 5_000_000, "park")
     ]
-    assert rollup.total_micro_usd == 96_500 * 4
+    assert rollup.total_micro_usd == 76_600 * 4
 
 
 CONSUMER = "metronome"
@@ -1369,14 +1369,14 @@ async def test_usage_export_settlement_rules(db: None) -> None:
             connection,
             workspace_id,
             turn_id,
-            "claude-opus-4-8",
+            "claude-opus-5-5",
             Usage(input_tokens=1000),
         )
         await UNGATED_LEDGER.record_workspace_usage(
-            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=250)
+            connection, workspace_id, "claude-opus-5-5", Usage(input_tokens=250)
         )
         await UNGATED_LEDGER.record_sandbox_tokens(
-            connection, workspace_id, turn_id, "claude-opus-4-8", Usage(input_tokens=175)
+            connection, workspace_id, turn_id, "claude-opus-5-5", Usage(input_tokens=175)
         )
         await record_egress_request(connection, workspace_id, turn_id)
 
@@ -1444,7 +1444,7 @@ async def test_usage_export_uses_turn_byok_when_ledger_byok_is_null(
                 amount=100,
                 prompt_tokens=100,
                 priced_micro_usd=500,
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1478,7 +1478,7 @@ async def test_usage_export_classifies_background_byok_from_the_stored_key(
                 amount=100,
                 prompt_tokens=100,
                 priced_micro_usd=500,
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1488,7 +1488,7 @@ async def test_usage_export_classifies_background_byok_from_the_stored_key(
             workspace_id,
             CONSUMER,
             datetime.now(UTC) - timedelta(days=7),
-            lambda model: "anthropic_api_key" if model == "claude-opus-4-8" else None,
+            lambda model: "anthropic_api_key" if model == "claude-opus-5-5" else None,
         )
         exported = (
             await connection.execute(
@@ -1505,7 +1505,7 @@ async def test_usage_export_growth_mints_frozen_top_ups(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await UNGATED_LEDGER.record_sandbox_tokens(
-            connection, workspace_id, turn_id, "claude-opus-4-8", Usage(input_tokens=175)
+            connection, workspace_id, turn_id, "claude-opus-5-5", Usage(input_tokens=175)
         )
         await _settle_turn(connection, turn_id, age_seconds=PAST_EXPORT_MARGIN_SECONDS)
     (first,) = await _pending(workspace_id)
@@ -1513,7 +1513,7 @@ async def test_usage_export_growth_mints_frozen_top_ups(db: None) -> None:
 
     async with workspace_tx() as connection:
         await UNGATED_LEDGER.record_sandbox_tokens(
-            connection, workspace_id, turn_id, "claude-opus-4-8", Usage(input_tokens=40)
+            connection, workspace_id, turn_id, "claude-opus-5-5", Usage(input_tokens=40)
         )
         await _settle_turn(connection, turn_id, age_seconds=PAST_EXPORT_MARGIN_SECONDS)
     frozen, top_up = sorted(await _pending(workspace_id), key=lambda e: e.from_amount)
@@ -1534,7 +1534,7 @@ async def test_recovered_turn_usage_growth_mints_a_frozen_top_up(db: None) -> No
             connection,
             workspace_id,
             turn_id,
-            "claude-opus-4-8",
+            "claude-opus-5-5",
             Usage(input_tokens=1000),
             "same-attempt",
         )
@@ -1546,7 +1546,7 @@ async def test_recovered_turn_usage_growth_mints_a_frozen_top_up(db: None) -> No
             connection,
             workspace_id,
             turn_id,
-            "claude-opus-4-8",
+            "claude-opus-5-5",
             Usage(input_tokens=1500),
             "same-attempt",
         )
@@ -1554,7 +1554,7 @@ async def test_recovered_turn_usage_growth_mints_a_frozen_top_up(db: None) -> No
     assert (frozen.from_amount, frozen.amount) == (0, 1000)
     assert (top_up.from_amount, top_up.amount) == (1000, 500)
     assert frozen.priced_micro_usd + top_up.priced_micro_usd == CORE_PRICING.micro_usd(
-        "claude-opus-4-8", Usage(input_tokens=1500)
+        "claude-opus-5-5", Usage(input_tokens=1500)
     )
 
 
@@ -1564,13 +1564,13 @@ async def test_usage_export_floor_consumer_and_workspace_scoping(db: None) -> No
         workspace_id, _ = await _seed_turn(connection)
         other_workspace, _ = await _seed_turn(connection)
         await UNGATED_LEDGER.record_workspace_usage(
-            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=100)
+            connection, workspace_id, "claude-opus-5-5", Usage(input_tokens=100)
         )
         await UNGATED_LEDGER.record_workspace_usage(
-            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=999)
+            connection, workspace_id, "claude-opus-5-5", Usage(input_tokens=999)
         )
         await UNGATED_LEDGER.record_workspace_usage(
-            connection, other_workspace, "claude-opus-4-8", Usage(input_tokens=7)
+            connection, other_workspace, "claude-opus-5-5", Usage(input_tokens=7)
         )
         pre_floor = (
             await connection.execute(
@@ -1623,7 +1623,7 @@ async def test_usage_export_reads_latest_by_consumer_and_ledger(
                     "byok": False,
                     "token_classes_complete": True,
                     "priced_micro_usd": 1,
-                    "model": "claude-opus-4-8",
+                    "model": "claude-opus-5-5",
                     "price_digest": PRICE_DIGEST,
                     "created_at": now,
                     "updated_at": now,
@@ -1663,7 +1663,7 @@ async def test_usage_export_reads_latest_by_consumer_and_ledger(
                 byok=False,
                 token_classes_complete=True,
                 priced_micro_usd=1,
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 price_digest=PRICE_DIGEST,
                 created_at=now,
                 updated_at=now,
@@ -1729,7 +1729,7 @@ async def test_a_recovery_uses_the_model_and_prices_that_started_the_attempt(db:
         _, turn_id = await _seed_turn(connection)
     first = loop_queue._BillingIdentity(
         attempt="attempt-1",
-        model="claude-opus-4-8",
+        model="claude-opus-5-5",
         price_digest="prices-1",
         input=1,
         output=2,
@@ -1748,13 +1748,13 @@ async def test_a_recovery_uses_the_model_and_prices_that_started_the_attempt(db:
                 cache_write_30m=5,
                 cache_write_1h=6,
             )
-            for model in ("claude-sonnet-5", "claude-opus-5")
+            for model in ("claude-sonnet-5-5", "claude-opus-5-5")
         },
-        alternate_order=("claude-sonnet-5", "claude-opus-5"),
+        alternate_order=("claude-sonnet-5-5", "claude-opus-5-5"),
     )
     changed = first.model_copy(
         update={
-            "model": "claude-sonnet-5",
+            "model": "claude-sonnet-5-5",
             "price_digest": "prices-2",
             "input": 10,
         }
@@ -1769,9 +1769,9 @@ async def test_a_recovery_uses_the_model_and_prices_that_started_the_attempt(db:
     assert frozen == first
     assert recovered == first
     assert tuple(route.model for route in recovered.routes()) == (
-        "claude-opus-4-8",
-        "claude-sonnet-5",
-        "claude-opus-5",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-opus-5-5",
     )
     assert resumed == changed.model_copy(update={"attempt": "attempt-2"})
 
@@ -1797,7 +1797,7 @@ async def test_a_recovery_cannot_move_the_frozen_model_to_another_payer(db: None
         registry=cast(ModelRegistry, first_registry),
         turn_id=turn_id,
         attempt="attempt-1",
-        candidates=("claude-opus-4-8",),
+        candidates=("claude-opus-5-5",),
     ).resolve()
 
     recovered_registry = Registry("anthropic_api_key")
@@ -1806,7 +1806,7 @@ async def test_a_recovery_cannot_move_the_frozen_model_to_another_payer(db: None
             registry=cast(ModelRegistry, recovered_registry),
             turn_id=turn_id,
             attempt="attempt-1",
-            candidates=("gpt-5.4",),
+            candidates=("gpt-6.2-astra",),
         ).resolve()
 
     assert (billing.funding, billing.payer, byok) == (
@@ -1814,8 +1814,8 @@ async def test_a_recovery_cannot_move_the_frozen_model_to_another_payer(db: None
         "anthropic_api_key:member:first",
         True,
     )
-    assert first_registry.requested == ["claude-opus-4-8"]
-    assert recovered_registry.requested == ["claude-opus-4-8"]
+    assert first_registry.requested == ["claude-opus-5-5"]
+    assert recovered_registry.requested == ["claude-opus-5-5"]
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1842,7 +1842,7 @@ async def test_an_attempt_freezes_a_rate_and_payer_for_every_model_route(db: Non
         async def payer_for(self, model: str) -> ModelPayer:
             return self.payers[model]
 
-    models = ("gpt-5.6-sol", "claude-opus-5")
+    models = ("gpt-6.2-sol", "claude-opus-5-5")
     keyed_registry = Registry({model: ModelPayer(KEY_FUNDED, "workspace-key") for model in models})
     keyed, _, keyed_byok = await loop_queue._TurnBilling(
         registry=cast(ModelRegistry, keyed_registry),
@@ -1871,8 +1871,8 @@ async def test_an_attempt_freezes_a_rate_and_payer_for_every_model_route(db: Non
             ModelRegistry,
             Registry(
                 {
-                    "gpt-5.6-sol": ModelPayer(PLAN_FUNDED, "member/openai"),
-                    "claude-opus-5": ModelPayer(PLATFORM_FUNDED, PLATFORM_PAYER),
+                    "gpt-6.2-sol": ModelPayer(PLAN_FUNDED, "member/openai"),
+                    "claude-opus-5-5": ModelPayer(PLATFORM_FUNDED, PLATFORM_PAYER),
                 }
             ),
         ),
@@ -1882,22 +1882,22 @@ async def test_an_attempt_freezes_a_rate_and_payer_for_every_model_route(db: Non
     ).resolve()
 
     assert keyed.pricing().prices == {
-        "gpt-5.6-sol": CORE_PRICES["gpt-5.6-sol"],
-        "claude-opus-5": CORE_PRICES["claude-opus-5"],
+        "gpt-6.2-sol": CORE_PRICES["gpt-6.2-sol"],
+        "claude-opus-5-5": CORE_PRICES["claude-opus-5-5"],
     }
     assert keyed.pricing().digest == PRICE_DIGEST
     assert plan.pricing().prices == {
-        "gpt-5.6-sol": loop_queue.PLAN_SERVED_PRICE,
-        "claude-opus-5": loop_queue.PLAN_SERVED_PRICE,
+        "gpt-6.2-sol": loop_queue.PLAN_SERVED_PRICE,
+        "claude-opus-5-5": loop_queue.PLAN_SERVED_PRICE,
     }
     assert plan.pricing().digest != keyed.pricing().digest
     assert mixed.pricing().prices == {
-        "gpt-5.6-sol": loop_queue.PLAN_SERVED_PRICE,
-        "claude-opus-5": CORE_PRICES["claude-opus-5"],
+        "gpt-6.2-sol": loop_queue.PLAN_SERVED_PRICE,
+        "claude-opus-5-5": CORE_PRICES["claude-opus-5-5"],
     }
     assert [(route.model, route.funding, route.payer) for route in mixed.routes()] == [
-        ("gpt-5.6-sol", PLAN_FUNDED, "member/openai"),
-        ("claude-opus-5", PLATFORM_FUNDED, PLATFORM_PAYER),
+        ("gpt-6.2-sol", PLAN_FUNDED, "member/openai"),
+        ("claude-opus-5-5", PLATFORM_FUNDED, PLATFORM_PAYER),
     ]
     assert recovered == plan
     assert (keyed_byok, plan_byok, mixed_byok) == (True, True, True)
@@ -1923,7 +1923,7 @@ async def test_metered_workspaces_names_only_workspaces_with_unshipped_usage(db:
         metered, _ = await _seed_turn(connection)
         await _seed_turn(connection)
         await UNGATED_LEDGER.record_workspace_usage(
-            connection, metered, "claude-opus-4-8", Usage(input_tokens=10)
+            connection, metered, "claude-opus-5-5", Usage(input_tokens=10)
         )
     candidates = accounting.metered_workspaces(consumer)
     assert await candidates() == (metered,)
@@ -1944,7 +1944,7 @@ async def test_metered_workspaces_names_only_workspaces_with_unshipped_usage(db:
 
     async with workspace_tx() as connection:
         await UNGATED_LEDGER.record_workspace_usage(
-            connection, metered, "claude-opus-4-8", Usage(input_tokens=20)
+            connection, metered, "claude-opus-5-5", Usage(input_tokens=20)
         )
     assert await candidates() == (metered,)
 

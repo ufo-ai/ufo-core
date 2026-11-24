@@ -48,7 +48,7 @@ async def _seed_agent(
                 workspace_id=workspace_id,
                 name=name,
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 is_main=main,
                 visibility=visibility,
                 provisioned_by=CHAT_EXTENSION if adopted else None,

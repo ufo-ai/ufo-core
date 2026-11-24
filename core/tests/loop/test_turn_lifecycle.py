@@ -200,9 +200,9 @@ async def test_turn_round_trip_bills_and_persists(surface: Turns) -> None:
     assert streamed == "echo:1"
     assert terminal["status"] == "done"
     assert terminal["tokens"] == 10
-    assert terminal["cost_micro_usd"] == 110
+    assert terminal["cost_micro_usd"] == 88
     assert terminal["cache_percent"] == 0
-    assert terminal["model"] == "claude-opus-4-8"
+    assert terminal["model"] == "claude-opus-5-5"
     assert terminal["reasoning"] == "low"
     assert SEEN_REASONING == ["low"]
     status, conversation_id = await _turn_row(turn_id)
@@ -215,7 +215,7 @@ async def test_turn_round_trip_bills_and_persists(surface: Turns) -> None:
                 )
             )
         ).one()
-    assert (int(billed.amount), int(billed.priced_micro_usd)) == (10, 110)
+    assert (int(billed.amount), int(billed.priced_micro_usd)) == (10, 88)
     _, _, blob = _runtime_parts()
     stored = await _read_transcript(blob, conversation_id, 1)
     assert stored.seq == 1
@@ -292,7 +292,7 @@ async def test_auto_model_resolves_to_the_configured_default(surface: Turns) -> 
     turn_id = await surface.admit(seed, "ping")
     _, terminal = await surface.consume(seed, turn_id)
     assert terminal["status"] == "done"
-    assert terminal["model"] == "claude-opus-4-8"
+    assert terminal["model"] == "claude-opus-5-5"
 
 
 async def test_turn_prompt_uses_the_models_knowledge_cutoff(
@@ -311,7 +311,7 @@ async def test_turn_prompt_uses_the_models_knowledge_cutoff(
     _, terminal = await surface.consume(seed, turn_id)
     assert terminal["status"] == "done"
     assert cutoffs == [STANDIN_REGISTRY.spec(PINNED_MODEL).knowledge_cutoff]
-    assert cutoffs != [STANDIN_REGISTRY.spec("claude-opus-4-8").knowledge_cutoff]
+    assert cutoffs != [STANDIN_REGISTRY.spec("claude-opus-5-5").knowledge_cutoff]
 
 
 async def test_turn_rollover_uses_the_models_policy(
@@ -335,11 +335,11 @@ async def test_turn_rollover_uses_the_models_policy(
     _, terminal = await surface.consume(seed, turn_id)
     assert terminal["status"] == "done"
     assert windows == [STANDIN_REGISTRY.spec(PINNED_MODEL).context_window]
-    assert windows != [STANDIN_REGISTRY.spec("claude-opus-4-8").context_window]
+    assert windows != [STANDIN_REGISTRY.spec("claude-opus-5-5").context_window]
     assert triggers == [STANDIN_REGISTRY.spec(PINNED_MODEL).rollover_trigger_tokens]
-    assert triggers != [STANDIN_REGISTRY.spec("claude-opus-4-8").rollover_trigger_tokens]
+    assert triggers != [STANDIN_REGISTRY.spec("claude-opus-5-5").rollover_trigger_tokens]
     assert repeated == [STANDIN_REGISTRY.spec(PINNED_MODEL).repeated_tool_rollover]
-    assert repeated != [STANDIN_REGISTRY.spec("claude-opus-4-8").repeated_tool_rollover]
+    assert repeated != [STANDIN_REGISTRY.spec("claude-opus-5-5").repeated_tool_rollover]
 
 
 async def test_a_turn_reads_its_provider_from_the_spec_registered_for_its_model(
@@ -358,7 +358,7 @@ async def test_a_turn_reads_its_provider_from_the_spec_registered_for_its_model(
     _, terminal = await surface.consume(seed, turn_id)
     assert terminal["status"] == "done"
     assert providers == [STANDIN_REGISTRY.spec(PINNED_MODEL).provider]
-    assert providers != [STANDIN_REGISTRY.spec("claude-opus-4-8").provider]
+    assert providers != [STANDIN_REGISTRY.spec("claude-opus-5-5").provider]
 
 
 async def test_cost_ticks_stream_as_a_turn_accrues_spend(surface: Turns) -> None:
@@ -367,7 +367,7 @@ async def test_cost_ticks_stream_as_a_turn_accrues_spend(surface: Turns) -> None
     turn_id = await surface.admit(seed, "ping")
     costs = await surface.consume_costs(seed, turn_id)
     assert costs
-    assert costs[-1] == {"cost_micro_usd": 110, "tokens": 10}
+    assert costs[-1] == {"cost_micro_usd": 88, "tokens": 10}
 
 
 async def test_second_turn_continues_the_conversation(surface: Turns) -> None:
@@ -565,7 +565,7 @@ async def _running_turn(subagent_profile: str | None = None) -> tuple[UUID, UUID
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -693,10 +693,10 @@ async def test_stale_setup_failure_cannot_end_the_live_attempt(db: None) -> None
     assert row.terminal is None
 
 
-OWN_ACCOUNT_MODEL = "gpt-5.6-sol"
+OWN_ACCOUNT_MODEL = "gpt-6.2-sol"
 
 
-BACKGROUND_MODEL = "gpt-5.6-luna"
+BACKGROUND_MODEL = "gpt-6-luna"
 
 
 OWN_ACCOUNT_PROFILE = SubagentProfile(
@@ -805,8 +805,8 @@ class ConnectedAccountModel:
         yield Usage(input_tokens=5, output_tokens=5)
 
 
-PLAN_ACCOUNT_MODEL = "claude-opus-4-8"
-PLAN_FALLBACK_MODEL = "claude-sonnet-5"
+PLAN_ACCOUNT_MODEL = "claude-opus-5-5"
+PLAN_FALLBACK_MODEL = "claude-sonnet-5-5"
 
 
 PLAN_ACCOUNT_PROFILE = SubagentProfile(
@@ -1514,7 +1514,7 @@ async def test_subagent_bills_under_its_profile_model_not_the_parents(
     parent = await surface.admit(seed, "spawn-pinned")
     _, terminal = await surface.consume(seed, parent)
     assert terminal["status"] == "done"
-    assert terminal["model"] == "claude-opus-4-8"
+    assert terminal["model"] == "claude-opus-5-5"
     async with workspace_tx() as connection:
         child = (
             await connection.execute(
@@ -1546,7 +1546,7 @@ async def test_subagent_bills_under_its_profile_model_not_the_parents(
             )
         ).scalar_one()
     assert child_model == PINNED_MODEL
-    assert parent_model == "claude-opus-4-8"
+    assert parent_model == "claude-opus-5-5"
 
     sibling_parent = await surface.admit(seed, "spawn-subagent")
     _, sibling_terminal = await surface.consume(seed, sibling_parent)
@@ -1567,14 +1567,14 @@ async def test_subagent_bills_under_its_profile_model_not_the_parents(
     assert sibling.subagent_profile == "roundtrip"
     assert ROUNDTRIP_PROFILE.models == ()
     assert PINNED_PROFILE.output_model is ROUNDTRIP_PROFILE.output_model
-    assert sibling_model == "claude-opus-4-8"
+    assert sibling_model == "claude-opus-5-5"
 
 
 async def test_runtime_config_model_overrides_the_parent_and_profile_models(
     surface: Turns,
 ) -> None:
     seed = await _bootstrap()
-    runtime_config = TurnRuntimeConfig(model="claude-sonnet-5")
+    runtime_config = TurnRuntimeConfig(model="claude-sonnet-5-5")
     parent = await surface.admit(seed, "spawn-pinned", runtime_config=runtime_config)
     _, terminal = await surface.consume(seed, parent)
     assert terminal["status"] == "done"
@@ -1593,7 +1593,7 @@ async def test_runtime_config_model_overrides_the_parent_and_profile_models(
                 .order_by(tables.ledger.c.turn_id)
             )
         ).scalars()
-    assert set(models) == {"claude-sonnet-5"}
+    assert set(models) == {"claude-sonnet-5-5"}
     assert TurnRuntimeConfig.model_validate(child.runtime_config) == runtime_config.model_copy(
         update={"connections": ()}
     )
@@ -1663,7 +1663,7 @@ async def test_a_document_pins_one_profiles_model_and_leaves_the_parent_alone(
     _config, _hub, blob = dbos_runtime
     seed = await _bootstrap()
     digest = await store_environment_document(
-        blob, b'{"profiles": {"pinned": {"model": "claude-sonnet-5"}}}'
+        blob, b'{"profiles": {"pinned": {"model": "claude-sonnet-5-5"}}}'
     )
     parent = await surface.admit(
         seed, "spawn-pinned", runtime_config=TurnRuntimeConfig(environment=digest)
@@ -1685,8 +1685,8 @@ async def test_a_document_pins_one_profiles_model_and_leaves_the_parent_alone(
                 )
             ).all()
         )
-    assert models[child] == "claude-sonnet-5"
-    assert models[UUID(parent)] != "claude-sonnet-5"
+    assert models[child] == "claude-sonnet-5-5"
+    assert models[UUID(parent)] != "claude-sonnet-5-5"
 
 
 REPLACED_CHILD_PROMPT = "OVERRIDDEN ROUNDTRIP: echo the value back under the arm's prompt."
@@ -1708,7 +1708,7 @@ async def test_a_replaced_prompt_on_a_spawned_child_keeps_the_finish_contract(
     parent = await surface.admit(
         seed,
         "spawn-pinned",
-        runtime_config=TurnRuntimeConfig(model="claude-sonnet-5", environment=digest),
+        runtime_config=TurnRuntimeConfig(model="claude-sonnet-5-5", environment=digest),
     )
     _text, terminal = await surface.consume(seed, parent)
     assert terminal["status"] == "done"
@@ -2120,16 +2120,16 @@ def test_profile_model_route_uses_connected_models_then_its_fallback() -> None:
     runtime = SimpleNamespace(registry=SimpleNamespace(resolve=lambda model: model))
     profile = replace(
         OWN_ACCOUNT_PROFILE,
-        models=("claude-opus-5", OWN_ACCOUNT_MODEL, "z-ai/glm-5.3"),
+        models=("claude-opus-5-5", OWN_ACCOUNT_MODEL, "z-ai/glm-5.3"),
     )
 
     with ws(uuid4()):
         assert loop_queue._subagent_models(profile, agent, runtime, None, None) == ("z-ai/glm-5.3",)
         with model_credentials(
-            {"claude-opus-5": "anthropic/member", OWN_ACCOUNT_MODEL: "openai/member"}
+            {"claude-opus-5-5": "anthropic/member", OWN_ACCOUNT_MODEL: "openai/member"}
         ):
             assert loop_queue._subagent_models(profile, agent, runtime, None, None) == (
-                "claude-opus-5",
+                "claude-opus-5-5",
                 OWN_ACCOUNT_MODEL,
                 "z-ai/glm-5.3",
             )

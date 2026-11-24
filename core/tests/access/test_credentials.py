@@ -79,8 +79,8 @@ DATADOG_SITES = HostChoice(
 
 """The two models one coding turn asks OpenAI for: the one the member's account serves, and the
 deploy's own background model that summarizes the same turn's tool calls."""
-BACKGROUND_MODEL = "gpt-5.6-luna"
-OWN_ACCOUNT_MODEL = "gpt-5.6-sol"
+BACKGROUND_MODEL = "gpt-6-luna"
+OWN_ACCOUNT_MODEL = "gpt-6.2-sol"
 
 
 def _keyed_manifest() -> Manifest:
@@ -1044,7 +1044,7 @@ async def test_a_rejected_member_token_cannot_retry_on_another_payer(db: None) -
     assert served == ["member-key"]
 
 
-OTHER_ACCOUNT_MODEL = "claude-opus-5"
+OTHER_ACCOUNT_MODEL = "claude-opus-5-5"
 
 
 def _two_account_registry(served: list[str]) -> ModelRegistry:

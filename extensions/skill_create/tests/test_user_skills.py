@@ -184,7 +184,7 @@ async def _agent(workspace_id: UUID, name: str) -> UUID:
                 workspace_id=workspace_id,
                 name=name,
                 prompt="p",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -751,7 +751,7 @@ def _tool_ctx(
             inbound="save it",
             created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
         audience=conversation_audience(None),

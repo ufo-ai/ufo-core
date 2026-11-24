@@ -35,6 +35,42 @@ from ufo.runtime.workspace import (
     ws_current,
 )
 
+RETIRED_MODEL_SUCCESSORS: dict[str, str] = {
+    "claude-fable-5": "claude-fable-5-2",
+    "claude-fable-5-1": "claude-fable-5-2",
+    "claude-opus-4-6": "claude-opus-5-5",
+    "claude-opus-4-7": "claude-opus-5-5",
+    "claude-opus-4-8": "claude-opus-5-5",
+    "claude-opus-5": "claude-opus-5-5",
+    "claude-sonnet-4-6": "claude-sonnet-5-5",
+    "claude-sonnet-5": "claude-sonnet-5-5",
+    "claude-haiku-4-5": "claude-haiku-5-5",
+    "gpt-5.4": "gpt-6.2-astra",
+    "gpt-5.4-mini": "gpt-6.1-terra",
+    "gpt-5.4-nano": "gpt-6-luna",
+    "gpt-5.5": "gpt-6.2-astra",
+    "gpt-5.6-sol": "gpt-6.2-sol",
+    "gpt-5.6-terra": "gpt-6.1-terra",
+    "gpt-5.6-luna": "gpt-6-luna",
+    "gpt-6-astra": "gpt-6.2-astra",
+    "gpt-6-sol": "gpt-6.2-sol",
+    "gpt-6.1-sol": "gpt-6.2-sol",
+    "anthropic/claude-fable-5": "anthropic/claude-fable-5.2",
+    "anthropic/claude-fable-5.1": "anthropic/claude-fable-5.2",
+    "openai/gpt-5.6-sol": "openai/gpt-6.2-sol",
+    "google/gemini-2.5-pro": "google/gemini-4-neon",
+    "google/gemini-3.7-flash": "google/gemini-4-neon",
+    "deepseek/deepseek-v4-flash": "deepseek/deepseek-v4.1-flash",
+    "z-ai/glm-5.2": "z-ai/glm-5.3",
+    "z-ai/glm-5.2-flash": "z-ai/glm-5.3-flash",
+    "moonshotai/kimi-k3": "moonshotai/kimi-k3.1-pro",
+}
+
+
+def _registered_model(model: str, specs: dict[str, ModelSpec]) -> str:
+    successor = RETIRED_MODEL_SUCCESSORS.get(model)
+    return successor if successor in specs else model
+
 
 @dataclass(frozen=True)
 class _UnavailableAccount:
@@ -148,15 +184,15 @@ class ModelRegistry:
     auto_model: str
 
     def resolve(self, model: str) -> str:
-        """Map the model-agnostic `auto` sentinel to the deploy's configured concrete model; a
-        pinned id passes through."""
-        return self.auto_model if model == AUTO_MODEL else model
+        """Map `auto` and retired ids to the concrete model this deploy serves."""
+        concrete = self.auto_model if model == AUTO_MODEL else model
+        return _registered_model(concrete, self.specs)
 
     def spec(self, model: str) -> ModelSpec:
-        """The spec registered under `model`, or a loud failure — the one seam every fact reads
-        through, so an unknown id fails here once rather than at each consuming layer."""
+        """The spec registered for `model` or its retired-id successor, with unknown ids loud."""
+        resolved = self.resolve(model)
         try:
-            return self.specs[model]
+            return self.specs[resolved]
         except KeyError as miss:
             raise ValueError(f"no model registered for id {model!r}") from miss
 
@@ -165,6 +201,7 @@ class ModelRegistry:
         credential. The workspace's BYOK secret wins when set, else the platform default from env.
         Built per call so a rotated key takes effect without a restart. Fetching it asserts a bound
         workspace (`ws_current`); a key set nowhere fails loud."""
+        model = self.resolve(model)
         spec = self.spec(model)
         if not spec.key_slot and not spec.key_env:
             return ResolvedModelClient(spec.client(spec, ""), PLATFORM_FUNDED, PLATFORM_PAYER)
@@ -212,6 +249,7 @@ class ModelRegistry:
 
     async def payer_for(self, model: str) -> ModelPayer:
         """Resolve the funding identity `client_for` will bind without constructing its client."""
+        model = self.resolve(model)
         spec = self.spec(model)
         if not spec.key_slot and not spec.key_env:
             return ModelPayer(PLATFORM_FUNDED, PLATFORM_PAYER)
@@ -264,17 +302,20 @@ def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegi
         if spec.id in specs:
             raise ValueError(f"two model specs registered for id {spec.id!r}")
         specs[spec.id] = spec
-    if config.models.auto_model not in specs:
+    auto_model = _registered_model(config.models.auto_model, specs)
+    if auto_model not in specs:
         raise ValueError(
             f"models.auto_model {config.models.auto_model!r} is not a registered model id — "
             "every agent that defers its model resolves through it"
         )
-    if config.models.ambient_reply_model not in specs:
+    ambient_reply_model = _registered_model(config.models.ambient_reply_model, specs)
+    if ambient_reply_model not in specs:
         raise ValueError(
             f"models.ambient_reply_model {config.models.ambient_reply_model!r} is not a registered "
             "model id — every ambient reply decision resolves through it"
         )
-    if config.models.background_jobs_model not in specs:
+    background_jobs_model = _registered_model(config.models.background_jobs_model, specs)
+    if background_jobs_model not in specs:
         raise ValueError(
             f"models.background_jobs_model {config.models.background_jobs_model!r} is not a "
             "registered model id — every background job's model call resolves through it"
@@ -282,7 +323,7 @@ def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegi
     for manifest in manifests:
         for profile in manifest.subagents:
             for model in profile.models:
-                resolved = config.models.auto_model if model == AUTO_MODEL else model
+                resolved = auto_model if model == AUTO_MODEL else _registered_model(model, specs)
                 if resolved not in specs:
                     raise ValueError(
                         f"subagent profile {profile.name!r} model {model!r} is not a registered "
@@ -291,5 +332,5 @@ def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegi
     return ModelRegistry(
         specs=specs,
         pricing=pricing_from({model: spec.price for model, spec in specs.items()}),
-        auto_model=config.models.auto_model,
+        auto_model=auto_model,
     )

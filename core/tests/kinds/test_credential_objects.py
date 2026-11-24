@@ -103,7 +103,7 @@ def _tool_context(workspace_id: UUID, speaker_member_id: UUID | None = None) -> 
             inbound="hi",
             created_at=datetime(2026, 7, 16, tzinfo=UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-5-5"),
         spawn=_unavailable_spawn,
         speaker_member_id=speaker_member_id,
         audience=conversation_audience(None),

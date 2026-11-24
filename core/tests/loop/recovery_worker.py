@@ -203,7 +203,7 @@ def _install_runtime(env: _Env, model: _CrashModel | _AnswerModel) -> None:
             for spec in CORE_MODEL_SPECS
         },
         pricing=CORE_PRICING,
-        auto_model="claude-opus-4-8",
+        auto_model="claude-opus-5-5",
     )
     recovery_dbos = replay_safe_client(env.system_url)
     loop_queue.init_runtime(
@@ -301,7 +301,7 @@ async def _seed(env: _Env) -> None:
                 workspace_id=env.workspace_id,
                 name="assistant",
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model="claude-opus-5-5",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

@@ -617,6 +617,7 @@ def run(fleet: Fleet) -> None:
         config.sandbox.ingress_public_url,
         (AUTO_MODEL, *sorted(registry.specs)),
         probes=probes,
+        resolve_model=registry.resolve,
         runtime_identity=runtime_identity,
         connectors=connectors,
         spend=spend,
@@ -1320,6 +1321,7 @@ def _mount_shared_surfaces(
     spend: SpendGates = NO_SPEND_GATES,
     ledger: Ledger = UNGATED_LEDGER,
     ambient_reply_for: "Callable[[str], AmbientReplyClassifier] | None" = None,
+    resolve_model: "Callable[[str], str] | None" = None,
 ) -> None:
     app.add_middleware(WorkspaceScopeBoundary)
     if connectors is None:
@@ -1381,6 +1383,7 @@ def _mount_shared_surfaces(
             _ingress_public_url=ingress_public_url,
             _deploy_sandbox_internet=deploy_sandbox_internet,
             _models=models,
+            _resolve_model=resolve_model,
             _store_environment_document=store_environment_document,
             _store_environment_file=store_environment_file,
             _sandbox_sizes=sandbox_sizes,

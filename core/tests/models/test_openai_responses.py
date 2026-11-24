@@ -1,6 +1,6 @@
 """The OpenAI client's Responses-surface path (`OpenAIClient._complete_responses`, selected by
 `spec.api_surface == "responses"`) — the streaming/translation/retry/truncation/refusal/empty
-contract for a model like `gpt-5.6-terra` that is called on `/v1/responses`."""
+contract for a model like `gpt-6.1-terra` that is called on `/v1/responses`."""
 
 import logging
 from collections.abc import AsyncIterator
@@ -63,7 +63,7 @@ from ufo.harness.rounds import ModelStreamInterrupted
 from ufo.schema.records import Usage
 
 RESPONSES_SPEC = ModelSpec(
-    id="gpt-5.6-terra",
+    id="gpt-6.1-terra",
     provider="openai",
     client=lambda spec, key: OpenAIClient(client=cast(openai.AsyncOpenAI, None), spec=spec),
     price=ModelPrice(0, 0, 0, 0, 0, cache_write_30m=1),
@@ -105,7 +105,7 @@ def _response(
     return Response(
         id="response-1",
         created_at=0,
-        model="gpt-5.6-terra",
+        model="gpt-6.1-terra",
         object="response",
         output=[] if output is None else output,
         parallel_tool_calls=True,
@@ -123,7 +123,7 @@ def _responses_client(scripted: ScriptedResponses) -> OpenAIClient:
 
 def _request() -> ModelRequest:
     return ModelRequest(
-        model="gpt-5.6-terra",
+        model="gpt-6.1-terra",
         system="s",
         messages=(Message(role="user", content="hi"),),
         max_tokens=64,
@@ -258,7 +258,7 @@ async def test_responses_path_translates_images_tools_and_usage() -> None:
         )
     )
     request = ModelRequest(
-        model="gpt-5.6-terra",
+        model="gpt-6.1-terra",
         system="be terse",
         max_tokens=128,
         conversation_cache_ttl="5m",

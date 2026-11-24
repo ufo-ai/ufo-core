@@ -26,7 +26,7 @@ from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION, SPEND_HOLD_ROUND_INDEX, TerminalFrame
 
 DOLLAR = 1_000_000
-REFUSED_MODEL = "gpt-5.6-luna"
+REFUSED_MODEL = "gpt-6-luna"
 HELD_NOTICE = "This conversation is held until the workspace has credit."
 SPEND = SpendGates(gates=(SampleGate(GateDeploy(public_base_url=None, home_surface=None)),))
 
