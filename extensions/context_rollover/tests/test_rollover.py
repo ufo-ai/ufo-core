@@ -906,7 +906,9 @@ def test_round_output_budget_fits_under_the_rollover_line() -> None:
 
 async def test_the_line_derives_from_the_model_window(tmp_path: Path) -> None:
     rollover = _rollover(tmp_path, model_id="claude-haiku-5-5")
-    derived = rollover.serving.spec.context_window - RECOVERY_RESERVE_TOKENS - ROLLOVER_BUFFER_TOKENS
+    derived = (
+        rollover.serving.spec.context_window - RECOVERY_RESERVE_TOKENS - ROLLOVER_BUFFER_TOKENS
+    )
     under = (
         Message(role="user", content="a " + "x" * (derived - 5_000) * CHARS_PER_TOKEN),
         Message(role="assistant", content="b"),
@@ -923,7 +925,9 @@ async def test_a_connector_heavy_window_over_the_real_line_rolls_over(tmp_path: 
     """The live failure behind #282: URL-dense connector JSON tokenizes at 2.2 characters per token,
     so a window read any sparser puts the line past the provider's own limit."""
     rollover = _rollover(tmp_path, model_id="claude-haiku-5-5")
-    derived = rollover.serving.spec.context_window - RECOVERY_RESERVE_TOKENS - ROLLOVER_BUFFER_TOKENS
+    derived = (
+        rollover.serving.spec.context_window - RECOVERY_RESERVE_TOKENS - ROLLOVER_BUFFER_TOKENS
+    )
     window = connector_window()
 
     assert CONNECTOR_WINDOW_TOKENS > derived
