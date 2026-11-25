@@ -75,7 +75,7 @@ from ufo.runtime.ext.writeback import (
     mid_turn_reply_workspaces,
     writeback_workspaces,
 )
-from ufo.runtime.hub import Reply
+from ufo.runtime.hub import Reply, TerminalFrame
 from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX
 from ufo.runtime.surfaces import hub_tail
 from ufo.runtime.surfaces.admission import Admission
@@ -943,6 +943,55 @@ async def test_a_pending_arrival_refuses_the_commit_and_the_refusal_is_logged(
     ]
     assert [(entry["turn_status"], entry["pending"]) for entry in guard] == [("done", 1)]
     assert [entry["answer_chars"] for entry in recycled] == [len("first answer")]
+
+
+@pytest.mark.parametrize(
+    ("answers", "expected"),
+    [
+        (("first answer", "<response></response>"), "first answer"),
+        (("first answer", "<response/>", "<response></response>"), "first answer"),
+        (("first answer", "updated answer", "<response></response>"), "updated answer"),
+        (("first answer", CLOSING_TEXT), CLOSING_TEXT),
+        (("<response/>", "<response></response>"), "<response></response>"),
+    ],
+)
+async def test_internal_arrivals_do_not_replace_an_uncommitted_reply_with_silence(
+    db: None, tmp_path: Path, answers: tuple[str, ...], expected: str
+) -> None:
+    turn = await _seed_turn("queued", None)
+    member = await _conversation_member(turn.conversation_id)
+
+    class InternalArrivalModel:
+        rounds = 0
+
+        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+            index = self.rounds
+            self.rounds += 1
+            if index:
+                assert any(
+                    isinstance(message.content, str) and "<spawn_result>" in message.content
+                    for message in request.messages
+                )
+            if index < len(answers) - 1:
+                await _queue_arrival(
+                    turn, "<spawn_result>Work finished.</spawn_result>", admission_source="internal"
+                )
+            yield TextDelta(text=answers[index])
+            yield Usage(input_tokens=1, output_tokens=1)
+
+    with ws(turn.workspace_id):
+        frame = await _engine(turn, InternalArrivalModel(), tmp_path, member_id=member).run()
+        async with workspace_tx() as connection:
+            terminal = (
+                await connection.execute(
+                    sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn.id)
+                )
+            ).scalar_one()
+
+    assert frame is not None
+    assert frame.status == "done"
+    assert TerminalFrame.model_validate(terminal).text == expected
+    assert frame.text == expected
 
 
 @dataclass

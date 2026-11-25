@@ -179,7 +179,7 @@ from ufo.runtime.ext.manifest import (
     UserPromptSubmit,
 )
 from ufo.runtime.ext.source_reader import SourceReader
-from ufo.runtime.ext.surface import member_message_ref, member_message_text
+from ufo.runtime.ext.surface import is_silence_sentinel, member_message_ref, member_message_text
 from ufo.runtime.hub import (
     Absorbed,
     Activity,
@@ -1980,6 +1980,7 @@ class TurnEngine:
             injected = prepared.injected
             self._window.messages = messages
             change_paths: dict[str, None] = {}
+            recycled_answer = ""
             while True:
                 (
                     final_messages,
@@ -1999,7 +2000,9 @@ class TurnEngine:
                     change_paths,
                     created,
                 )
-                carried, delivered = self._carried_artifacts(answer)
+                silent = is_silence_sentinel(answer)
+                reply = (recycled_answer or answer) if silent else answer
+                carried, delivered = self._carried_artifacts(reply)
                 staged = await self._stage_carried_artifacts(carried)
                 await self.hooks.fire(
                     "stop",
@@ -2029,6 +2032,8 @@ class TurnEngine:
                         answer_chars=len(answer),
                         absorbed=len(absorbed_ids),
                     )
+                    if not silent and answer.strip():
+                        recycled_answer = answer
                     messages = (*final_messages, Message(role="assistant", content=answer))
                     continue
                 if frame.status == "done":
