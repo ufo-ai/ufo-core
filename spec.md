@@ -792,7 +792,9 @@ reads it only under `member_context_read`.
   keep those answer modes on every surface. A durable surface may also `tail` a turn for live
   feedback while it runs — a thread status, interim progress posts — and live feedback is never
   delivery, which stays the poller's: a `speak` post per marked span while the turn runs, then the
-  terminal reply. A comment admitted from another surface writes its `speak` delivery beside the
+  terminal reply. If an internal arrival blocks a loop's terminal commit, its substantive answer
+  becomes a `speak` post before the loop restarts. The next loop supplies its own terminal reply,
+  including silence. A comment admitted from another surface writes its `speak` delivery beside the
   inbound in the same transaction, so the conversation's own surface posts the comment notice
   before the agent's reply. `Writeback` and `MidTurnReply` carry `speaker_member_id`, the member
   whose message the turn answers and None for a turn no member spoke (a scheduled run), so a
@@ -801,8 +803,8 @@ reads it only under `member_context_read`.
 - **Live** (a portal; the terminal surface is its directive-stream twin) — the member's connection is held open, so
   admission registers nothing and the surface delivers by `tail`-ing the turn's frames off the hub
   over SSE in its own route. The poller only processes turns that registered a writeback, so it is a
-  no-op for a live surface — the efficient downgrade, not a second seam. A marked span reaches a
-  live member as a `Reply` frame on that stream and nowhere durable: a live surface stores no
+  no-op for a live surface — the efficient downgrade, not a second seam. A loop's separate closing
+  answer and each marked span reach a live member as a `Reply` frame. A live surface stores no
   messages, so a page loaded mid-turn draws the transcript without the spans already shown — the
   accepted gap — and the closing reply carries those words again. What a step read rides the same
   stream as a `Sources` frame — the web pages and workspace pages a `user_prompt_submit`

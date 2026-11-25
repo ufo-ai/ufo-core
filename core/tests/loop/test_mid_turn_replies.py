@@ -75,7 +75,7 @@ from ufo.runtime.ext.writeback import (
     mid_turn_reply_workspaces,
     writeback_workspaces,
 )
-from ufo.runtime.hub import Reply
+from ufo.runtime.hub import Reply, TerminalFrame
 from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX
 from ufo.runtime.surfaces import hub_tail
 from ufo.runtime.surfaces.admission import Admission
@@ -943,6 +943,72 @@ async def test_a_pending_arrival_refuses_the_commit_and_the_refusal_is_logged(
     ]
     assert [(entry["turn_status"], entry["pending"]) for entry in guard] == [("done", 1)]
     assert [entry["answer_chars"] for entry in recycled] == [len("first answer")]
+
+
+@pytest.mark.parametrize(
+    ("source", "answers", "spoken"),
+    [
+        ("internal", ("first answer", "<response></response>"), ("first answer",)),
+        ("internal", ("first answer", CLOSING_TEXT), ("first answer",)),
+        ("internal", ("<response/>", "<response></response>"), ()),
+        (
+            "internal",
+            ("first answer", "<response/>", "second answer", "<response></response>"),
+            ("first answer", "second answer"),
+        ),
+        ("member", ("first answer", "<response></response>"), ()),
+    ],
+)
+async def test_a_restarted_loop_delivers_its_answer_only_for_exogenous_arrivals(
+    db: None, tmp_path: Path, source: str, answers: tuple[str, ...], spoken: tuple[str, ...]
+) -> None:
+    turn = await _seed_turn("queued", None)
+    member = await _conversation_member(turn.conversation_id)
+    hub = RecordingHub()
+    mid_turn, _writeback, surface = _cli_pollers(
+        turn.workspace_id, FilesystemBlobStore(root=tmp_path)
+    )
+    body = "<spawn_result>Work finished.</spawn_result>" if source == "internal" else "New arrival"
+    checkpoints: list[tuple[str, ...]] = []
+
+    class ArrivalModel:
+        rounds = 0
+
+        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+            index = self.rounds
+            self.rounds += 1
+            if index:
+                assert any(
+                    isinstance(message.content, str) and body in message.content
+                    for message in request.messages
+                )
+                await mid_turn.drain()
+                checkpoints.append(tuple(text for _, _, text in surface.spoken))
+            if index < len(answers) - 1:
+                await _queue_arrival(
+                    turn, body, member if source == "member" else None, admission_source=source
+                )
+            yield TextDelta(text=answers[index])
+            yield Usage(input_tokens=1, output_tokens=1)
+
+    with ws(turn.workspace_id):
+        model = ArrivalModel()
+        frame = await replace(_engine(turn, model, tmp_path, member_id=member), hub=hub).run()
+        await mid_turn.drain()
+        async with workspace_tx() as connection:
+            terminal = (
+                await connection.execute(
+                    sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn.id)
+                )
+            ).scalar_one()
+
+    assert frame is not None
+    assert frame.status == "done"
+    assert TerminalFrame.model_validate(terminal).text == answers[-1]
+    assert frame.text == answers[-1]
+    assert checkpoints[-1] == spoken
+    assert tuple(text for _, _, text in surface.spoken) == spoken
+    assert tuple(reply.text for reply in hub.frames if isinstance(reply, Reply)) == spoken
 
 
 @dataclass

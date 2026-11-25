@@ -179,7 +179,7 @@ from ufo.runtime.ext.manifest import (
     UserPromptSubmit,
 )
 from ufo.runtime.ext.source_reader import SourceReader
-from ufo.runtime.ext.surface import member_message_ref, member_message_text
+from ufo.runtime.ext.surface import is_silence_sentinel, member_message_ref, member_message_text
 from ufo.runtime.hub import (
     Absorbed,
     Activity,
@@ -296,6 +296,7 @@ EMPTY_RESPONSE_NUDGE = "Previous model response was empty. Answer now."
 MODEL_TRUNCATED_ERROR_CLASS = ModelResponseTruncated.__name__
 MAX_MIDSTREAM_ROUND_RETRIES = 1
 CARRIED_FILE_KEY_PART = "artifact"
+LOOP_CLOSING_ROUND_INDEX = 0
 PROVIDER_RETRY_NOTICE = "The model provider limited this task. It will retry after {retry_at}."
 MODEL_ROUTE_FAILURES: Mapping[str, ModelRouteFailure] = {
     ModelAccountRateLimited.__name__: "rate_limited",
@@ -1980,6 +1981,7 @@ class TurnEngine:
             injected = prepared.injected
             self._window.messages = messages
             change_paths: dict[str, None] = {}
+            closing_index = 0
             while True:
                 (
                     final_messages,
@@ -2021,6 +2023,7 @@ class TurnEngine:
                     unless_arrivals=True,
                     absorbed=tuple(absorbed_ids),
                     carried=staged,
+                    closing_index=closing_index,
                 )
                 if frame is None:
                     log(
@@ -2029,6 +2032,7 @@ class TurnEngine:
                         answer_chars=len(answer),
                         absorbed=len(absorbed_ids),
                     )
+                    closing_index += 1
                     messages = (*final_messages, Message(role="assistant", content=answer))
                     continue
                 if frame.status == "done":
@@ -2666,37 +2670,41 @@ class TurnEngine:
         if not spoken or self.turn.subagent_profile is not None:
             return
         for span_index, reply in enumerate(spoken):
-            reply_id = mid_turn_reply_id_for(self.turn.id, round_index, span_index, self.attempt)
             async with workspace_tx() as connection:
-                insert = (
-                    postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
-                )
-                written = await connection.execute(
-                    insert(tables.mid_turn_reply)
-                    .values(
-                        id=reply_id,
-                        workspace_id=self.turn.workspace_id,
-                        turn_id=self.turn.id,
-                        round_index=round_index,
-                        span_index=span_index,
-                        message_ref=reply.message_ref,
-                        text=reply.text,
-                        status=WRITEBACK_PENDING,
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                    .on_conflict_do_nothing(index_elements=[tables.mid_turn_reply.c.id])
-                )
-            if written.rowcount == 1:
-                log(
-                    "turn.reply_spoken",
-                    turn_id=str(self.turn.id),
-                    reply_id=str(reply_id),
-                    message_ref=str(reply.message_ref or ""),
-                    round=round_index,
-                    chars=len(reply.text),
-                )
-            await self._publish(Reply(id=reply_id, message_ref=reply.message_ref, text=reply.text))
+                frame = await self._write_reply(connection, round_index, span_index, reply)
+            await self._publish(frame)
+
+    async def _write_reply(
+        self, connection: AsyncConnection, round_index: int, span_index: int, reply: MarkedReply
+    ) -> Reply:
+        reply_id = mid_turn_reply_id_for(self.turn.id, round_index, span_index, self.attempt)
+        insert = postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
+        written = await connection.execute(
+            insert(tables.mid_turn_reply)
+            .values(
+                id=reply_id,
+                workspace_id=self.turn.workspace_id,
+                turn_id=self.turn.id,
+                round_index=round_index,
+                span_index=span_index,
+                message_ref=reply.message_ref,
+                text=reply.text,
+                status=WRITEBACK_PENDING,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+            .on_conflict_do_nothing(index_elements=[tables.mid_turn_reply.c.id])
+        )
+        if written.rowcount == 1:
+            log(
+                "turn.reply_spoken",
+                turn_id=str(self.turn.id),
+                reply_id=str(reply_id),
+                message_ref=str(reply.message_ref or ""),
+                round=round_index,
+                chars=len(reply.text),
+            )
+        return Reply(id=reply_id, message_ref=reply.message_ref, text=reply.text)
 
     async def _stream_closing_spans(self, spoken: tuple[MarkedReply, ...]) -> None:
         """The ufo terminal prints the delta stream and caps on the terminal frame, so without this
@@ -4462,6 +4470,7 @@ class TurnEngine:
         unless_arrivals: bool = False,
         absorbed: tuple[UUID, ...] = (),
         carried: tuple[_CarriedFile, ...] = (),
+        closing_index: int | None = None,
     ) -> TerminalFrame | None:
         delay = COMMIT_RETRY_INITIAL_SECONDS
         while True:
@@ -4479,6 +4488,7 @@ class TurnEngine:
                     absorbed,
                     meter.incomplete_reason,
                     carried,
+                    closing_index,
                 )
                 break
             except Exception as commit_error:
@@ -4489,6 +4499,9 @@ class TurnEngine:
                 )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, COMMIT_RETRY_MAX_SECONDS)
+        if isinstance(frame, Reply):
+            await self._publish(frame)
+            return None
         if frame is None:
             return None
         if committed:
@@ -4541,7 +4554,8 @@ class TurnEngine:
         absorbed: tuple[UUID, ...],
         incomplete_reason: IncompleteReason | None,
         carried: tuple[_CarriedFile, ...] = (),
-    ) -> tuple[TerminalFrame | None, bool]:
+        closing_index: int | None = None,
+    ) -> tuple[TerminalFrame | Reply | None, bool]:
         async with workspace_tx() as connection:
             if unless_arrivals:
                 await connection.execute(
@@ -4549,13 +4563,18 @@ class TurnEngine:
                     .where(tables.conversation.c.id == self.turn.conversation_id)
                     .with_for_update()
                 )
-                pending = (
+                pending, exogenous = (
                     await connection.execute(
-                        sa.select(sa.func.count())
+                        sa.select(
+                            sa.func.count(),
+                            sa.func.count().filter(
+                                tables.inbound_message.c.admission_source == INTERNAL_ADMISSION
+                            ),
+                        )
                         .select_from(tables.inbound_message)
                         .where(*self._owed_arrivals(absorbed))
                     )
-                ).scalar_one()
+                ).one()
                 if pending:
                     log(
                         "turn.commit_refused_by_arrivals",
@@ -4565,6 +4584,20 @@ class TurnEngine:
                         absorbed=len(absorbed),
                     )
                     await self._discard_unreferenced(connection, carried)
+                    if (
+                        exogenous
+                        and closing_index is not None
+                        and self.turn.parent_turn_id is None
+                        and answer.strip()
+                        and not is_silence_sentinel(answer)
+                    ):
+                        reply = await self._write_reply(
+                            connection,
+                            LOOP_CLOSING_ROUND_INDEX,
+                            closing_index,
+                            MarkedReply(text=answer, message_ref=None),
+                        )
+                        return reply, False
                     return None, False
             try:
                 await self._record_usage(connection, usage_events)
